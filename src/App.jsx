@@ -39,7 +39,7 @@ const QUIZ_SUBTITLE = "من تقديم الأستاذ إبراهيم ال مطر
 const REVEAL_OPTIONS_DELAY_MS = 3000;
 const MEDIA_REVEAL_OPTIONS_DELAY_MS = 5000;
 const SCORE_REVEAL_STEP_MS = 1300;
-const SCORE_ANIMATION_HOLD_MS = 1400;
+const SCORE_ANIMATION_HOLD_MS = 850;
 
 function getNow() {
   return Date.now();
@@ -74,8 +74,8 @@ function getServerNow(room, localNow = getNow()) {
 function getQuestionSentAt(room, question) {
   return (
     toMillis(room?.questionSentAt) ||
-    toMillis(room?.updatedAt) ||
     question?.fallbackSentAt ||
+    toMillis(room?.updatedAt) ||
     getNow()
   );
 }
@@ -111,6 +111,11 @@ function getQuestionImageUrl(question) {
 }
 
 function getAnswerStartAt(room, question) {
+  // مصدر ثابت لوقت ظهور الأجوبة، حتى لا يبدأ العد من جديد عند تحديث صفحة المتسابق.
+  if (Number.isFinite(Number(question?.answerStartAtMs))) {
+    return Number(question.answerStartAtMs);
+  }
+
   if (isMediaQuestion(question)) {
     const mediaEndedAt =
       toMillis(room?.mediaEndedAt) ||
@@ -121,11 +126,12 @@ function getAnswerStartAt(room, question) {
 
     if (!mediaEndedAt) return null;
 
-    return mediaEndedAt + MEDIA_REVEAL_OPTIONS_DELAY_MS;
+    return mediaEndedAt + getRevealDelayMs(question);
   }
 
-  return getQuestionSentAt(room, question) + REVEAL_OPTIONS_DELAY_MS;
+  return getQuestionSentAt(room, question) + getRevealDelayMs(question);
 }
+
 
 function getQuestionTimeLeft(question, room, localNow) {
   if (!question) return 0;
@@ -190,6 +196,49 @@ function calculateFinalPoints({ isCorrect, basePoints, jokerApplied }) {
   }
 
   return isCorrect ? basePoints : 0;
+}
+
+function normalizePhoneDigits(value = "") {
+  return String(value)
+    .replace(/[٠-٩]/g, (d) => "٠١٢٣٤٥٦٧٨٩".indexOf(d))
+    .replace(/[۰-۹]/g, (d) => "۰۱۲۳۴۵۶۷۸۹".indexOf(d))
+    .replace(/\D/g, "");
+}
+
+function isValidSaudiMobile(value = "") {
+  return normalizePhoneDigits(value).length === 10;
+}
+
+function getRevealDelayMs(question) {
+  const seconds = Number(question?.answerRevealDelaySeconds ?? question?.revealDelaySeconds);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  return isMediaQuestion(question) ? MEDIA_REVEAL_OPTIONS_DELAY_MS : REVEAL_OPTIONS_DELAY_MS;
+}
+
+function AnimatedNumber({ value = 0 }) {
+  const [displayValue, setDisplayValue] = useState(Number(value) || 0);
+
+  useEffect(() => {
+    const start = Number(displayValue) || 0;
+    const end = Number(value) || 0;
+    if (start === end) return;
+
+    const duration = 700;
+    const startedAt = performance.now();
+    let frameId;
+
+    function tick(now) {
+      const progress = clamp((now - startedAt) / duration, 0, 1);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      setDisplayValue(Math.round(start + (end - start) * eased));
+      if (progress < 1) frameId = requestAnimationFrame(tick);
+    }
+
+    frameId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frameId);
+  }, [value]);
+
+  return <>{displayValue}</>;
 }
 
 /* Hooks */
@@ -349,26 +398,31 @@ function useMessages() {
 /* Firebase actions */
 
 async function createOrResetRoom() {
-  await setDoc(doc(db, "rooms", ROOM_ID), {
-    title: QUIZ_TITLE,
-    subtitle: QUIZ_SUBTITLE,
-    stage: "home",
-    currentQuestion: null,
-    currentQuestionIndex: -1,
-    questionSentAt: null,
-    audioStartedAt: null,
-    mediaStartedAt: null,
-    mediaEndedAt: null,
-    questionIgnored: false,
-    ignoredQuestionIds: {},
-    processedQuestionId: null,
-    collectingBonusByPlayer: {},
-    collectingBonusJokerByPlayer: {},
-    collectingBonusPlayerId: null,
-    collectingBonusPoints: 0,
-    rankMovementByPlayer: {},
-    updatedAt: serverTimestamp(),
-  });
+  await setDoc(
+    doc(db, "rooms", ROOM_ID),
+    {
+      title: QUIZ_TITLE,
+      subtitle: QUIZ_SUBTITLE,
+      stage: "home",
+      currentQuestion: null,
+      currentQuestionIndex: -1,
+      questionSentAt: null,
+      audioStartedAt: null,
+      audioEndedAt: null,
+      mediaStartedAt: null,
+      mediaEndedAt: null,
+      questionIgnored: false,
+      ignoredQuestionIds: {},
+      processedQuestionId: null,
+      collectingBonusByPlayer: {},
+      collectingBonusJokerByPlayer: {},
+      collectingBonusPlayerId: null,
+      collectingBonusPoints: 0,
+      rankMovementByPlayer: {},
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true }
+  );
 }
 
 async function clearCollection(pathSegments) {
@@ -417,33 +471,41 @@ async function resetAndStartRegistration() {
 }
 
 async function sendQuestion(question, index) {
-  await setDoc(
-    doc(db, "rooms", ROOM_ID),
-    {
-      stage: "question",
-      currentQuestion: {
-        ...question,
-        questionId: question.id,
-        fallbackSentAt: getNow(),
-        fallbackMediaStartedAt: null,
-        fallbackMediaEndedAt: null,
-      },
-      currentQuestionIndex: index,
-      questionSentAt: serverTimestamp(),
-      audioStartedAt: null,
-      mediaStartedAt: null,
-      mediaEndedAt: null,
-      questionIgnored: false,
-      processedQuestionId: null,
-      collectingBonusByPlayer: {},
-      collectingBonusJokerByPlayer: {},
-      collectingBonusPlayerId: null,
-      collectingBonusPoints: 0,
-      rankMovementByPlayer: {},
+  const sentAtMs = getNow();
+  const cleanQuestion = {
+    ...question,
+    questionId: question.id,
+    fallbackSentAt: sentAtMs,
+    sentAtMs,
+    answerStartAtMs: isMediaQuestion(question) ? null : sentAtMs + getRevealDelayMs(question),
+    fallbackMediaStartedAt: null,
+    fallbackMediaEndedAt: null,
+    imageUrl: question.type === "image" ? question.imageUrl || "" : "",
+    questionImageUrl: question.type === "image" ? question.questionImageUrl || question.imageUrl || "" : "",
+    optionImageUrls: question.type === "image" ? question.optionImageUrls || [] : [],
+    mediaUrl: isMediaQuestion(question) ? getQuestionMediaUrl(question) : "",
+    audioUrl: question.type === "audio" ? getQuestionMediaUrl(question) : "",
+    videoUrl: question.type === "video" ? getQuestionMediaUrl(question) : "",
+  };
+
+  await updateDoc(doc(db, "rooms", ROOM_ID), {
+    stage: "question",
+    currentQuestion: cleanQuestion,
+    currentQuestionIndex: index,
+    questionSentAt: serverTimestamp(),
+    audioStartedAt: null,
+    audioEndedAt: null,
+    mediaStartedAt: null,
+    mediaEndedAt: null,
+    questionIgnored: false,
+    processedQuestionId: null,
+    collectingBonusByPlayer: {},
+    collectingBonusJokerByPlayer: {},
+    collectingBonusPlayerId: null,
+    collectingBonusPoints: 0,
+    rankMovementByPlayer: {},
     updatedAt: serverTimestamp(),
-    },
-    { merge: true }
-  );
+  });
 }
 
 async function startMediaQuestion() {
@@ -457,21 +519,22 @@ async function startMediaQuestion() {
   });
 }
 
-async function finishMediaQuestion() {
+async function finishMediaQuestion(question = null) {
   const fallbackMediaEndedAt = getNow();
+  const answerStartAtMs = fallbackMediaEndedAt + getRevealDelayMs(question);
 
   await updateDoc(doc(db, "rooms", ROOM_ID), {
     mediaEndedAt: serverTimestamp(),
     audioEndedAt: serverTimestamp(),
     "currentQuestion.fallbackMediaEndedAt": fallbackMediaEndedAt,
+    "currentQuestion.answerStartAtMs": answerStartAtMs,
     updatedAt: serverTimestamp(),
   });
 }
 
-async function launchSystemCheck() {
-  const ok = window.confirm("هل تريد طرح سؤال: هل كل شي تمام؟ للمتسابقين الآن؟");
-  if (!ok) return;
 
+
+async function launchSystemCheck() {
   await setDoc(
     doc(db, "rooms", ROOM_ID),
     {
@@ -480,6 +543,7 @@ async function launchSystemCheck() {
         active: true,
         question: "هل كل شي تمام؟",
         createdAtMs: getNow(),
+        responses: {},
       },
       updatedAt: serverTimestamp(),
     },
@@ -487,13 +551,27 @@ async function launchSystemCheck() {
   );
 }
 
+async function stopSystemCheck() {
+  await setDoc(
+    doc(db, "rooms", ROOM_ID),
+    {
+      healthCheck: { active: false },
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true }
+  );
+}
+
 async function answerSystemCheck({ playerId, playerName, answerText }) {
-  await addDoc(collection(db, "rooms", ROOM_ID, "messages"), {
-    playerId,
-    playerName,
-    text: `فحص النظام: ${answerText}`,
-    createdAtMs: getNow(),
-    createdAt: serverTimestamp(),
+  const answeredAtMs = getNow();
+  await updateDoc(doc(db, "rooms", ROOM_ID), {
+    [`healthCheck.responses.${playerId}`]: {
+      playerId,
+      playerName,
+      answerText,
+      answeredAtMs,
+    },
+    updatedAt: serverTimestamp(),
   });
 }
 
@@ -587,9 +665,16 @@ async function archiveLastGame(players = [], questions = [], allAnswers = [], me
         })),
         questions: questions.map((question, index) => ({
           id: question.id,
+          questionId: question.questionId || question.id,
           order: index + 1,
           text: question.text || "",
           type: question.type || "multiple_choice",
+          options: (question.options || []).map(getOptionText),
+          correctIndex: Number(question.correctIndex || 0),
+          maxPoints: Number(question.maxPoints || 0),
+          minPoints: Number(question.minPoints || 0),
+          seconds: Number(question.seconds || 0),
+          answerRevealDelaySeconds: Number(question.answerRevealDelaySeconds || 0),
         })),
         answers: allAnswers.map((answer) => ({ ...answer })),
         messages: messages.map((message) => ({
@@ -846,17 +931,32 @@ function AutoProcessResults({ room, answers, players }) {
       await setDoc(
         doc(db, "rooms", ROOM_ID),
         {
-          collectingBonusByPlayer: bonusByPlayer,
-          collectingBonusJokerByPlayer: jokerByPlayer,
+          collectingBonusByPlayer: {},
+          collectingBonusJokerByPlayer: {},
           collectingBonusPlayerId: null,
           collectingBonusPoints: 0,
-          rankMovementByPlayer,
+          rankMovementByPlayer: {},
+          resultsAnimationPhase: "waiting",
           updatedAt: serverTimestamp(),
         },
         { merge: true }
       );
 
-      await new Promise((resolve) => setTimeout(resolve, 900));
+      await new Promise((resolve) => setTimeout(resolve, 650));
+
+      await setDoc(
+        doc(db, "rooms", ROOM_ID),
+        {
+          collectingBonusByPlayer: bonusByPlayer,
+          collectingBonusJokerByPlayer: jokerByPlayer,
+          rankMovementByPlayer: {},
+          resultsAnimationPhase: "showPoints",
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, SCORE_ANIMATION_HOLD_MS));
 
       await Promise.all(
         players.map(async (latestPlayer) => {
@@ -873,7 +973,7 @@ function AutoProcessResults({ room, answers, players }) {
         })
       );
 
-      await new Promise((resolve) => setTimeout(resolve, SCORE_REVEAL_STEP_MS));
+      await new Promise((resolve) => setTimeout(resolve, 750));
 
       await setDoc(
         doc(db, "rooms", ROOM_ID),
@@ -884,6 +984,7 @@ function AutoProcessResults({ room, answers, players }) {
           collectingBonusPlayerId: null,
           collectingBonusPoints: 0,
           rankMovementByPlayer,
+          resultsAnimationPhase: "done",
           updatedAt: serverTimestamp(),
         },
         { merge: true }
@@ -997,18 +1098,30 @@ function Leaderboard({
   rankMovementByPlayer = {},
 }) {
   const visiblePlayers = players.slice(0, compact ? 8 : 20);
+  const showDelta = Object.keys(bonusPointsByPlayer || {}).length > 0;
   const hasMovement = Object.keys(rankMovementByPlayer || {}).length > 0;
+  const [showMovement, setShowMovement] = useState(false);
+
+  useEffect(() => {
+    if (!hasMovement) {
+      setShowMovement(false);
+      return;
+    }
+    setShowMovement(false);
+    const timeout = setTimeout(() => setShowMovement(true), 520);
+    return () => clearTimeout(timeout);
+  }, [hasMovement, JSON.stringify(rankMovementByPlayer || {})]);
 
   function getLastDelta(player) {
     const fromRoom = bonusPointsByPlayer?.[player.id];
     if (typeof fromRoom === "number") return fromRoom;
-    if (typeof player.lastQuestionPoints === "number") return player.lastQuestionPoints;
     return 0;
   }
 
   function renderDelta(player) {
+    if (!showDelta) return null;
     const delta = getLastDelta(player);
-    const isJokerDelta = !!bonusJokerByPlayer?.[player.id] || player.lastQuestionId === currentQuestionId && player.jokerQuestionId === currentQuestionId;
+    const isJokerDelta = !!bonusJokerByPlayer?.[player.id];
     const text = delta > 0 ? `+${delta}` : `${delta}`;
 
     return (
@@ -1020,7 +1133,7 @@ function Leaderboard({
             ? "last-question-delta negative"
             : "last-question-delta same"
         }
-        title="نقاط آخر سؤال"
+        title="نقاط السؤال الحالي"
       >
         {isJokerDelta ? "🃏 " : ""}{text}
       </span>
@@ -1031,10 +1144,7 @@ function Leaderboard({
     <div className="card leaderboard-card">
       <div className="leaderboard-title-row">
         <h2>🏆 لوحة المتصدرين</h2>
-
-        {isCollecting && (
-          <span className="collecting-small-badge">تجميع النتائج</span>
-        )}
+        {isCollecting && <span className="collecting-small-badge">تجميع النتائج</span>}
       </div>
 
       {visiblePlayers.length === 0 ? (
@@ -1054,34 +1164,27 @@ function Leaderboard({
                   animate={{ opacity: 1, scale: 1 }}
                   exit={{ opacity: 0, scale: 0.96 }}
                   transition={{
-                    layout: {
-                      duration: 1.05,
-                      type: "spring",
-                      bounce: 0.18,
-                    },
-                    opacity: { duration: 0.25 },
-                    scale: { duration: 0.25 },
+                    layout: { duration: 0.58, type: "spring", bounce: 0.12 },
+                    opacity: { duration: 0.18 },
+                    scale: { duration: 0.18 },
                   }}
                 >
                   <div className="leaderboard-name">
-                    {hasMovement && <RankMovementBadge movement={rankMovement} />}
+                    {showMovement && <RankMovementBadge movement={rankMovement} />}
                     <span className="rank">{index + 1}</span>
                     <span>{player.name}</span>
-                    <PlayerJokerBadge
-                      player={player}
-                      currentQuestionId={currentQuestionId}
-                    />
+                    <PlayerJokerBadge player={player} currentQuestionId={currentQuestionId} />
                   </div>
 
                   <div className="leaderboard-score-wrap">
                     {renderDelta(player)}
                     <motion.strong
                       key={player.score || 0}
-                      initial={{ scale: 1.16 }}
+                      initial={{ scale: 1.08 }}
                       animate={{ scale: 1 }}
                       transition={{ duration: 0.35 }}
                     >
-                      {player.score || 0}
+                      <AnimatedNumber value={player.score || 0} />
                     </motion.strong>
                   </div>
                 </motion.div>
@@ -1144,50 +1247,28 @@ function LiveAnswerStats({ question, answers, showCorrect = false }) {
   return (
     <div className="live-answer-stats">
       {stats.map((item) => {
-        const resultStyle = showCorrect
+        const resultClass = showCorrect
           ? item.correct
-            ? {
-                background: "#e8f8ea",
-                borderColor: "#6cc276",
-                color: "#18733a",
-              }
-            : {
-                background: "#ffe9e9",
-                borderColor: "#d85c5c",
-                color: "#a51f1f",
-              }
-          : undefined;
+            ? "result-item answer-correct"
+            : "result-item answer-wrong"
+          : "result-item";
 
         return (
-          <div className="result-item" key={item.index} style={resultStyle}>
+          <div className={resultClass} key={item.index}>
             <div className="result-top">
               <span>
                 {showCorrect ? (item.correct ? "✅ " : "❌ ") : ""}
                 {item.option}
               </span>
 
-              <div style={{ display: "inline-flex", alignItems: "center", gap: "8px", whiteSpace: "nowrap" }}>
-                <span style={{ background: "rgba(255,255,255,0.72)", border: "1px solid rgba(31,41,51,0.12)", borderRadius: "999px", padding: "6px 11px", fontWeight: 900 }}>
-                  {item.count} إجابة
-                </span>
-                <span style={{ background: "#fff7df", border: "1px solid #ead69c", color: "#7a4f18", borderRadius: "999px", padding: "6px 11px", fontWeight: 900 }}>
-                  🃏 {item.jokerCount}
-                </span>
+              <div className="result-count-boxes" aria-label="إحصائيات الإجابة">
+                <span className="answer-count-box">{item.count}</span>
+                <span className="joker-answer-count-box">🃏 {item.jokerCount}</span>
               </div>
             </div>
 
             <div className="bar">
-              <div
-                className="bar-fill"
-                style={{
-                  width: `${item.percent}%`,
-                  background: showCorrect
-                    ? item.correct
-                      ? "#18733a"
-                      : "#a51f1f"
-                    : undefined,
-                }}
-              />
+              <div className="bar-fill" style={{ width: `${item.percent}%` }} />
             </div>
           </div>
         );
@@ -1195,6 +1276,7 @@ function LiveAnswerStats({ question, answers, showCorrect = false }) {
     </div>
   );
 }
+
 
 function AnsweredCountBadge({ answersCount, playersCount }) {
   const allAnswered = playersCount > 0 && answersCount >= playersCount;
@@ -1274,11 +1356,11 @@ function ZoomableImage({ src, alt = "صورة", className = "", style = {} }) {
           alt={alt}
           style={{
             width: "100%",
-            maxHeight: "260px",
+            maxHeight: "180px",
             objectFit: "contain",
             borderRadius: "18px",
             background: "#fff",
-            border: "1px solid #e4d8c8",
+            border: "1px solid #b9deeb",
           }}
         />
       </button>
@@ -1307,7 +1389,7 @@ function MediaQuestionPlayer({ question, room, isAdmin, displayMode }) {
 
   async function handleEnded() {
     if (isAdmin && displayMode && !mediaEnded) {
-      await finishMediaQuestion();
+      await finishMediaQuestion(question);
     }
   }
 
@@ -1349,8 +1431,8 @@ function MediaQuestionPlayer({ question, room, isAdmin, displayMode }) {
       {isAdmin && displayMode && mediaStarted && !mediaEnded && (
         <button
           type="button"
-          onClick={finishMediaQuestion}
-          style={{ marginTop: "14px", width: "100%", background: "#7a6646" }}
+          onClick={() => finishMediaQuestion(question)}
+          className="send-answers-now-button" style={{ marginTop: "14px", width: "100%" }}
         >
           إرسال الإجابات الآن
         </button>
@@ -1359,12 +1441,6 @@ function MediaQuestionPlayer({ question, room, isAdmin, displayMode }) {
       {!isAdmin && !mediaEnded && (
         <p className="muted" style={{ margin: "12px 0 0", textAlign: "center" }}>
           سيظهر لك تشغيل {isVideo ? "الفيديو" : "الصوت"} بعد انتهاء المقطع عند المقدم.
-        </p>
-      )}
-
-      {mediaEnded && (
-        <p className="muted" style={{ margin: "6px 0 0", textAlign: "center", fontSize: "12px", lineHeight: 1.4 }}>
-          انتهى المقطع، ستظهر الإجابات بعد العد التنازلي.
         </p>
       )}
     </div>
@@ -1387,7 +1463,7 @@ function QuestionScreen({
   const now = useNow();
   const revealCountdown = getRevealCountdown(question, room, now);
   const mediaQuestion = isMediaQuestion(question);
-  const questionImageUrl = getQuestionImageUrl(question);
+  const questionImageUrl = question?.type === "image" ? getQuestionImageUrl(question) : "";
   const mediaEnded =
     !mediaQuestion ||
     !!toMillis(room?.mediaEndedAt) ||
@@ -1442,7 +1518,7 @@ function QuestionScreen({
       <h2 className="big-question">{question.text}</h2>
 
       {questionImageUrl && (
-        <div style={{ width: "min(520px, 100%)", margin: "0 auto 16px" }}>
+        <div style={{ width: displayMode ? "min(340px, 100%)" : "min(420px, 100%)", margin: "0 auto 10px" }}>
           <ZoomableImage src={questionImageUrl} alt="صورة السؤال" />
         </div>
       )}
@@ -1560,7 +1636,7 @@ function QuestionScreen({
                   {optionImage && (
                     <span
                       onClick={(e) => e.stopPropagation()}
-                      style={{ width: "100%", maxWidth: "180px" }}
+                      style={{ width: "100%", maxWidth: displayMode ? "120px" : "180px" }}
                     >
                       <ZoomableImage src={optionImage} alt={`صورة الخيار ${index + 1}`} />
                     </span>
@@ -1616,163 +1692,53 @@ function FinishedDisplay({ players, messages = [] }) {
   const third = players[2];
   const restPlayers = players.slice(3);
 
-  const mainCardStyle = {
-    height: "100%",
-    background: "rgba(255,255,255,0.96)",
-    border: "1px solid #e4d8c8",
-    borderRadius: "32px",
-    padding: "36px",
-    boxShadow: "0 16px 40px rgba(31,41,51,0.09)",
-    display: "flex",
-    flexDirection: "column",
-    justifyContent: "center",
-    alignItems: "center",
-    textAlign: "center",
-    overflow: "hidden",
-  };
-
-  function WinnerCard({ player, place, bg, border, size = "normal" }) {
-    if (!player) return <div />;
+  function WinnerCard({ player, place, variant }) {
+    if (!player) {
+      return <div className={`podium-winner-card ${variant || ""}`} />;
+    }
 
     return (
-      <div
-        style={{
-          minHeight: size === "first" ? "210px" : size === "second" ? "165px" : "135px",
-          background: bg,
-          border: `1px solid ${border}`,
-          borderRadius: "24px",
-          padding: "20px 14px",
-          display: "flex",
-          flexDirection: "column",
-          justifyContent: "center",
-          alignItems: "center",
-          gap: "8px",
-          overflow: "hidden",
-          textAlign: "center",
-        }}
-      >
-        <span style={{ color: "#6b7280", fontWeight: 900, fontSize: "18px" }}>
-          {place}
-        </span>
-
-        <strong
-          style={{
-            maxWidth: "100%",
-            fontSize: size === "first" ? "42px" : size === "second" ? "34px" : "28px",
-            lineHeight: 1.1,
-            color: "#1f2933",
-            fontWeight: 900,
-            whiteSpace: "nowrap",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-          }}
-        >
-          {player.name}
-        </strong>
-
-        <b style={{ fontSize: "22px", color: "#1f2933", fontWeight: 900 }}>
-          {player.score || 0} نقطة
-        </b>
+      <div className={`podium-winner-card ${variant || ""}`}>
+        <span>{place}</span>
+        <strong>{player.name}</strong>
+        <b><AnimatedNumber value={player.score || 0} /> نقطة</b>
       </div>
     );
   }
 
   return (
-    <div
-      style={{
-        width: "100%",
-        height: "100%",
-        display: "grid",
-        gridTemplateColumns: "minmax(0, 1.45fr) minmax(260px, 0.55fr)",
-        gap: "24px",
-      }}
-    >
-      <div style={mainCardStyle}>
-        <div style={{ fontSize: "54px", lineHeight: 1, marginBottom: "10px" }}>
-          🎉
-        </div>
-
-        <h1
-          style={{
-            margin: "0 0 12px 0",
-            padding: 0,
-            fontSize: "64px",
-            lineHeight: "1.05",
-            fontWeight: 900,
-            color: "#1f2933",
-            whiteSpace: "nowrap",
-          }}
-        >
-          انتهت المسابقة
-        </h1>
-
-        <p
-          style={{
-            margin: "0 0 34px 0",
-            fontSize: "26px",
-            lineHeight: "1.35",
-            fontWeight: 800,
-            color: "#6b7280",
-          }}
-        >
-          مبروك للفائزين وشكرًا لجميع المشاركين
-        </p>
-
-        <div
-          style={{
-            width: "100%",
-            display: "grid",
-            gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
-            gap: "18px",
-            alignItems: "end",
-          }}
-        >
-          <WinnerCard
-            player={second}
-            place="المركز الثاني"
-            size="second"
-            bg="#f3f4f6"
-            border="#d1d5db"
-          />
-
-          <WinnerCard
-            player={first}
-            place="المركز الأول"
-            bg="#fff7df"
-            border="#ead69c"
-            size="first"
-          />
-
-          <WinnerCard
-            player={third}
-            place="المركز الثالث"
-            size="third"
-            bg="#fff1e6"
-            border="#f0c9a8"
-          />
-        </div>
+    <div className="final-winners-layout">
+      <div className="final-messages-side">
+        <MessagesPanel messages={messages} />
       </div>
 
-      <div style={{ height: "100%", overflow: "hidden", display: "grid", gap: "14px", gridTemplateRows: "1fr 1fr" }}>
-        <div className="card" style={{ overflow: "hidden" }}>
-          <h2>بقية الترتيب</h2>
-          <div className="leaderboard">
-            {restPlayers.length === 0 ? (
-              <p className="muted">لا يوجد متسابقون بعد المركز الثالث.</p>
-            ) : (
-              restPlayers.map((player, index) => (
-                <div className="leaderboard-row" key={player.id}>
-                  <div className="leaderboard-name">
-                    <span className="rank">{index + 4}</span>
-                    <span>{player.name}</span>
-                  </div>
-                  <strong>{player.score || 0}</strong>
-                </div>
-              ))
-            )}
-          </div>
+      <div className="final-winners-main">
+        <div className="final-title">
+          <h1>انتهت المسابقة</h1>
+          <p>مبروك للفائزين وشكرًا لجميع المشاركين</p>
         </div>
-        <MessagesPanel messages={messages} />
+
+        <div className="podium-top-three">
+          <WinnerCard player={second} place="المركز الثاني" variant="second" />
+          <WinnerCard player={first} place="المركز الأول" variant="first" />
+          <WinnerCard player={third} place="المركز الثالث" variant="third" />
+        </div>
+
+        <div className="final-rankings-card">
+          {restPlayers.length === 0 ? (
+            <p className="muted" style={{ textAlign: "center" }}>لا يوجد متسابقون بعد المركز الثالث.</p>
+          ) : (
+            <div className="final-rankings-list">
+              {restPlayers.map((player, index) => (
+                <div className="final-ranking-row" key={player.id}>
+                  <span className="rank">{index + 4}</span>
+                  <strong>{player.name}</strong>
+                  <b><AnimatedNumber value={player.score || 0} /> نقطة</b>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -1854,6 +1820,7 @@ function QuestionSettings({ questions }) {
   const [maxPoints, setMaxPoints] = useState(1000);
   const [minPoints, setMinPoints] = useState(100);
   const [seconds, setSeconds] = useState(20);
+  const [answerRevealDelaySeconds, setAnswerRevealDelaySeconds] = useState(3);
   const [saving, setSaving] = useState(false);
 
   function resetForm() {
@@ -1869,6 +1836,7 @@ function QuestionSettings({ questions }) {
     setMaxPoints(1000);
     setMinPoints(100);
     setSeconds(20);
+    setAnswerRevealDelaySeconds(3);
   }
 
   function startCreate() {
@@ -1889,6 +1857,7 @@ function QuestionSettings({ questions }) {
     setMaxPoints(Number(question.maxPoints || 1000));
     setMinPoints(Number(question.minPoints || 100));
     setSeconds(Number(question.seconds || 20));
+    setAnswerRevealDelaySeconds(Number(question.answerRevealDelaySeconds ?? question.revealDelaySeconds ?? 3));
   }
 
   function updateOption(index, value) {
@@ -1984,6 +1953,7 @@ function QuestionSettings({ questions }) {
       maxPoints: Number(maxPoints),
       minPoints: Number(minPoints),
       seconds: Number(seconds),
+      answerRevealDelaySeconds: Number(answerRevealDelaySeconds),
       updatedAt: serverTimestamp(),
     };
 
@@ -2018,23 +1988,77 @@ function QuestionSettings({ questions }) {
     await deleteDoc(doc(db, "rooms", ROOM_ID, "questions", questionId));
   }
 
+  function renderQuestionForm() {
+    return (
+      <div className="modal-backdrop" onClick={resetForm}>
+        <div className="modal-card question-edit-modal" onClick={(event) => event.stopPropagation()}>
+          <h2>{editingId ? "تعديل السؤال" : "إضافة سؤال"}</h2>
+
+          <label>نوع السؤال</label>
+          <select value={type} onChange={(e) => handleTypeChange(e.target.value)}>
+            <option value="multiple_choice">اختيار من متعدد</option>
+            <option value="true_false">صح أو خطأ</option>
+            <option value="audio">سؤال صوتي</option>
+            <option value="video">سؤال فيديو</option>
+            <option value="image">سؤال صورة</option>
+          </select>
+
+          <label>نص السؤال</label>
+          <textarea value={text} onChange={(e) => setText(e.target.value)} placeholder="اكتب السؤال هنا" />
+
+          {(type === "audio" || type === "video") && (
+            <>
+              <label>{type === "video" ? "رابط مقطع الفيديو" : "رابط المقطع الصوتي"}</label>
+              <input value={mediaUrl} onChange={(e) => setMediaUrl(e.target.value)} placeholder={type === "video" ? "ضع رابط الفيديو هنا" : "ضع رابط الصوت هنا"} />
+            </>
+          )}
+
+          {type === "image" && (
+            <>
+              <label>رابط صورة السؤال</label>
+              <input value={imageUrl} onChange={(e) => setImageUrl(e.target.value)} placeholder="ضع رابط صورة السؤال هنا، أو اتركه فارغًا إذا الصور في الخيارات" />
+            </>
+          )}
+
+          <label>الإجابات</label>
+          <div className="options-editor">
+            {options.map((option, index) => (
+              <div className="option-editor-row" key={index}>
+                <div style={{ display: "grid", gap: "8px" }}>
+                  <input value={option} onChange={(e) => updateOption(index, e.target.value)} placeholder={`الإجابة ${index + 1}`} disabled={type === "true_false"} />
+                  {type === "image" && <input value={optionImageUrls[index] || ""} onChange={(e) => updateOptionImage(index, e.target.value)} placeholder={`رابط صورة الخيار ${index + 1} - اختياري`} />}
+                </div>
+
+                <label className="radio-label">
+                  <input type="radio" name="correct" checked={correctIndex === index} onChange={() => setCorrectIndex(index)} />
+                  الصحيحة
+                </label>
+
+                {type !== "true_false" && options.length > 2 && <button type="button" className="danger small-button option-delete-button" onClick={() => removeOption(index)}>حذف</button>}
+              </div>
+            ))}
+          </div>
+
+          {type !== "true_false" && <button type="button" className="small-button" onClick={addOption}>إضافة خيار آخر</button>}
+
+          <div className="settings-grid">
+            <div><label>أعلى نقاط</label><input type="number" value={maxPoints} onChange={(e) => setMaxPoints(e.target.value)} /></div>
+            <div><label>أقل نقاط</label><input type="number" value={minPoints} onChange={(e) => setMinPoints(e.target.value)} /></div>
+            <div><label>وقت الإجابة بالثواني</label><input type="number" value={seconds} onChange={(e) => setSeconds(e.target.value)} /></div>
+            <div><label>ثواني ظهور الأجوبة</label><input type="number" value={answerRevealDelaySeconds} onChange={(e) => setAnswerRevealDelaySeconds(e.target.value)} /></div>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
+            <button onClick={saveQuestion} disabled={saving}>{saving ? "جاري الحفظ..." : editingId ? "حفظ التعديل" : "حفظ السؤال"}</button>
+            <button type="button" className="danger" onClick={resetForm}>إلغاء</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="control-page">
-      <style>{`
-        .admin-bordered-table th,
-        .admin-bordered-table td {
-          border: 1px solid #e4d8c8;
-          padding: 10px 12px;
-          vertical-align: middle;
-        }
-        .admin-bordered-table th {
-          background: #f3eadc;
-          font-weight: 900;
-        }
-        .admin-bordered-table td {
-          background: #fffaf2;
-        }
-      `}</style>
+    <div className="control-page question-settings-page">
       <div className="card control-hero">
         <div>
           <h2>إعدادات الأسئلة</h2>
@@ -2049,33 +2073,35 @@ function QuestionSettings({ questions }) {
         {questions.length === 0 ? (
           <p className="muted">لم تضف أي سؤال بعد.</p>
         ) : (
-          <div style={{ overflowX: "auto" }}>
-            <table className="admin-bordered-table" style={{ width: "100%", borderCollapse: "collapse" }}>
+          <div className="questions-table-wrap">
+            <table className="questions-table">
               <thead>
-                <tr style={{ color: "#6b7280", textAlign: "right" }}>
+                <tr>
                   <th>رقم</th>
                   <th>السؤال</th>
                   <th>النوع</th>
                   <th>القيمة</th>
-                  <th>الوقت</th>
-                  <th>الإجابات</th>
+                  <th>وقت الإجابة</th>
+                  <th>ظهور الأجوبة</th>
                   <th>إجراء</th>
                 </tr>
               </thead>
               <tbody>
                 {questions.map((q, index) => (
-                  <tr key={q.id} style={{ background: "#fbf7ef" }}>
-                    <td style={{ padding: "14px", borderRadius: "16px 0 0 16px", fontWeight: 900 }}>{index + 1}</td>
-                    <td style={{ padding: "14px", fontWeight: 900, minWidth: "260px" }}>{q.text}</td>
-                    <td style={{ padding: "14px", whiteSpace: "nowrap" }}>{getQuestionTypeLabel(q.type)}</td>
-                    <td style={{ padding: "14px", whiteSpace: "nowrap" }}>{q.minPoints || 100} - {q.maxPoints || 1000}</td>
-                    <td style={{ padding: "14px", whiteSpace: "nowrap" }}>{q.seconds || 20} ثانية</td>
-                    <td style={{ padding: "14px", color: "#6b7280", minWidth: "220px" }}>{q.options?.join(" - ")}</td>
-                    <td style={{ padding: "14px", borderRadius: "0 16px 16px 0", whiteSpace: "nowrap" }}>
-                      <button className="small-button" onClick={() => moveQuestion(q, -1)} disabled={index === 0}>↑</button>{" "}
-                      <button className="small-button" onClick={() => moveQuestion(q, 1)} disabled={index === questions.length - 1}>↓</button>{" "}
-                      <button className="small-button" onClick={() => startEdit(q)}>تعديل</button>{" "}
-                      <button className="danger small-button" onClick={() => deleteQuestion(q.id)}>حذف</button>
+                  <tr key={q.id}>
+                    <td><strong>{index + 1}</strong></td>
+                    <td><strong>{q.text}</strong></td>
+                    <td>{getQuestionTypeLabel(q.type)}</td>
+                    <td>{q.minPoints || 100} - {q.maxPoints || 1000}</td>
+                    <td>{q.seconds || 20} ث</td>
+                    <td>{q.answerRevealDelaySeconds ?? 3} ث</td>
+                    <td>
+                      <div className="question-admin-card-actions">
+                        <button className="small-button" onClick={() => moveQuestion(q, -1)} disabled={index === 0}>↑</button>
+                        <button className="small-button" onClick={() => moveQuestion(q, 1)} disabled={index === questions.length - 1}>↓</button>
+                        <button className="small-button" onClick={() => startEdit(q)}>تعديل</button>
+                        <button className="danger small-button" onClick={() => deleteQuestion(q.id)}>حذف</button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -2085,125 +2111,10 @@ function QuestionSettings({ questions }) {
         )}
       </div>
 
-      {showForm && (
-        <div className="card form-card">
-          <h2>{editingId ? "تعديل السؤال" : "إضافة سؤال"}</h2>
-
-          <label>نوع السؤال</label>
-          <select value={type} onChange={(e) => handleTypeChange(e.target.value)}>
-            <option value="multiple_choice">اختيار من متعدد</option>
-            <option value="true_false">صح أو خطأ</option>
-            <option value="audio">سؤال صوتي</option>
-            <option value="video">سؤال فيديو</option>
-            <option value="image">سؤال صورة</option>
-          </select>
-
-          <label>نص السؤال</label>
-          <textarea
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            placeholder="اكتب السؤال هنا"
-          />
-
-          {(type === "audio" || type === "video") && (
-            <>
-              <label>{type === "video" ? "رابط مقطع الفيديو" : "رابط المقطع الصوتي"}</label>
-              <input
-                value={mediaUrl}
-                onChange={(e) => setMediaUrl(e.target.value)}
-                placeholder={type === "video" ? "ضع رابط الفيديو هنا" : "ضع رابط الصوت هنا"}
-              />
-            </>
-          )}
-
-          {type === "image" && (
-            <>
-              <label>رابط صورة السؤال</label>
-              <input
-                value={imageUrl}
-                onChange={(e) => setImageUrl(e.target.value)}
-                placeholder="ضع رابط صورة السؤال هنا، أو اتركه فارغًا إذا الصور في الخيارات"
-              />
-            </>
-          )}
-
-          <label>الإجابات</label>
-          <div className="options-editor">
-            {options.map((option, index) => (
-              <div className="option-editor-row" key={index}>
-                <div style={{ display: "grid", gap: "8px" }}>
-                  <input
-                    value={option}
-                    onChange={(e) => updateOption(index, e.target.value)}
-                    placeholder={`الإجابة ${index + 1}`}
-                    disabled={type === "true_false"}
-                  />
-                  {type === "image" && (
-                    <input
-                      value={optionImageUrls[index] || ""}
-                      onChange={(e) => updateOptionImage(index, e.target.value)}
-                      placeholder={`رابط صورة الخيار ${index + 1} - اختياري`}
-                    />
-                  )}
-                </div>
-
-                <label className="radio-label">
-                  <input
-                    type="radio"
-                    name="correct"
-                    checked={correctIndex === index}
-                    onChange={() => setCorrectIndex(index)}
-                  />
-                  الصحيحة
-                </label>
-
-                {type !== "true_false" && options.length > 2 && (
-                  <button
-                    type="button"
-                    className="danger small-button option-delete-button"
-                    onClick={() => removeOption(index)}
-                  >
-                    حذف
-                  </button>
-                )}
-              </div>
-            ))}
-          </div>
-
-          {type !== "true_false" && (
-            <button type="button" className="small-button" onClick={addOption}>
-              إضافة خيار آخر
-            </button>
-          )}
-
-          <div className="settings-grid">
-            <div>
-              <label>أعلى نقاط</label>
-              <input type="number" value={maxPoints} onChange={(e) => setMaxPoints(e.target.value)} />
-            </div>
-
-            <div>
-              <label>أقل نقاط</label>
-              <input type="number" value={minPoints} onChange={(e) => setMinPoints(e.target.value)} />
-            </div>
-
-            <div>
-              <label>وقت الإجابة بالثواني</label>
-              <input type="number" value={seconds} onChange={(e) => setSeconds(e.target.value)} />
-            </div>
-          </div>
-
-          <button onClick={saveQuestion} disabled={saving}>
-            {saving ? "جاري الحفظ..." : editingId ? "حفظ التعديل" : "حفظ السؤال"}
-          </button>
-
-          <button type="button" onClick={resetForm}>إلغاء</button>
-        </div>
-      )}
+      {showForm && renderQuestionForm()}
     </div>
   );
 }
-
 /* Admin */
 
 function downloadExcelFile(filename, sheets) {
@@ -2248,6 +2159,11 @@ function AdminControl({ room, players, questions, messages, allAnswers }) {
   const stage = room?.stage || "home";
   const currentQuestionIndex = room?.currentQuestionIndex ?? -1;
   const [expandedQuestions, setExpandedQuestions] = useState({});
+  const [expandedPlayers, setExpandedPlayers] = useState({});
+  const [editingPlayer, setEditingPlayer] = useState(null);
+  const [editPlayerName, setEditPlayerName] = useState("");
+  const [editPlayerScore, setEditPlayerScore] = useState(0);
+  const [editPlayerJokers, setEditPlayerJokers] = useState(1);
 
   const stageArabic =
     {
@@ -2264,153 +2180,107 @@ function AdminControl({ room, players, questions, messages, allAnswers }) {
       .filter((answer) => answer.questionId === question.id || answer.questionId === question.questionId)
       .map((answer) => {
         const player = players.find((p) => p.id === answer.playerId);
-        return {
-          question,
-          questionNumber: index + 1,
-          answer,
-          player,
-          selectedText: getOptionText(question.options?.[answer.selectedIndex]) || "—",
-        };
+        return { question, questionNumber: index + 1, answer, player, selectedText: getOptionText(question.options?.[answer.selectedIndex]) || "—" };
       });
-
-    return {
-      question,
-      questionNumber: index + 1,
-      ignored: !!room?.ignoredQuestionIds?.[question.id],
-      rows,
-    };
+    return { question, questionNumber: index + 1, rows };
   });
 
   const sortedWinners = [...players].sort((a, b) => (b.score || 0) - (a.score || 0)).slice(0, 3);
 
-  function exportPlayersExcel() {
-    downloadExcelFile("family-quiz-players.xls", [
-      {
-        name: "المراكز الثلاثة الأولى",
-        headers: ["المركز", "الاسم المستعار", "الاسم الثلاثي", "رقم الجوال", "النقاط"],
-        rows: sortedWinners.map((player, index) => [
-          index + 1,
-          player.name || "",
-          player.fullName || "",
-          player.phone || "",
-          player.score || 0,
-        ]),
-      },
-      {
-        name: "بيانات المتسابقين",
-        headers: ["الاسم المستعار", "الاسم الثلاثي", "رقم الجوال", "النقاط", "حالة الجوكر", "نقاط آخر سؤال"],
-        rows: players.map((player) => [
-          player.name || "",
-          player.fullName || "",
-          player.phone || "",
-          player.score || 0,
-          player.jokerUsed ? "مستخدم" : player.pendingJoker ? "مفعل للسؤال القادم" : "متاح",
-          player.lastQuestionPoints ?? 0,
-        ]),
-      },
-    ]);
-  }
-
-  function exportAnswersExcel() {
-    const answerRows = [];
-
-    questions.forEach((question, index) => {
-      allAnswers
+  function buildAnswerRows(sourceQuestions = questions, sourcePlayers = players, sourceAnswers = allAnswers) {
+    const rows = [];
+    sourceQuestions.forEach((question, index) => {
+      sourceAnswers
         .filter((answer) => answer.questionId === question.id || answer.questionId === question.questionId)
         .forEach((answer) => {
-          const player = players.find((p) => p.id === answer.playerId);
-          answerRows.push([
+          const player = sourcePlayers.find((p) => p.id === answer.playerId) || {};
+          rows.push([
             index + 1,
             question.text,
             getQuestionTypeLabel(question.type),
-            player?.name || answer.playerName || "",
-            player?.fullName || answer.fullName || "",
-            player?.phone || answer.phone || "",
+            player.name || answer.playerName || "",
+            player.fullName || answer.fullName || "",
+            player.phone || answer.phone || "",
             getOptionText(question.options?.[answer.selectedIndex]) || "—",
             answer.isCorrect ? "صح" : "خطأ",
             answer.basePoints || 0,
             answer.points || 0,
             answer.jokerApplied ? "نعم" : "لا",
-            room?.ignoredQuestionIds?.[question.id] ? "نعم" : "لا",
           ]);
         });
     });
+    return rows;
+  }
 
-    downloadExcelFile("family-quiz-answers-report.xls", [
-      {
-        name: "المراكز الثلاثة الأولى",
-        headers: ["المركز", "الاسم المستعار", "الاسم الثلاثي", "رقم الجوال", "النقاط"],
-        rows: sortedWinners.map((player, index) => [
-          index + 1,
-          player.name || "",
-          player.fullName || "",
-          player.phone || "",
-          player.score || 0,
-        ]),
-      },
-      {
-        name: "تقرير الإجابات",
-        headers: [
-          "رقم السؤال",
-          "السؤال",
-          "النوع",
-          "الاسم المستعار",
-          "الاسم الثلاثي",
-          "رقم الجوال",
-          "الإجابة المختارة",
-          "النتيجة",
-          "النقاط الأصلية",
-          "النقاط المحتسبة",
-          "جوكر",
-          "سؤال متجاهل",
-        ],
-        rows: answerRows,
-      },
+  function exportFullExcel() {
+    downloadExcelFile("family-quiz-full-report.xls", [
+      { name: "المراكز الثلاثة الأولى", headers: ["المركز", "الاسم المستعار", "الاسم الثلاثي", "رقم الجوال", "النقاط"], rows: sortedWinners.map((player, index) => [index + 1, player.name || "", player.fullName || "", player.phone || "", player.score || 0]) },
+      { name: "بيانات المتسابقين", headers: ["الاسم المستعار", "الاسم الثلاثي", "رقم الجوال", "النقاط", "حالة الجوكر", "نقاط آخر سؤال"], rows: players.map((player) => [player.name || "", player.fullName || "", player.phone || "", player.score || 0, player.jokerUsed ? "مستخدم" : player.pendingJoker ? "مفعل" : "متاح", player.lastQuestionPoints ?? 0]) },
+      { name: "تفاصيل الأسئلة", headers: ["رقم السؤال", "السؤال", "النوع", "الاسم المستعار", "الاسم الثلاثي", "رقم الجوال", "الإجابة", "النتيجة", "النقاط الأصلية", "النقاط المحتسبة", "جوكر"], rows: buildAnswerRows() },
     ]);
   }
 
-  async function handleGiveJoker(player) {
-    if (!window.confirm(`إضافة جوكر جديد للمتسابق ${player.name}؟`)) return;
-    await giveJokerToPlayer(player.id);
+  function openEditPlayer(player) {
+    setEditingPlayer(player);
+    setEditPlayerName(player.name || "");
+    setEditPlayerScore(Number(player.score || 0));
+    setEditPlayerJokers(player.jokerUsed ? 0 : 1);
   }
 
-  async function handleAdjustScore(player, direction) {
-    const raw = window.prompt(direction > 0 ? "كم نقطة تريد إضافتها؟" : "كم نقطة تريد خصمها؟", "100");
-    if (raw === null) return;
-
-    const value = Number(raw);
-    if (!Number.isFinite(value) || value <= 0) {
-      alert("اكتب رقمًا صحيحًا أكبر من صفر.");
+  async function saveEditedPlayer() {
+    if (!editingPlayer) return;
+    const cleanName = editPlayerName.trim();
+    const score = Number(editPlayerScore);
+    const jokers = Number(editPlayerJokers);
+    if (!cleanName || !Number.isFinite(score) || !Number.isFinite(jokers) || jokers < 0) {
+      alert("تحقق من الاسم والنقاط وعدد الجواكر.");
       return;
     }
+    const duplicate = players.some((player) => player.id !== editingPlayer.id && String(player.name || "").trim().toLowerCase() === cleanName.toLowerCase());
+    if (duplicate) {
+      alert("الاسم المستعار مستخدم بالفعل.");
+      return;
+    }
+    const baseline = Number.isFinite(Number(editingPlayer.manualScoreBaseline))
+      ? Number(editingPlayer.manualScoreBaseline)
+      : Number(editingPlayer.score || 0);
+    const manualDelta = score - baseline;
 
-    await adjustPlayerScore(player, direction > 0 ? value : -value);
+    await updateDoc(doc(db, "rooms", ROOM_ID, "players", editingPlayer.id), {
+      name: cleanName,
+      score,
+      manualScoreBaseline: baseline,
+      manualScoreDelta: manualDelta || 0,
+      manualScoreAdjustedAt: manualDelta ? serverTimestamp() : null,
+      jokerUsed: jokers <= 0,
+      pendingJoker: false,
+      jokerQuestionId: jokers <= 0 ? editingPlayer.jokerQuestionId || null : null,
+      jokerQuestionNumber: jokers <= 0 ? editingPlayer.jokerQuestionNumber || null : null,
+    });
+    setEditingPlayer(null);
   }
 
-  function toggleQuestion(questionId) {
-    setExpandedQuestions((prev) => ({
-      ...prev,
-      [questionId]: !prev[questionId],
-    }));
-  }
+  function toggleQuestion(questionId) { setExpandedQuestions((prev) => ({ ...prev, [questionId]: !prev[questionId] })); }
+  function togglePlayerReport(playerId) { setExpandedPlayers((prev) => ({ ...prev, [playerId]: !prev[playerId] })); }
 
   return (
     <div className="control-page">
       <div className="card control-hero">
-        <div>
+        <div className="control-hero-title">
           <h2>لوحة التحكم</h2>
           <p className="muted">إدارة بيانات المتسابقين والتقارير. إدارة سير المسابقة تتم من صفحة العرض.</p>
         </div>
-
         <div className="control-links">
           <a href={`/?admin=${ADMIN_CODE}&view=display`} target="_blank" rel="noreferrer">فتح صفحة العرض</a>
           <a href={`/?admin=${ADMIN_CODE}&view=settings`}>إعدادات الأسئلة</a>
+          <a href={`/?admin=${ADMIN_CODE}&view=lastgame`}>بيانات آخر مسابقة</a>
+          <button onClick={exportFullExcel}>استخراج Excel شامل</button>
         </div>
       </div>
 
       <div className="card">
         <h2>تهيئة وإعادة المسابقة</h2>
-        <p className="muted">استخدم هذه الأزرار قبل بداية المسابقة أو عند الحاجة لإعادة التهيئة.</p>
+        <p className="muted">الصفحة الرئيسية تُعيد واجهة المتسابقين للانتظار. فتح التسجيل يمسح بيانات الجولة ويفتح التسجيل. إعادة البداية تهيئة كاملة للغرفة.</p>
         <div className="control-links">
           <button onClick={createOrResetRoom}>الصفحة الرئيسية</button>
           <button onClick={resetAndStartRegistration}>فتح تسجيل جديد وتصفير البيانات</button>
@@ -2426,143 +2296,85 @@ function AdminControl({ room, players, questions, messages, allAnswers }) {
       </div>
 
       <div className="card">
-        <div className="report-section-title">
-          <h2>بيانات آخر مسابقة</h2>
-        </div>
-        {!room?.lastGame?.players?.length ? (
-          <p className="muted">لا توجد بيانات محفوظة لآخر مسابقة حتى الآن.</p>
-        ) : (
-          <div className="question-list">
-            {room.lastGame.players.map((player) => (
-              <div className="leaderboard-row" key={`${player.id}-${player.rank}`}>
-                <div className="leaderboard-name">
-                  <span className="rank">{player.rank}</span>
-                  <span>{player.name}</span>
-                </div>
-                <strong>{player.score || 0}</strong>
-              </div>
-            ))}
+        <div className="report-section-title"><h2>المتسابقون المسجلون</h2></div>
+        {players.length === 0 ? <p className="muted">لا يوجد متسابقون حتى الآن.</p> : (
+          <div className="admin-table-wrap">
+            <table className="admin-table"><thead><tr><th>الاسم المستعار</th><th>الاسم الثلاثي</th><th>رقم الجوال</th><th>النقاط</th><th>آخر سؤال</th><th>الجوكر</th><th>تحكم</th></tr></thead>
+              <tbody>{players.map((player) => <tr key={player.id}><td><strong>{player.name}</strong></td><td>{player.fullName || "—"}</td><td style={{ direction: "ltr", textAlign: "right" }}>{player.phone || "—"}</td><td><strong><AnimatedNumber value={player.score || 0} /></strong>{Number(player.manualScoreDelta || 0) !== 0 && <span className={player.manualScoreDelta > 0 ? "manual-delta positive" : "manual-delta negative"}> {player.manualScoreDelta > 0 ? `(+${player.manualScoreDelta})` : `(${player.manualScoreDelta})`}</span>}</td><td><strong>{player.lastQuestionPoints > 0 ? `+${player.lastQuestionPoints}` : player.lastQuestionPoints ?? 0}</strong></td><td>{player.jokerUsed ? "🃏 مستخدم" : player.pendingJoker ? "🟢 مفعل" : "متاح"}</td><td><button className="small-button" onClick={() => openEditPlayer(player)}>تعديل</button></td></tr>)}</tbody></table>
           </div>
         )}
       </div>
 
-      <div className="card">
-        <div className="report-section-title">
-          <h2>المتسابقون المسجلون</h2>
-          <button className="small-button" onClick={exportPlayersExcel}>استخراج Excel</button>
-        </div>
-
-        {players.length === 0 ? (
-          <p className="muted">لا يوجد متسابقون حتى الآن.</p>
-        ) : (
-          <div style={{ overflowX: "auto" }}>
-            <table className="admin-bordered-table" style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead>
-                <tr style={{ color: "#6b7280", textAlign: "right" }}>
-                  <th>الاسم المستعار</th>
-                  <th>الاسم الثلاثي</th>
-                  <th>رقم الجوال</th>
-                  <th>النقاط</th>
-                  <th>آخر سؤال</th>
-                  <th>الجوكر</th>
-                  <th>تحكم</th>
-                </tr>
-              </thead>
-              <tbody>
-                {players.map((player) => (
-                  <tr key={player.id} style={{ background: "#fbf7ef" }}>
-                    <td style={{ padding: "14px", borderRadius: "16px 0 0 16px", fontWeight: 900 }}>{player.name}</td>
-                    <td style={{ padding: "14px" }}>{player.fullName || "—"}</td>
-                    <td style={{ padding: "14px", direction: "ltr", textAlign: "right" }}>{player.phone || "—"}</td>
-                    <td style={{ padding: "14px", fontWeight: 900 }}>{player.score || 0}</td>
-                    <td style={{ padding: "14px", fontWeight: 900 }}>{player.lastQuestionPoints > 0 ? `+${player.lastQuestionPoints}` : player.lastQuestionPoints ?? 0}</td>
-                    <td style={{ padding: "14px" }}>{player.jokerUsed ? "🃏 مستخدم" : player.pendingJoker ? "🟠 مفعل" : "متاح"}</td>
-                    <td style={{ padding: "14px", borderRadius: "0 16px 16px 0", whiteSpace: "nowrap" }}>
-                      <button className="small-button" onClick={() => handleGiveJoker(player)}>إضافة جوكر</button>{" "}
-                      <button className="small-button" onClick={() => handleAdjustScore(player, 1)}>+ نقاط</button>{" "}
-                      <button className="danger small-button" onClick={() => handleAdjustScore(player, -1)}>- نقاط</button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+      <div className="card"><div className="report-section-title"><h2>تقرير إجابات الأسئلة</h2></div>
+        {answersByQuestion.every((item) => item.rows.length === 0) ? <p className="muted">لا توجد إجابات محفوظة حتى الآن.</p> : (
+          <div className="question-list">{answersByQuestion.map(({ question, questionNumber, rows }) => {
+            const expanded = !!expandedQuestions[question.id];
+            const correctCount = rows.filter((row) => row.answer.isCorrect).length;
+            const wrongCount = rows.filter((row) => !row.answer.isCorrect).length;
+            const jokerCount = rows.filter((row) => row.answer.jokerApplied).length;
+            return <div className="question-report-card" key={question.id}>
+              <button type="button" className="question-report-header" onClick={() => toggleQuestion(question.id)}><div className="question-report-title"><strong>{questionNumber}. {question.text}</strong><span>صح {correctCount} — خطأ {wrongCount} — 🃏 {jokerCount}</span></div><span className="expand-indicator">{expanded ? "−" : "+"}</span></button>
+              {expanded && <div className="question-report-body">{rows.length === 0 ? <span className="muted">لا توجد إجابات لهذا السؤال.</span> : <div className="admin-table-wrap"><table className="admin-table"><thead><tr><th>المتسابق</th><th>الاسم الثلاثي</th><th>الجوال</th><th>الإجابة</th><th>النتيجة</th><th>النقاط</th><th>جوكر</th></tr></thead><tbody>{rows.map(({ answer, player, selectedText }) => <tr key={answer.id}><td><strong>{player?.name || answer.playerName}</strong></td><td>{player?.fullName || answer.fullName || "—"}</td><td style={{ direction: "ltr", textAlign: "right" }}>{player?.phone || answer.phone || "—"}</td><td>{selectedText}</td><td style={{ color: answer.isCorrect ? "#18733a" : "#a51f1f", fontWeight: 900 }}>{answer.isCorrect ? "صح" : "خطأ"}</td><td><strong>{answer.points || 0}</strong></td><td>{answer.jokerApplied ? "🃏" : "—"}</td></tr>)}</tbody></table></div>}</div>}
+            </div>;
+          })}</div>
         )}
       </div>
 
-      <div className="card">
-        <div className="report-section-title">
-          <h2>تقرير إجابات الأسئلة</h2>
-          <button className="small-button" onClick={exportAnswersExcel}>استخراج Excel</button>
-        </div>
-
-        {answersByQuestion.every((item) => item.rows.length === 0) ? (
-          <p className="muted">لا توجد إجابات محفوظة حتى الآن.</p>
-        ) : (
-          <div className="question-list">
-            {answersByQuestion.map(({ question, questionNumber, ignored, rows }) => {
-              const expanded = !!expandedQuestions[question.id];
-              const correctCount = rows.filter((row) => row.answer.isCorrect).length;
-              const wrongCount = rows.filter((row) => !row.answer.isCorrect).length;
-              const jokerCount = rows.filter((row) => row.answer.jokerApplied).length;
-
-              return (
-                <div className="saved-question" key={question.id}>
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", flexWrap: "wrap" }}>
-                    <strong>{questionNumber}. {question.text} {ignored ? "— متجاهل" : ""}</strong>
-                    <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
-                      <span className="question-admin-meta">صح: {correctCount}</span>
-                      <span className="question-admin-meta">خطأ: {wrongCount}</span>
-                      <span className="question-admin-meta">🃏 {jokerCount}</span>
-                      <button className="small-button" onClick={() => toggleQuestion(question.id)}>
-                        {expanded ? "إخفاء التفاصيل" : "عرض التفاصيل"}
-                      </button>
-                    </div>
-                  </div>
-
-                  {expanded && (
-                    rows.length === 0 ? (
-                      <span>لا توجد إجابات لهذا السؤال.</span>
-                    ) : (
-                      <div style={{ overflowX: "auto" }}>
-                        <table className="admin-bordered-table" style={{ width: "100%", borderCollapse: "collapse", marginTop: "8px" }}>
-                          <thead>
-                            <tr style={{ color: "#6b7280", textAlign: "right" }}>
-                              <th>المتسابق</th>
-                              <th>الاسم الثلاثي</th>
-                              <th>الجوال</th>
-                              <th>الإجابة</th>
-                              <th>النتيجة</th>
-                              <th>النقاط</th>
-                              <th>جوكر</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {rows.map(({ answer, player, selectedText }) => (
-                              <tr key={answer.id}>
-                                <td style={{ padding: "8px", fontWeight: 900 }}>{player?.name || answer.playerName}</td>
-                                <td style={{ padding: "8px" }}>{player?.fullName || answer.fullName || "—"}</td>
-                                <td style={{ padding: "8px", direction: "ltr", textAlign: "right" }}>{player?.phone || answer.phone || "—"}</td>
-                                <td style={{ padding: "8px" }}>{selectedText}</td>
-                                <td style={{ padding: "8px", color: answer.isCorrect ? "#18733a" : "#a51f1f", fontWeight: 900 }}>{answer.isCorrect ? "صح" : "خطأ"}</td>
-                                <td style={{ padding: "8px", fontWeight: 900 }}>{answer.points || 0}</td>
-                                <td style={{ padding: "8px" }}>{answer.jokerApplied ? "🃏" : "—"}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    )
-                  )}
-                </div>
-              );
-            })}
-          </div>
+      <div className="card"><div className="report-section-title"><h2>تقرير المتسابقين</h2></div>
+        {players.length === 0 ? <p className="muted">لا يوجد متسابقون حتى الآن.</p> : (
+          <div className="question-list">{players.map((player) => {
+            const expanded = !!expandedPlayers[player.id];
+            const playerAnswers = questions.map((question, index) => {
+              const answer = allAnswers.find((item) => item.playerId === player.id && (item.questionId === question.id || item.questionId === question.questionId));
+              return { question, questionNumber: index + 1, answer, selectedText: answer ? getOptionText(question.options?.[answer.selectedIndex]) || "—" : "لم يجب" };
+            });
+            const answeredCount = playerAnswers.filter((row) => row.answer).length;
+            const correctCount = playerAnswers.filter((row) => row.answer?.isCorrect).length;
+            const jokerCount = playerAnswers.filter((row) => row.answer?.jokerApplied).length;
+            return <div className="player-report-card" key={player.id}><button type="button" className="player-report-header" onClick={() => togglePlayerReport(player.id)}><div className="player-report-title"><strong>{player.name}</strong>{expanded && <span>أجاب {answeredCount} / {questions.length} — صح {correctCount} — 🃏 {jokerCount}</span>}</div><span className="expand-indicator">{expanded ? "−" : "+"}</span></button>{expanded && <div className="player-report-body"><div className="admin-table-wrap"><table className="admin-table"><thead><tr><th>رقم السؤال</th><th>السؤال</th><th>إجابة المتسابق</th><th>النتيجة</th><th>النقاط</th><th>جوكر</th></tr></thead><tbody>{playerAnswers.map(({ question, questionNumber, answer, selectedText }) => <tr key={`${player.id}-${question.id}`}><td>{questionNumber}</td><td>{question.text}</td><td>{selectedText}</td><td style={{ fontWeight: 900, color: answer ? (answer.isCorrect ? "#18733a" : "#a51f1f") : undefined }}>{answer ? (answer.isCorrect ? "صح" : "خطأ") : "—"}</td><td>{answer?.points ?? "—"}</td><td>{answer?.jokerApplied ? "🃏" : "—"}</td></tr>)}</tbody></table></div></div>}</div>;
+          })}</div>
         )}
       </div>
+
+      {editingPlayer && (
+        <div className="modal-backdrop" onClick={() => setEditingPlayer(null)}>
+          <div className="modal-card edit-player-modal" onClick={(event) => event.stopPropagation()}>
+            <h2>تعديل بيانات المتسابق</h2>
+            <label>الاسم المستعار</label>
+            <input value={editPlayerName} onChange={(e) => setEditPlayerName(e.target.value)} placeholder="الاسم المستعار" />
+            <label>النقاط الحالية</label>
+            <input type="number" value={editPlayerScore} onChange={(e) => setEditPlayerScore(e.target.value)} placeholder="النقاط الحالية" />
+            <label>عدد الجواكر المتوفرة</label>
+            <input type="number" value={editPlayerJokers} onChange={(e) => setEditPlayerJokers(e.target.value)} placeholder="عدد الجواكر المتوفرة" />
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
+              <button onClick={saveEditedPlayer}>حفظ</button>
+              <button className="danger" onClick={() => setEditingPlayer(null)}>إلغاء</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
+
+function HealthCheckResultsPanel({ room, players = [], questions = [], allAnswers = [], messages = [] }) {
+  const check = room?.healthCheck;
+  if (!check?.active) return null;
+
+  const responses = Object.values(check.responses || {});
+  const okCount = responses.filter((item) => item.answerText === "كل شي تمام").length;
+  const problemCount = responses.filter((item) => item.answerText === "في مشكلة").length;
+
+  return (
+    <div className="site-check-results-box compact-poll-box">
+      <h3>استفتاء</h3>
+      <div className="poll-result-row"><span>كل شي تمام</span><strong>{okCount}</strong></div>
+      <div className="poll-result-row"><span>في مشكلة</span><strong>{problemCount}</strong></div>
+      <button className="danger small-button" onClick={stopSystemCheck}>إيقاف الاستفتاء الآن</button>
+    </div>
+  );
+}
+
 
 function DisplayScreen({ room, players, questions, messages, answers, allAnswers }) {
   if (!room) {
@@ -2651,17 +2463,11 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
         >
           العودة
         </button>
-        <button
-          onClick={launchSystemCheck}
-          style={{ minWidth: "auto", padding: "10px 18px", fontSize: "14px", background: "#18733a" }}
-        >
-          هل كل شي تمام؟
-        </button>
         {mainButton}
         {previewStage && (
           <button
             onClick={() => setPreviewStage(null)}
-            style={{ minWidth: "auto", padding: "10px 18px", fontSize: "14px", background: "#7a6646" }}
+            style={{ minWidth: "auto", padding: "10px 18px", fontSize: "14px", background: "#2b8baa" }}
           >
             الرجوع للمرحلة الحالية
           </button>
@@ -2687,17 +2493,15 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
           pointerEvents: "auto",
         }}
       >
-        {currentQuestion && (stage === "question" || stage === "reveal") && (
-          <button
-            onClick={() => ignoreCurrentQuestion(currentQuestion.questionId, players)}
-            style={{ minWidth: "auto", padding: "8px 13px", fontSize: "12px", borderRadius: "999px", background: "#7a6646" }}
-          >
-            تجاهل هذا السؤال
-          </button>
-        )}
+        <button
+          onClick={launchSystemCheck}
+          style={{ minWidth: "auto", padding: "8px 13px", fontSize: "12px", borderRadius: "999px", background: "#2563eb" }}
+        >
+          استفتاء
+        </button>
         <button
           className="danger"
-          onClick={() => finishGame(players, questions, allAnswers || [], messages)}
+          onClick={() => { if (window.confirm("هل تريد إنهاء المسابقة الآن؟")) finishGame(players, questions, allAnswers || [], messages); }}
           style={{ minWidth: "auto", padding: "8px 13px", fontSize: "12px", borderRadius: "999px" }}
         >
           إنهاء المسابقة الآن
@@ -2782,7 +2586,88 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
         {displayStage === "finished" && <FinishedDisplay players={players} messages={messages} />}
       </div>
 
+      <HealthCheckResultsPanel room={room} players={players} questions={questions} allAnswers={allAnswers || []} messages={messages} />
       {renderBottomDisplayActions()}
+    </div>
+  );
+}
+
+
+function LastGamePanel({ room }) {
+  const lastGame = room?.lastGame;
+
+  function exportLastGameExcel() {
+    if (!lastGame?.players?.length) return;
+    downloadExcelFile("family-quiz-last-game.xls", [
+      {
+        name: "المراكز الثلاثة الأولى",
+        headers: ["المركز", "الاسم المستعار", "الاسم الثلاثي", "رقم الجوال", "النقاط"],
+        rows: (lastGame.players || []).slice(0, 3).map((player) => [player.rank, player.name || "", player.fullName || "", player.phone || "", player.score || 0]),
+      },
+      {
+        name: "بيانات المتسابقين",
+        headers: ["المركز", "الاسم المستعار", "الاسم الثلاثي", "رقم الجوال", "النقاط"],
+        rows: (lastGame.players || []).map((player) => [player.rank, player.name || "", player.fullName || "", player.phone || "", player.score || 0]),
+      },
+      {
+        name: "تفاصيل الأسئلة",
+        headers: ["رقم السؤال", "السؤال", "النوع", "النقاط الكبرى", "النقاط الصغرى", "وقت السؤال", "ثواني ظهور الأجوبة", "الإجابة الصحيحة", "الخيارات"],
+        rows: (lastGame.questions || []).map((question) => [
+          question.order,
+          question.text || "",
+          getQuestionTypeLabel(question.type),
+          question.maxPoints || 0,
+          question.minPoints || 0,
+          question.seconds || 0,
+          question.answerRevealDelaySeconds || 0,
+          (question.options || [])[question.correctIndex] || question.correctIndex,
+          (question.options || []).join(" | "),
+        ]),
+      },
+      {
+        name: "تفاصيل الإجابات",
+        headers: ["الاسم المستعار", "السؤال", "الإجابة", "النتيجة", "النقاط", "جوكر"],
+        rows: (lastGame.answers || []).map((answer) => {
+          const question = (lastGame.questions || []).find((item) => item.id === answer.questionId || item.questionId === answer.questionId);
+          const player = (lastGame.players || []).find((item) => item.id === answer.playerId);
+          return [
+            player?.name || answer.playerName || "",
+            question?.text || answer.questionId || "",
+            answer.selectedIndex ?? "",
+            answer.isCorrect ? "صح" : "خطأ",
+            answer.points || 0,
+            answer.jokerApplied ? "نعم" : "لا",
+          ];
+        }),
+      },
+    ]);
+  }
+
+  return (
+    <div className="control-page">
+      <div className="admin-toolbar card">
+        <a className="link-button" href={`/?admin=${ADMIN_CODE}&view=control`}>لوحة التحكم</a>
+        <button onClick={exportLastGameExcel} disabled={!lastGame?.players?.length}>استخراج Excel</button>
+      </div>
+      <div className="card">
+        <h2>بيانات آخر مسابقة</h2>
+        {!lastGame?.players?.length ? (
+          <p className="muted">لا توجد بيانات محفوظة لآخر مسابقة حتى الآن.</p>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table className="admin-bordered-table" style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead><tr><th>المركز</th><th>الاسم المستعار</th><th>الاسم الثلاثي</th><th>رقم الجوال</th><th>النقاط</th></tr></thead>
+              <tbody>
+                {lastGame.players.map((player) => (
+                  <tr key={`${player.id}-${player.rank}`}>
+                    <td>{player.rank}</td><td>{player.name}</td><td>{player.fullName || "—"}</td><td>{player.phone || "—"}</td><td>{player.score || 0}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -2818,6 +2703,10 @@ function AdminPanel({ initialView = "control" }) {
         <QuestionSettings questions={questions} />
       </>
     );
+  }
+
+  if (initialView === "lastgame") {
+    return <LastGamePanel room={room} />;
   }
 
   if (initialView === "display") {
@@ -2871,13 +2760,23 @@ function JoinForm({ onJoined, room }) {
   const [phone, setPhone] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const nicknameInputRef = useRef(null);
+
+  useEffect(() => {
+    nicknameInputRef.current?.focus();
+  }, []);
 
   async function join() {
     const cleanNickname = nickname.trim();
     const cleanFullName = fullName.trim();
-    const cleanPhone = phone.trim();
+    const cleanPhone = normalizePhoneDigits(phone);
 
     if (!cleanNickname || !cleanFullName || !cleanPhone || loading) return;
+
+    if (!isValidSaudiMobile(cleanPhone)) {
+      setError("رقم الجوال يجب أن يكون 10 أرقام.");
+      return;
+    }
 
     if (room?.stage !== "registration") {
       setError("لم يبدأ تسجيل اللاعبين بعد.");
@@ -2942,26 +2841,29 @@ function JoinForm({ onJoined, room }) {
       <p className="muted">اكتب بياناتك. الاسم المستعار هو الذي سيظهر أثناء البث.</p>
 
       <input
+        ref={nicknameInputRef}
         value={nickname}
         onChange={(event) => setNickname(event.target.value)}
         placeholder="الاسم المستعار"
       />
 
-      <input
-        value={fullName}
-        onChange={(event) => setFullName(event.target.value)}
-        placeholder="الاسم الثلاثي"
-        style={{ marginTop: "10px" }}
-      />
+      <div className="registration-contact-box">
+        <h3>بيانات التواصل</h3>
+        <input
+          value={fullName}
+          onChange={(event) => setFullName(event.target.value)}
+          placeholder="الاسم الثلاثي"
+        />
 
-      <input
-        value={phone}
-        onChange={(event) => setPhone(event.target.value)}
-        onKeyDown={(event) => event.key === "Enter" && join()}
-        placeholder="رقم الجوال"
-        inputMode="tel"
-        style={{ marginTop: "10px", direction: "ltr", textAlign: "right" }}
-      />
+        <input
+          value={phone}
+          onChange={(event) => setPhone(event.target.value)}
+          onKeyDown={(event) => event.key === "Enter" && join()}
+          placeholder="رقم الجوال"
+          inputMode="tel"
+          style={{ direction: "ltr", textAlign: "right" }}
+        />
+      </div>
 
       {error && <div className="error-box">{error}</div>}
 
@@ -3032,7 +2934,7 @@ function PlayerWaiting({ room, player, players, setPlayerName, hasNextQuestion =
   async function savePlayerInfo() {
     const cleanNickname = newNickname.trim();
     const cleanFullName = newFullName.trim();
-    const cleanPhone = newPhone.trim();
+    const cleanPhone = normalizePhoneDigits(newPhone);
 
     if (!cleanNickname || !cleanFullName || !cleanPhone || !player?.id) {
       setEditError("عبّئ البيانات الثلاثة.");
@@ -3066,6 +2968,11 @@ function PlayerWaiting({ room, player, players, setPlayerName, hasNextQuestion =
 
   let title = "تم التسجيل بنجاح";
   let text = "انتظر حتى يتم إرسال السؤال من المقدم.";
+
+  if (stage === "home") {
+    title = "بانتظار فتح التسجيل";
+    text = "عندما يفتح المقدم التسجيل، يمكنك الدخول للمسابقة من جديد.";
+  }
 
   if (stage === "results") {
     title = "انتظر السؤال التالي";
@@ -3127,7 +3034,7 @@ function PlayerWaiting({ room, player, players, setPlayerName, hasNextQuestion =
 
         <div className="score-box">
           <span>نقاطك الحالية</span>
-          <strong>{player?.score || 0}</strong>
+          <strong><AnimatedNumber value={player?.score || 0} /></strong>
         </div>
       </div>
 
@@ -3159,17 +3066,14 @@ function PlayerResultSummary({ player, players, lastAnswer, stage, hasNextQuesti
                 : "player-points-animation"
             }
           >
-            <span>نقاط هذا السؤال</span>
-            <strong>
+            <span className="points-question-label">نقاط هذا السؤال</span>
+            <strong className="points-question-value">
               {jokerApplied ? "🃏 " : ""}
               {points > 0 ? "+" : ""}
-              {points} نقطة
+              <AnimatedNumber value={points} /> نقطة
             </strong>
             {jokerApplied && isCorrect && (
-              <small style={{ fontWeight: 900, opacity: 0.82 }}>{basePoints} ×3</small>
-            )}
-            {jokerApplied && !isCorrect && (
-              <small style={{ fontWeight: 900, opacity: 0.82 }}>خصم قيمة السؤال الأصلية: {basePoints}</small>
+              <small className="points-question-sub">{basePoints} ×3</small>
             )}
           </div>
         ) : (
@@ -3178,7 +3082,7 @@ function PlayerResultSummary({ player, players, lastAnswer, stage, hasNextQuesti
 
         <div className="score-box">
           <span>مجموع نقاطك</span>
-          <strong>{player?.score || 0}</strong>
+          <strong><AnimatedNumber value={player?.score || 0} /></strong>
         </div>
 
         {isResults && (
@@ -3202,14 +3106,15 @@ function PlayerFinalScreen({ player, players }) {
   const isWinner = rank >= 1 && rank <= 3;
 
   return (
-    <div className="main-column">
-      <div className="waiting-card card" style={{ textAlign: "center", background: isWinner ? "#fff7df" : undefined }}>
+    <div className={isWinner ? "main-column winner-celebration-page" : "main-column"}>
+      <div className={isWinner ? "waiting-card card player-final-winner-card" : "waiting-card card"} style={{ textAlign: "center" }}>
+        {isWinner && <div className="confetti-burst" aria-hidden="true" />}
         <div className="big-icon">{isWinner ? "🏆" : "🎉"}</div>
-        <h2>{isWinner ? `مبروك! فزت بالمركز ${rank}` : "حظ أوفر"}</h2>
+        <h2 className={isWinner ? "winner-final-title" : ""}>{isWinner ? `مبروك! فزت بالمركز ${rank}` : "حظ أوفر"}</h2>
         {!isWinner && <p className="muted">ترتيبك النهائي: {rank || "—"}</p>}
         <div className="score-box">
           <span>نقاطك النهائية</span>
-          <strong>{player?.score || 0}</strong>
+          <strong><AnimatedNumber value={player?.score || 0} /></strong>
         </div>
       </div>
 
@@ -3242,8 +3147,8 @@ function PlayerHealthCheck({ room, player }) {
   }
 
   return (
-    <div className="card" style={{ maxWidth: "760px", margin: "0 auto 10px", textAlign: "center", background: "#fff7df", borderColor: "#ead69c" }}>
-      <strong>{check.question || "هل كل شي تمام؟"}</strong>
+    <div className="site-check-modal player-poll-modal">
+      <strong>{check.question || "استفتاء"}</strong>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginTop: "10px" }}>
         <button onClick={() => submitHealth("كل شي تمام")}>كل شي تمام</button>
         <button className="danger" onClick={() => submitHealth("في مشكلة")}>في مشكلة</button>
@@ -3339,6 +3244,15 @@ function PlayerPanel() {
     });
   }
 
+  if (stage === "home") {
+    return (
+      <div className="join-card card">
+        <h2>بانتظار فتح التسجيل</h2>
+        <p className="muted">عندما يفتح المقدم التسجيل، سيظهر لك نموذج الدخول هنا.</p>
+      </div>
+    );
+  }
+
   if (!playerId || !player) {
     return (
       <JoinForm
@@ -3422,7 +3336,7 @@ export default function App() {
   const viewParam = searchParams.get("view");
 
   const adminView =
-    viewParam === "settings" || viewParam === "display" || viewParam === "control"
+    viewParam === "settings" || viewParam === "display" || viewParam === "control" || viewParam === "lastgame"
       ? viewParam
       : "control";
 
