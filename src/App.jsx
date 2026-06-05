@@ -41,7 +41,7 @@ const QUIZ_SUBTITLE = "من تقديم الأستاذ إبراهيم ال مطر
 const REVEAL_OPTIONS_DELAY_MS = 3000;
 const MEDIA_REVEAL_OPTIONS_DELAY_MS = 5000;
 const SCORE_ANIMATION_HOLD_MS = 850;
-const QUESTION_START_SYNC_BUFFER_MS = 1200;
+const QUESTION_START_SYNC_BUFFER_MS = 300;
 const DEFAULT_PACKAGE_ID = "default";
 const DEFAULT_PACKAGE_NAME = "المسابقة الحالية";
 
@@ -156,10 +156,20 @@ function toMillis(value) {
 
 function getRoomQuestionSentAt(room) {
   return (
-    toMillis(room?.questionSentAt) ||
     Number(room?.questionStartedAtMs) ||
     Number(room?.currentQuestion?.questionStartedAtMs) ||
     Number(room?.currentQuestion?.sentAtMs) ||
+    toMillis(room?.questionSentAt) ||
+    null
+  );
+}
+
+function getQuestionStartAt(room, question = null) {
+  return (
+    Number(room?.questionStartedAtMs) ||
+    Number(room?.currentQuestion?.questionStartedAtMs) ||
+    Number(question?.questionStartedAtMs) ||
+    Number(question?.sentAtMs) ||
     null
   );
 }
@@ -786,8 +796,7 @@ async function resetAndStartRegistration() {
   );
 }
 
-async function sendQuestion(question, index) {
-  const questionStartedAtMs = getNow() + QUESTION_START_SYNC_BUFFER_MS;
+function buildQuestionPayload(question, questionStartedAtMs = getNow() + QUESTION_START_SYNC_BUFFER_MS) {
   const revealDelayMs = getRevealDelayMs(question);
   const answerRevealAtMs = isMediaQuestion(question) ? null : questionStartedAtMs + revealDelayMs;
   const answerEndAtMs = answerRevealAtMs
@@ -815,15 +824,34 @@ async function sendQuestion(question, index) {
     practiceNote: question.isPractice ? "هذا السؤال للتدريب فقط ولا يؤثر على النقاط أو الترتيب." : "",
   };
 
-  await updateDoc(doc(db, "rooms", ROOM_ID), {
-    stage: "question",
-    currentQuestion: cleanQuestion,
-    currentQuestionIndex: index,
+  return {
+    cleanQuestion,
     questionStartedAtMs,
     answerRevealAtMs,
     answerStartAtMs: answerRevealAtMs,
     answerEndAtMs,
-    questionSentAt: serverTimestamp(),
+  };
+}
+
+async function preloadQuestionForReady(question, index, readyUntilMs) {
+  const stageStartedAtMs = getNow();
+  const {
+    cleanQuestion,
+    questionStartedAtMs,
+    answerRevealAtMs,
+    answerStartAtMs,
+    answerEndAtMs,
+  } = buildQuestionPayload(question, readyUntilMs);
+
+  await updateDoc(doc(db, "rooms", ROOM_ID), {
+    stage: "ready",
+    currentQuestion: cleanQuestion,
+    currentQuestionIndex: index,
+    questionStartedAtMs,
+    answerRevealAtMs,
+    answerStartAtMs,
+    answerEndAtMs,
+    questionSentAt: null,
     audioStartedAt: null,
     audioEndedAt: null,
     mediaStartedAt: null,
@@ -838,8 +866,27 @@ async function sendQuestion(question, index) {
     collectingBonusPlayerId: null,
     collectingBonusPoints: 0,
     rankMovementByPlayer: {},
+    nextQuestionReadyUntilMs: readyUntilMs,
+    nextQuestionReadyQuestionIndex: index,
+    stageStartedAtMs,
+    readyStartedAtMs: stageStartedAtMs,
+    revealStartedAtMs: null,
+    resultsStartedAtMs: null,
+    updatedAt: serverTimestamp(),
+  });
+}
+
+async function activatePreloadedQuestion() {
+  const stageStartedAtMs = getNow();
+  await updateDoc(doc(db, "rooms", ROOM_ID), {
+    stage: "question",
+    questionSentAt: serverTimestamp(),
     nextQuestionReadyUntilMs: null,
     nextQuestionReadyQuestionIndex: null,
+    stageStartedAtMs,
+    questionStageStartedAtMs: stageStartedAtMs,
+    revealStartedAtMs: null,
+    resultsStartedAtMs: null,
     updatedAt: serverTimestamp(),
   });
 }
@@ -940,10 +987,14 @@ async function answerSystemCheck({ playerId, playerName, answerText }) {
 }
 
 async function revealCorrectAnswer({ allowUndo = false } = {}) {
+  const stageStartedAtMs = getNow();
   await setDoc(
     doc(db, "rooms", ROOM_ID),
     {
       stage: "reveal",
+      stageStartedAtMs,
+      revealStartedAtMs: stageStartedAtMs,
+      resultsStartedAtMs: null,
       revealUndoUntilMs: allowUndo ? getNow() + 3000 : null,
       updatedAt: serverTimestamp(),
     },
@@ -953,10 +1004,15 @@ async function revealCorrectAnswer({ allowUndo = false } = {}) {
 
 async function reopenQuestion(room) {
   if (room?.stage !== "reveal" || getQuestionTimeLeft(room?.currentQuestion, room, getNow()) <= 0) return;
+  const stageStartedAtMs = getNow();
   await setDoc(
     doc(db, "rooms", ROOM_ID),
     {
       stage: "question",
+      stageStartedAtMs,
+      questionStageStartedAtMs: stageStartedAtMs,
+      revealStartedAtMs: null,
+      resultsStartedAtMs: null,
       revealUndoUntilMs: null,
       updatedAt: serverTimestamp(),
     },
@@ -965,17 +1021,21 @@ async function reopenQuestion(room) {
 }
 
 async function showResults() {
+  const stageStartedAtMs = getNow();
   await setDoc(
     doc(db, "rooms", ROOM_ID),
     {
       stage: "results",
+      stageStartedAtMs,
+      resultsStartedAtMs: stageStartedAtMs,
+      revealUndoUntilMs: null,
       questionIgnored: false,
       collectingBonusByPlayer: {},
       collectingBonusJokerByPlayer: {},
       collectingBonusPlayerId: null,
       collectingBonusPoints: 0,
       rankMovementByPlayer: {},
-    updatedAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
     },
     { merge: true }
   );
@@ -1232,7 +1292,7 @@ function AutoLockJokers({ room, players }) {
       const questionId = room?.currentQuestion?.questionId;
       const questionNumber = (room?.currentQuestionIndex ?? -1) + 1;
 
-      if (!room || room.stage !== "question" || !questionId) return;
+      if (!room || !["ready", "question"].includes(room.stage) || !questionId) return;
       if (lockedQuestionId === questionId) return;
 
       setLockedQuestionId(questionId);
@@ -1995,8 +2055,10 @@ function QuestionScreen({
   const timeLeft = getQuestionTimeLeft(question, room, now);
   const activeStage = visualStage || room?.stage;
   const isQuestionEnded = activeStage === "reveal" || activeStage === "results";
+  const questionStartAt = getQuestionStartAt(room, question);
+  const waitingForQuestionStart = activeStage === "question" && questionStartAt && now < questionStartAt;
 
-  const canAnswer = !isAdmin && optionsVisible && activeStage === "question";
+  const canAnswer = !isAdmin && !waitingForQuestionStart && optionsVisible && activeStage === "question";
   const liveProgressPercent = getPointsProgressPercent(question, room, now);
   useCountdownBeeps({
     active: activeStage === "question" && optionsVisible && !isQuestionEnded,
@@ -2043,6 +2105,19 @@ function QuestionScreen({
       : realJokerAvailableForThisQuestion);
 
   if (!question) return null;
+
+  if (waitingForQuestionStart) {
+    return (
+      <div
+        className={
+          displayMode
+            ? "display-panel question-stage-card sync-start-placeholder"
+            : "card question-stage-card sync-start-placeholder"
+        }
+        aria-hidden="true"
+      />
+    );
+  }
 
   return (
     <div
@@ -3252,13 +3327,9 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
     setAdminAdvancing(true);
     const readyDelayMs = 3000;
     const readyUntilMs = getNow() + readyDelayMs;
-    await updateDoc(doc(db, "rooms", ROOM_ID), {
-      nextQuestionReadyUntilMs: readyUntilMs,
-      nextQuestionReadyQuestionIndex: questionIndex,
-      updatedAt: serverTimestamp(),
-    });
+    await preloadQuestionForReady(nextQuestion, questionIndex, readyUntilMs);
     setTimeout(async () => {
-      await sendQuestion(nextQuestion, questionIndex);
+      await activatePreloadedQuestion();
       setAdminAdvancing(false);
     }, readyDelayMs);
   }
@@ -3942,11 +4013,7 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
 
     const readyDelayMs = 3000;
     const readyUntilMs = getNow() + readyDelayMs;
-    await updateDoc(doc(db, "rooms", ROOM_ID), {
-      nextQuestionReadyUntilMs: readyUntilMs,
-      nextQuestionReadyQuestionIndex: questionIndex,
-      updatedAt: serverTimestamp(),
-    });
+    await preloadQuestionForReady(question, questionIndex, readyUntilMs);
 
     setPreviewStage("ready");
     setReadyCountdown(3);
@@ -3962,8 +4029,8 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
       clearInterval(readyTimerRef.current);
       readyTimerRef.current = null;
       setReadyCountdown(null);
+      await activatePreloadedQuestion();
       setPreviewStage(null);
-      await sendQuestion(question, questionIndex);
     }, 1000);
   }
 
@@ -5174,6 +5241,7 @@ function PlayerPanel() {
   const playerNow = useNow(250);
   const readySeconds = Math.max(0, Math.ceil((Number(room?.nextQuestionReadyUntilMs || 0) - playerNow) / 1000));
   const isWaitingForReadyQuestion =
+    stage === "ready" ||
     Number(room?.nextQuestionReadyQuestionIndex ?? -1) > currentQuestionIndex &&
     (stage === "instructions" || stage === "registration" || stage === "practiceComplete" || stage === "reveal" || stage === "results");
 
