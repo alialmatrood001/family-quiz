@@ -78,26 +78,48 @@ function playCountdownBeep(timeLeft = 3) {
     if (!AudioContextClass) return;
     const audioContext = new AudioContextClass();
     const now = audioContext.currentTime;
-    const primary = timeLeft <= 1 ? 660 : timeLeft === 2 ? 760 : 860;
-    const accent = timeLeft <= 1 ? 990 : primary + 170;
 
-    function tone({ frequency, start, duration, type = "triangle", volume = 0.11 }) {
+    function alarmPulse({ start, duration, low, high, volume = 0.12 }) {
       const oscillator = audioContext.createOscillator();
+      const wobble = audioContext.createOscillator();
+      const wobbleGain = audioContext.createGain();
       const gain = audioContext.createGain();
-      oscillator.type = type;
-      oscillator.frequency.setValueAtTime(frequency, now + start);
+      const begin = now + start;
+
+      oscillator.type = "sawtooth";
+      oscillator.frequency.setValueAtTime(low, begin);
+      oscillator.frequency.exponentialRampToValueAtTime(high, begin + duration * 0.44);
+      oscillator.frequency.exponentialRampToValueAtTime(low * 0.92, begin + duration);
+
+      wobble.type = "square";
+      wobble.frequency.setValueAtTime(timeLeft <= 1 ? 18 : 13, begin);
+      wobbleGain.gain.setValueAtTime(timeLeft <= 1 ? 42 : 26, begin);
+      wobble.connect(wobbleGain);
+      wobbleGain.connect(oscillator.frequency);
+
       gain.gain.setValueAtTime(0.001, now + start);
-      gain.gain.exponentialRampToValueAtTime(volume, now + start + 0.012);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + start + duration);
+      gain.gain.exponentialRampToValueAtTime(volume, begin + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.001, begin + duration);
       oscillator.connect(gain);
       gain.connect(audioContext.destination);
-      oscillator.start(now + start);
-      oscillator.stop(now + start + duration + 0.018);
+      oscillator.start(begin);
+      wobble.start(begin);
+      oscillator.stop(begin + duration + 0.02);
+      wobble.stop(begin + duration + 0.02);
     }
 
-    tone({ frequency: primary, start: 0, duration: 0.105, volume: timeLeft <= 1 ? 0.14 : 0.095 });
-    tone({ frequency: accent, start: 0.095, duration: timeLeft <= 1 ? 0.18 : 0.12, type: "sine", volume: timeLeft <= 1 ? 0.13 : 0.085 });
-    setTimeout(() => audioContext.close?.(), timeLeft <= 1 ? 420 : 320);
+    if (timeLeft <= 1) {
+      alarmPulse({ start: 0, duration: 0.12, low: 780, high: 1180, volume: 0.13 });
+      alarmPulse({ start: 0.15, duration: 0.12, low: 820, high: 1260, volume: 0.13 });
+      alarmPulse({ start: 0.3, duration: 0.2, low: 900, high: 1420, volume: 0.15 });
+    } else if (timeLeft === 2) {
+      alarmPulse({ start: 0, duration: 0.16, low: 690, high: 1080, volume: 0.12 });
+      alarmPulse({ start: 0.2, duration: 0.11, low: 760, high: 1160, volume: 0.1 });
+    } else {
+      alarmPulse({ start: 0, duration: 0.18, low: 620, high: 980, volume: 0.105 });
+    }
+
+    setTimeout(() => audioContext.close?.(), timeLeft <= 1 ? 720 : 520);
   } catch {
     // Browsers can block audio until the page has received a user gesture.
   }
@@ -112,7 +134,7 @@ function useCountdownBeeps({ active, timeLeft, questionId }) {
     if (lastBeepRef.current === beepKey) return;
     lastBeepRef.current = beepKey;
     playCountdownBeep(timeLeft);
-    vibrateDevice(timeLeft <= 1 ? [60, 35, 130] : [45, 28, 45]);
+    vibrateDevice(timeLeft <= 1 ? [50, 35, 70, 35, 150] : timeLeft === 2 ? [45, 30, 70] : [55]);
   }, [active, timeLeft, questionId]);
 
   useEffect(() => {
@@ -430,10 +452,12 @@ function usePlayers() {
     const unsub = onSnapshot(
       collection(db, "rooms", ROOM_ID, "players"),
       (snap) => {
-        const list = snap.docs.map((d) => ({
-          id: d.id,
-          ...d.data(),
-        }));
+        const list = snap.docs
+          .map((d) => ({
+            id: d.id,
+            ...d.data(),
+          }))
+          .filter((player) => !isVisitorRecord(player));
 
         list.sort((a, b) => (b.score || 0) - (a.score || 0));
         setPlayers(list);
@@ -611,13 +635,15 @@ function useVisitors() {
 
   useEffect(() => {
     const unsub = onSnapshot(
-      collection(db, "rooms", ROOM_ID, "visitors"),
+      collection(db, "rooms", ROOM_ID, "players"),
       (snap) => {
         setVisitors(
-          snap.docs.map((d) => ({
-            id: d.id,
-            ...d.data(),
-          }))
+          snap.docs
+            .map((d) => ({
+              id: d.id,
+              ...d.data(),
+            }))
+            .filter((item) => isVisitorRecord(item))
         );
       }
     );
@@ -635,6 +661,10 @@ function getOrCreateVisitorId() {
   const id = `visitor-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
   localStorage.setItem(storageKey, id);
   return id;
+}
+
+function isVisitorRecord(item) {
+  return !!item?.isVisitorOnly || String(item?.id || "").startsWith("visitor-");
 }
 
 /* Firebase actions */
@@ -678,7 +708,6 @@ async function resetPlayersAnswersMessages() {
   await clearCollection(["rooms", ROOM_ID, "players"]);
   await clearCollection(["rooms", ROOM_ID, "answers"]);
   await clearCollection(["rooms", ROOM_ID, "messages"]);
-  await clearCollection(["rooms", ROOM_ID, "visitors"]);
 }
 
 async function clearAnswersAndMessages() {
@@ -1728,16 +1757,22 @@ function InstructionsPage({ isAdmin = false, room = null, players = [], onOpenRe
               <p>استخدمه في الوقت المناسب.</p>
             </div>
           </div>
-          <div className="joker-choice-grid" aria-label="شرح الجوكر">
-            <div className="joker-choice-card before-choice">
-              <strong>قبل عرض السؤال</strong>
-              <div><span>لو إجابتك صحيحة</span><b>x3</b></div>
-              <div><span>لو إجابتك خاطئة</span><em>تُخصم قيمة السؤال</em></div>
+          <div className="joker-focus-card" aria-label="شرح الجوكر">
+            <div className="joker-use-note">
+              <span>لو استخدمته</span>
             </div>
-            <div className="joker-choice-card after-choice">
-              <strong>بعد عرض السؤال</strong>
-              <div><span>لو إجابتك صحيحة</span><b>x2</b></div>
-              <div><span>لو إجابتك خاطئة</span><em>تُخصم قيمة السؤال</em></div>
+            <div className="joker-multiplier-pair">
+              <div className="joker-multiplier-option before">
+                <small>قبل ما تشوف السؤال</small>
+                <b>x3</b>
+              </div>
+              <div className="joker-multiplier-option after">
+                <small>بعد ما تشوف السؤال</small>
+                <b>x2</b>
+              </div>
+            </div>
+            <div className="joker-result-note">
+              <span className="negative">↘ الخطأ يخصم قيمة السؤال</span>
             </div>
           </div>
         </div>
@@ -1775,19 +1810,10 @@ function AnsweredCountBadge({ answersCount, playersCount }) {
   const allAnswered = playersCount > 0 && answersCount >= playersCount;
 
   return (
-    <div
-      className="answered-count-badge"
-      style={
-        allAnswered
-          ? {
-              background: "#e8f8ea",
-              borderColor: "#6cc276",
-              color: "#18733a",
-            }
-          : undefined
-      }
-    >
-      أجاب {answersCount} من أصل {playersCount}
+    <div className={`answered-count-badge ${allAnswered ? "all-answered" : ""}`}>
+      <span>الإجابات</span>
+      <strong>{answersCount}</strong>
+      <small>من {playersCount}</small>
     </div>
   );
 }
@@ -2520,13 +2546,7 @@ function JokerControl({ player, stage, room = null, compact = false, locked = fa
   }
 
   if (locked && stage === "question") {
-    return (
-      <button type="button" className={compact ? "joker-token joker-token-used compact-joker-token" : "joker-token joker-token-used"} disabled>
-        <b className="joker-multiplier-badge">{isDuringQuestion ? "x2" : "x3"}</b>
-        <div className="joker-icon">{"\u{1F0CF}"}</div>
-        <span>تم استخدامه</span>
-      </button>
-    );
+    return null;
   }
 
   return (
@@ -3203,9 +3223,15 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
     ? practiceQuestions[currentQuestionIndex + 1] || (currentQuestionIndex < 0 ? practiceQuestions[0] : null)
     : competitionQuestions[currentQuestionIndex + 1] || (currentQuestionIndex < 0 ? competitionQuestions[0] : null);
   const activeVisitors = visitors.filter((visitor) => Number(visitor.seenAtMs || 0) > adminNow - 120000);
-  const openedLinkCount = activeVisitors.length;
-  const registeredCount = players.length;
-  const waitingRegistrationCount = Math.max(0, openedLinkCount - registeredCount);
+  const registeredCount = players.filter((player) => !isVisitorRecord(player)).length;
+  const openedLinkCount = Math.max(activeVisitors.length, registeredCount);
+  const registrationPercent = openedLinkCount > 0 ? Math.min(100, Math.round((registeredCount / openedLinkCount) * 100)) : 0;
+  const editingPlayerBaseline = editingPlayer
+    ? Number(editingPlayer.manualScoreDelta || 0) !== 0 && Number.isFinite(Number(editingPlayer.manualScoreBaseline))
+      ? Number(editingPlayer.manualScoreBaseline)
+      : Number(editingPlayer.score || 0)
+    : 0;
+  const editingPlayerHasManualDelta = !!editingPlayer && Number(editingPlayer.manualScoreDelta || 0) !== 0;
 
   function openAdminSection(section) {
     if (section === activeAdminSection) return;
@@ -3341,6 +3367,24 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
     setEditPlayerJokers(player.jokerUsed ? 0 : 1);
   }
 
+  async function restoreEditedPlayerOriginalScore() {
+    if (!editingPlayer || !editingPlayerHasManualDelta) return;
+    await updateDoc(doc(db, "rooms", ROOM_ID, "players", editingPlayer.id), {
+      score: editingPlayerBaseline,
+      manualScoreBaseline: editingPlayerBaseline,
+      manualScoreDelta: 0,
+      manualScoreAdjustedAt: null,
+    });
+    setEditPlayerScore(editingPlayerBaseline);
+    setEditingPlayer((player) => player ? {
+      ...player,
+      score: editingPlayerBaseline,
+      manualScoreBaseline: editingPlayerBaseline,
+      manualScoreDelta: 0,
+      manualScoreAdjustedAt: null,
+    } : player);
+  }
+
   async function saveEditedPlayer() {
     if (!editingPlayer) return;
     const cleanName = editPlayerName.trim();
@@ -3355,9 +3399,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
       alert("الاسم المستعار مستخدم بالفعل.");
       return;
     }
-    const baseline = Number.isFinite(Number(editingPlayer.manualScoreBaseline))
-      ? Number(editingPlayer.manualScoreBaseline)
-      : Number(editingPlayer.score || 0);
+    const baseline = editingPlayerBaseline;
     const manualDelta = score - baseline;
 
     await updateDoc(doc(db, "rooms", ROOM_ID, "players", editingPlayer.id), {
@@ -3494,12 +3536,12 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
               <small>سجلوا</small>
               <strong>{registeredCount}</strong>
             </div>
-            <div className={waitingRegistrationCount > 0 ? "waiting" : "ready"}>
-              <small>{waitingRegistrationCount > 0 ? "بانتظار" : "جاهز"}</small>
-              <strong>{waitingRegistrationCount}</strong>
-            </div>
           </div>
-          <p>يعتمد العدد على الأجهزة النشطة حاليًا.</p>
+          <div className="live-registration-ratio">
+            <span>نسبة التسجيل</span>
+            <strong>{registrationPercent}%</strong>
+            <i style={{ "--ratio": `${registrationPercent}%` }} />
+          </div>
         </div>
       </div>
       <div className="dashboard-live-grid">
@@ -3528,7 +3570,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
                         <td><strong>{player.emoji || "👤"} {player.name}</strong></td>
                         <td>{player.fullName || "—"}</td>
                         <td style={{ direction: "ltr", textAlign: "right" }}>{player.phone || "—"}</td>
-                        <td><strong>{player.score || 0}</strong></td>
+                        <td><strong>{player.score || 0}</strong>{Number(player.manualScoreDelta || 0) !== 0 && <span className={player.manualScoreDelta > 0 ? "manual-delta positive" : "manual-delta negative"}>{player.manualScoreDelta > 0 ? `+${player.manualScoreDelta}` : player.manualScoreDelta}</span>}</td>
                         <td>{player.jokerUsed ? "\u{1F0CF} مستخدم" : player.pendingJoker ? "\u{1F7E2} مفعل" : "متاح"}</td>
                         <td><button type="button" className="icon-action-button" title="تعديل المتسابق" aria-label="تعديل المتسابق" onClick={() => openEditPlayer(player)}>✎</button></td>
                       </tr>
@@ -3557,7 +3599,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
                     <div className="question-report-title"><strong>{questionNumber}. {question.text} <span className="report-accuracy-inline" style={{ color: getAccuracyColor(percent) }}>({percent}%)</span></strong></div>
                     <span className="expand-indicator">{expanded ? "−" : "+"}</span>
                   </button>
-                  {expanded && <div className="question-report-body">{rows.length === 0 ? <span className="muted">لا توجد إجابات لهذا السؤال.</span> : <div className="admin-table-wrap"><table className="admin-table"><thead><tr><th>المتسابق</th><th>الاسم الثلاثي</th><th>الجوال</th><th>الإجابة</th><th>النتيجة</th><th>النقاط</th><th>جوكر</th></tr></thead><tbody>{rows.map(({ answer, player, selectedText }) => <tr key={answer.id}><td><strong>{player?.name || answer.playerName}</strong></td><td>{player?.fullName || answer.fullName || "—"}</td><td style={{ direction: "ltr", textAlign: "right" }}>{player?.phone || answer.phone || "—"}</td><td>{selectedText}</td><td style={{ color: answer.isCorrect ? "#18733a" : "#a51f1f", fontWeight: 900 }}>{answer.isCorrect ? "صح" : "خطأ"}</td><td><strong>{answer.points || 0}</strong></td><td>{answer.jokerApplied ? "\u{1F0CF}" : "—"}</td></tr>)}</tbody></table></div>}</div>}
+                  {expanded && <div className="question-report-body">{rows.length === 0 ? <span className="muted">لا توجد إجابات لهذا السؤال.</span> : <div className="admin-table-wrap"><table className="admin-table live-question-answers-table"><thead><tr><th>المتسابق</th><th>الاسم الثلاثي</th><th>الإجابة</th><th>النتيجة</th><th>النقاط</th><th>جوكر</th></tr></thead><tbody>{rows.map(({ answer, player, selectedText }) => <tr className={answer.isCorrect ? "live-answer-row-correct" : "live-answer-row-wrong"} key={answer.id}><td><strong>{player?.name || answer.playerName}</strong></td><td>{player?.fullName || answer.fullName || "—"}</td><td>{selectedText}</td><td style={{ color: answer.isCorrect ? "#18733a" : "#a51f1f", fontWeight: 900 }}>{answer.isCorrect ? "صح" : "خطأ"}</td><td><strong>{answer.points || 0}</strong></td><td>{answer.jokerApplied ? "\u{1F0CF}" : "—"}</td></tr>)}</tbody></table></div>}</div>}
                 </div>
               );
             })}</div>
@@ -3584,7 +3626,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
                     <div className="player-report-title"><strong>{player.emoji || ""} {player.name} {player.fullName && <small className="player-fullname-inline">({player.fullName})</small>} <span className="report-accuracy-inline" style={{ color: getAccuracyColor(percent) }}>({percent}%)</span></strong></div>
                     <span className="expand-indicator">{expanded ? "−" : "+"}</span>
                   </button>
-                  {expanded && <div className="player-report-body"><div className="admin-table-wrap"><table className="admin-table"><thead><tr><th>رقم السؤال</th><th>السؤال</th><th>إجابة المتسابق</th><th>النتيجة</th><th>النقاط</th><th>جوكر</th></tr></thead><tbody>{playerAnswers.map(({ question, questionNumber, answer, selectedText }) => <tr key={`${player.id}-${question.id}`}><td>{questionNumber}</td><td>{question.text}</td><td>{selectedText}</td><td style={{ fontWeight: 900, color: answer ? (answer.isCorrect ? "#18733a" : "#a51f1f") : undefined }}>{answer ? (answer.isCorrect ? "صح" : "خطأ") : "—"}</td><td>{answer?.points ?? "—"}</td><td>{answer?.jokerApplied ? "\u{1F0CF}" : "—"}</td></tr>)}</tbody></table></div></div>}
+                  {expanded && <div className="player-report-body"><div className="admin-table-wrap"><table className="admin-table live-player-answers-table"><thead><tr><th>رقم السؤال</th><th>السؤال</th><th>إجابة المتسابق</th><th>النتيجة</th><th>النقاط</th></tr></thead><tbody>{playerAnswers.map(({ question, questionNumber, answer, selectedText }) => <tr className={answer ? (answer.isCorrect ? "live-answer-row-correct" : "live-answer-row-wrong") : ""} key={`${player.id}-${question.id}`}><td>{questionNumber}</td><td>{question.text} {answer?.jokerApplied && <span className="inline-joker-mark" title="استخدم الجوكر">{"\u{1F0CF}"}</span>}</td><td>{selectedText}</td><td style={{ fontWeight: 900, color: answer ? (answer.isCorrect ? "#18733a" : "#a51f1f") : undefined }}>{answer ? (answer.isCorrect ? "صح" : "خطأ") : "—"}</td><td>{answer?.points ?? "—"}</td></tr>)}</tbody></table></div></div>}
                 </div>
               );
             })}</div>
@@ -3683,6 +3725,9 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
             <input value={editPlayerName} onChange={(e) => setEditPlayerName(e.target.value)} placeholder="الاسم المستعار" />
             <label>النقاط الحالية</label>
             <input type="number" value={editPlayerScore} onChange={(e) => setEditPlayerScore(e.target.value)} placeholder="النقاط الحالية" />
+            <button type="button" className="secondary-action restore-score-button" onClick={restoreEditedPlayerOriginalScore} disabled={!editingPlayerHasManualDelta}>
+              إرجاع النقاط الأصلية
+            </button>
             <label>حالة الجوكر</label>
             <div className="joker-availability-toggle">
               <button type="button" className={editPlayerJokers === 1 ? "active" : ""} onClick={() => setEditPlayerJokers(1)}>متوفر</button>
@@ -3710,17 +3755,16 @@ function HealthCheckResultsPanel({ room, players = [] }) {
   const okCount = responses.filter((item) => item.answerText === okLabel || item.answerText === "كل شي تمام").length;
   const problemCount = responses.filter((item) => item.answerText === problemLabel || item.answerText === "في مشكلة").length;
   const totalCount = responses.length;
-  const pendingCount = Math.max(0, players.length - totalCount);
+  const votersTarget = players.length;
 
   return (
     <div className={check.kind === "instructions" ? "admin-health-popover instructions-health-popover" : "admin-health-popover"}>
       <div className="health-popover-title">
         <strong>{check.title || "استفتاء"}</strong>
-        <span>{totalCount} رد</span>
+        <span>قام بالتصويت {totalCount} من {votersTarget}</span>
       </div>
       <div className="health-result-row ok"><span>{okLabel}</span><strong>{okCount}</strong></div>
       <div className="health-result-row problem"><span>{problemLabel}</span><strong>{problemCount}</strong></div>
-      {check.kind === "instructions" && <div className="health-result-row pending"><span>لم يصوّت</span><strong>{pendingCount}</strong></div>}
       <button type="button" className="health-stop-button" onClick={stopSystemCheck}>إيقاف</button>
     </div>
   );
@@ -4172,9 +4216,12 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
 
         {displayStage === "practiceComplete" && (
           <div className="display-grid-main">
-            <div className="display-panel registration-screen">
-              <h2>انتهت التجربة</h2>
-              <p className="muted">استعدوا للمسابقة الفعلية. سنبدأ بعد لحظات.</p>
+            <div className="display-panel registration-screen practice-complete-screen">
+              <div className="practice-complete-hero">
+                <span>✓</span>
+                <h2>انتهت التجربة</h2>
+                <p className="muted">استعدوا للمسابقة الفعلية. سنبدأ بعد لحظات.</p>
+              </div>
 
               <div className="players-grid display-players-grid">
                 {players.map((player) => (
@@ -4798,7 +4845,7 @@ function PlayerWaiting({ room, player, players, setPlayerName, hasNextQuestion =
 
   if (stage === "practiceComplete") {
     title = "انتهت التجربة";
-    text = "نقاطك صُفّرت للمسابقة الفعلية. يمكنك تفعيل الجوكر قبل السؤال الأول.";
+    text = "استعد لبدء المسابقة الفعلية.";
   }
 
   if (stage === "results") {
@@ -5064,6 +5111,37 @@ function PlayerHealthCheck({ room, player }) {
   );
 }
 
+function getLocalAnswerKey(playerId, questionId) {
+  return `familyQuizAnswered:${ROOM_ID}:${playerId}:${questionId}`;
+}
+
+function readLocalAnswerLock(playerId, questionId) {
+  if (!playerId || !questionId) return null;
+  try {
+    const raw = localStorage.getItem(getLocalAnswerKey(playerId, questionId));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return {
+      selectedIndex: Number.isFinite(Number(parsed.selectedIndex)) ? Number(parsed.selectedIndex) : -1,
+      answeredAt: Number(parsed.answeredAt || 0) || null,
+    };
+  } catch {
+    return { selectedIndex: -1, answeredAt: null };
+  }
+}
+
+function writeLocalAnswerLock(playerId, questionId, selectedIndex, answeredAt) {
+  if (!playerId || !questionId) return;
+  try {
+    localStorage.setItem(
+      getLocalAnswerKey(playerId, questionId),
+      JSON.stringify({ selectedIndex, answeredAt })
+    );
+  } catch {
+    // Local answer locks are only a temporary UX guard; Firebase remains the source of truth.
+  }
+}
+
 function PlayerPanel() {
   const room = useRoom();
   const players = usePlayers();
@@ -5089,6 +5167,7 @@ function PlayerPanel() {
   const currentQuestionIndex = room?.currentQuestionIndex ?? -1;
   const hasNextQuestion = !!questions[currentQuestionIndex + 1];
   const lastAnswer = answers.find((answer) => answer.playerId === playerId);
+  const localAnswerLock = readLocalAnswerLock(playerId, currentQuestion?.questionId);
   const playerRank = players.findIndex((item) => item.id === playerId) + 1;
   const lastAnswerId = lastAnswer?.id;
   const lastAnswerIsCorrect = lastAnswer?.isCorrect;
@@ -5104,8 +5183,9 @@ function PlayerPanel() {
     async function markVisitorSeen() {
       try {
         await setDoc(
-          doc(db, "rooms", ROOM_ID, "visitors", visitorId),
+          doc(db, "rooms", ROOM_ID, "players", visitorId),
           {
+            isVisitorOnly: true,
             seenAtMs: Date.now(),
             seenAt: serverTimestamp(),
             playerId: player?.id || null,
@@ -5148,16 +5228,24 @@ function PlayerPanel() {
   }, [stage, playerId, players]);
 
   useEffect(() => {
+    const localLock = readLocalAnswerLock(playerId, currentQuestion?.questionId);
     setSelectedIndex(null);
     setAnswerMessage("");
     setFrozenProgressPercent(null);
-    setAnsweredQuestionId(null);
-  }, [currentQuestion?.questionId]);
+    if (localLock && currentQuestion?.questionId) {
+      setSelectedIndex(localLock.selectedIndex);
+      setAnswerMessage("تم إرسال إجابتك");
+      setAnsweredQuestionId(currentQuestion.questionId);
+    } else {
+      setAnsweredQuestionId(null);
+    }
+  }, [currentQuestion?.questionId, playerId]);
 
 
   async function submitAnswer(index) {
     if (!playerId || !playerName || !currentQuestion || !player) return;
     if (answeredQuestionId === currentQuestion.questionId) return;
+    if (readLocalAnswerLock(playerId, currentQuestion.questionId)) return;
     if (lastAnswer) return;
 
     const answeredAt = getNow();
@@ -5200,6 +5288,7 @@ function PlayerPanel() {
     setFrozenProgressPercent(frozenPercent);
     setAnsweredQuestionId(currentQuestion.questionId);
     setAnswerMessage("تم إرسال إجابتك");
+    writeLocalAnswerLock(playerId, currentQuestion.questionId, index, answeredAt);
     vibrateDevice(65);
 
     await addDoc(collection(db, "rooms", ROOM_ID, "answers"), {
@@ -5348,9 +5437,9 @@ function PlayerPanel() {
         question={currentQuestion}
         room={room}
         onAnswer={submitAnswer}
-        selectedIndex={selectedIndex ?? lastAnswer?.selectedIndex ?? null}
-        answerMessage={answerMessage || (lastAnswer ? "تم إرسال إجابتك" : "")}
-        frozenProgressPercent={frozenProgressPercent ?? (lastAnswer ? getPointsProgressPercent(currentQuestion, room, lastAnswer.answeredAt) : null)}
+        selectedIndex={selectedIndex ?? lastAnswer?.selectedIndex ?? localAnswerLock?.selectedIndex ?? null}
+        answerMessage={answerMessage || (lastAnswer || localAnswerLock ? "تم إرسال إجابتك" : "")}
+        frozenProgressPercent={frozenProgressPercent ?? (lastAnswer ? getPointsProgressPercent(currentQuestion, room, lastAnswer.answeredAt) : localAnswerLock?.answeredAt ? getPointsProgressPercent(currentQuestion, room, localAnswerLock.answeredAt) : null)}
         currentPlayer={player}
       />
 
