@@ -79,47 +79,39 @@ function playCountdownBeep(timeLeft = 3) {
     const audioContext = new AudioContextClass();
     const now = audioContext.currentTime;
 
-    function alarmPulse({ start, duration, low, high, volume = 0.12 }) {
-      const oscillator = audioContext.createOscillator();
-      const wobble = audioContext.createOscillator();
-      const wobbleGain = audioContext.createGain();
-      const gain = audioContext.createGain();
+    function bellStrike({ start, base = 880, duration = 0.34, volume = 0.11 }) {
       const begin = now + start;
+      const master = audioContext.createGain();
+      master.gain.setValueAtTime(0.001, begin);
+      master.gain.exponentialRampToValueAtTime(volume, begin + 0.008);
+      master.gain.exponentialRampToValueAtTime(0.001, begin + duration);
+      master.connect(audioContext.destination);
 
-      oscillator.type = "sawtooth";
-      oscillator.frequency.setValueAtTime(low, begin);
-      oscillator.frequency.exponentialRampToValueAtTime(high, begin + duration * 0.44);
-      oscillator.frequency.exponentialRampToValueAtTime(low * 0.92, begin + duration);
-
-      wobble.type = "square";
-      wobble.frequency.setValueAtTime(timeLeft <= 1 ? 18 : 13, begin);
-      wobbleGain.gain.setValueAtTime(timeLeft <= 1 ? 42 : 26, begin);
-      wobble.connect(wobbleGain);
-      wobbleGain.connect(oscillator.frequency);
-
-      gain.gain.setValueAtTime(0.001, now + start);
-      gain.gain.exponentialRampToValueAtTime(volume, begin + 0.01);
-      gain.gain.exponentialRampToValueAtTime(0.001, begin + duration);
-      oscillator.connect(gain);
-      gain.connect(audioContext.destination);
-      oscillator.start(begin);
-      wobble.start(begin);
-      oscillator.stop(begin + duration + 0.02);
-      wobble.stop(begin + duration + 0.02);
+      [1, 2.01, 2.72].forEach((ratio, index) => {
+        const oscillator = audioContext.createOscillator();
+        const gain = audioContext.createGain();
+        oscillator.type = index === 0 ? "triangle" : "sine";
+        oscillator.frequency.setValueAtTime(base * ratio, begin);
+        oscillator.frequency.exponentialRampToValueAtTime(base * ratio * 0.985, begin + duration);
+        gain.gain.setValueAtTime(index === 0 ? 0.95 : 0.28, begin);
+        gain.gain.exponentialRampToValueAtTime(0.001, begin + duration * (index === 0 ? 0.92 : 0.68));
+        oscillator.connect(gain);
+        gain.connect(master);
+        oscillator.start(begin);
+        oscillator.stop(begin + duration + 0.03);
+      });
     }
 
     if (timeLeft <= 1) {
-      alarmPulse({ start: 0, duration: 0.12, low: 780, high: 1180, volume: 0.13 });
-      alarmPulse({ start: 0.15, duration: 0.12, low: 820, high: 1260, volume: 0.13 });
-      alarmPulse({ start: 0.3, duration: 0.2, low: 900, high: 1420, volume: 0.15 });
+      bellStrike({ start: 0, base: 1040, duration: 0.28, volume: 0.13 });
+      bellStrike({ start: 0.24, base: 1240, duration: 0.36, volume: 0.15 });
     } else if (timeLeft === 2) {
-      alarmPulse({ start: 0, duration: 0.16, low: 690, high: 1080, volume: 0.12 });
-      alarmPulse({ start: 0.2, duration: 0.11, low: 760, high: 1160, volume: 0.1 });
+      bellStrike({ start: 0, base: 940, duration: 0.32, volume: 0.12 });
     } else {
-      alarmPulse({ start: 0, duration: 0.18, low: 620, high: 980, volume: 0.105 });
+      bellStrike({ start: 0, base: 820, duration: 0.3, volume: 0.105 });
     }
 
-    setTimeout(() => audioContext.close?.(), timeLeft <= 1 ? 720 : 520);
+    setTimeout(() => audioContext.close?.(), timeLeft <= 1 ? 820 : 560);
   } catch {
     // Browsers can block audio until the page has received a user gesture.
   }
@@ -1041,6 +1033,17 @@ async function showResults() {
   );
 }
 
+async function toggleDisplayVideoSlot(enabled) {
+  await setDoc(
+    doc(db, "rooms", ROOM_ID),
+    {
+      displayVideoSlotEnabled: !!enabled,
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true }
+  );
+}
+
 async function archiveLastGame(players = [], questions = [], allAnswers = [], messages = []) {
   const sortedPlayers = [...players].sort((a, b) => (b.score || 0) - (a.score || 0));
   const savedAtMs = getNow();
@@ -1724,6 +1727,26 @@ function MessagesPanel({ messages }) {
   );
 }
 
+function DisplayVideoSlot() {
+  return (
+    <div className="display-video-slot" aria-label="مساحة الفيديو">
+      <div>
+        <span>مساحة الفيديو</span>
+        <strong>ضع الكاميرا هنا في برنامج البث</strong>
+      </div>
+    </div>
+  );
+}
+
+function DisplaySidePanel({ messages, videoEnabled }) {
+  return (
+    <div className={videoEnabled ? "display-side-panel has-video-slot" : "display-side-panel"}>
+      <MessagesPanel messages={messages} />
+      {videoEnabled && <DisplayVideoSlot />}
+    </div>
+  );
+}
+
 function buildAnswerStats(question, answers) {
   if (!question?.options) return [];
   const total = Math.max(answers.length, 1);
@@ -2330,6 +2353,7 @@ function ResultsDisplay({ room, players, messages }) {
   const isCollecting =
     room?.processedQuestionId !== room?.currentQuestion?.questionId;
   const questionNumber = (room?.currentQuestionIndex ?? 0) + 1;
+  const videoEnabled = !!room?.displayVideoSlotEnabled;
 
   return (
     <div className="results-display-grid">
@@ -2352,7 +2376,7 @@ function ResultsDisplay({ room, players, messages }) {
       </div>
 
       <div className="results-messages-area">
-        <MessagesPanel messages={messages} />
+        <DisplaySidePanel messages={messages} videoEnabled={videoEnabled} />
       </div>
     </div>
   );
@@ -2645,6 +2669,7 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
   const [imageUrl, setImageUrl] = useState("");
   const [optionImageUrls, setOptionImageUrls] = useState(["", ""]);
   const [options, setOptions] = useState(["", ""]);
+  const [visibleOptionImages, setVisibleOptionImages] = useState({});
   const [correctIndex, setCorrectIndex] = useState(0);
   const [maxPoints, setMaxPoints] = useState(1000);
   const [minPoints, setMinPoints] = useState(100);
@@ -2655,11 +2680,16 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
   const [bulkField, setBulkField] = useState("maxPoints");
   const [bulkValue, setBulkValue] = useState("");
   const [bulkSaving, setBulkSaving] = useState(false);
+  const [bulkScope, setBulkScope] = useState("main");
   const [expandedQuestionId, setExpandedQuestionId] = useState(null);
   const [draggedQuestionId, setDraggedQuestionId] = useState(null);
   const [dragOverQuestionId, setDragOverQuestionId] = useState(null);
   const [showBulkEditor, setShowBulkEditor] = useState(false);
   const [showPackageModal, setShowPackageModal] = useState(false);
+  const [questionSectionsOpen, setQuestionSectionsOpen] = useState({
+    main: true,
+    practice: true,
+  });
   const [newPackageName, setNewPackageName] = useState("");
   const [creatingPackage, setCreatingPackage] = useState(false);
   const [packageError, setPackageError] = useState("");
@@ -2681,6 +2711,10 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
   ];
   const mainQuestionRows = questions.filter((question) => !question.isPractice);
   const practiceQuestionRows = questions.filter((question) => question.isPractice);
+  const activePackageItem = availableQuestionPackages.find((item) => item.id === activePackageId) || {
+    id: activePackageId,
+    name: activePackageName,
+  };
 
   function resetForm() {
     setEditingId(null);
@@ -2690,6 +2724,7 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
     setMediaUrl("");
     setImageUrl("");
     setOptionImageUrls(["", ""]);
+    setVisibleOptionImages({});
     setOptions(["", ""]);
     setCorrectIndex(0);
     setMaxPoints(1000);
@@ -2699,8 +2734,9 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
     setIsPractice(false);
   }
 
-  function startCreate() {
+  function startCreate(practice = false) {
     resetForm();
+    setIsPractice(!!practice);
     setShowForm(true);
   }
 
@@ -2713,6 +2749,7 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
     setImageUrl(getQuestionImageUrl(question));
     setOptions(question.options?.length ? question.options.map(getOptionText) : ["", ""]);
     setOptionImageUrls(question.optionImageUrls?.length ? question.optionImageUrls : (question.options?.length ? question.options.map((option, index) => getOptionImage(option, question.optionImageUrls || [], index)) : ["", ""]));
+    setVisibleOptionImages(Object.fromEntries((question.optionImageUrls || []).map((url, index) => [index, !!url])));
     setCorrectIndex(Number(question.correctIndex || 0));
     setMaxPoints(Number(question.maxPoints || 1000));
     setMinPoints(Number(question.minPoints || 100));
@@ -2733,6 +2770,17 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
     setOptionImageUrls(copy);
   }
 
+  function showOptionImageInput(index) {
+    setVisibleOptionImages((current) => ({ ...current, [index]: true }));
+  }
+
+  function hideOptionImageInput(index) {
+    const copy = [...optionImageUrls];
+    copy[index] = "";
+    setOptionImageUrls(copy);
+    setVisibleOptionImages((current) => ({ ...current, [index]: false }));
+  }
+
   function addOption() {
     setOptions([...options, ""]);
     setOptionImageUrls([...optionImageUrls, ""]);
@@ -2746,6 +2794,7 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
     const nextOptionImages = optionImageUrls.filter((_, index) => index !== indexToRemove);
     setOptions(nextOptions);
     setOptionImageUrls(nextOptionImages);
+    setVisibleOptionImages(Object.fromEntries(nextOptionImages.map((url, index) => [index, !!url])));
 
     if (correctIndex === indexToRemove) {
       setCorrectIndex(0);
@@ -2760,12 +2809,14 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
     if (value === "true_false") {
       setOptions(["صح", "خطأ"]);
       setOptionImageUrls(["", ""]);
+      setVisibleOptionImages({});
       setCorrectIndex(0);
       setMediaUrl("");
       setImageUrl("");
     } else {
       setOptions(["", ""]);
       setOptionImageUrls(["", ""]);
+      setVisibleOptionImages({});
       setCorrectIndex(0);
       if (value !== "image") setImageUrl("");
       if (value !== "audio" && value !== "video") setMediaUrl("");
@@ -2865,6 +2916,7 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
       await setDoc(
         doc(db, "rooms", ROOM_ID),
         {
+          questionPackages: arrayUnion(packageItem),
           activePackageId: packageItem.id,
           activePackageName: packageItem.name,
           updatedAt: serverTimestamp(),
@@ -2879,6 +2931,35 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
     } finally {
       setCreatingPackage(false);
     }
+  }
+
+  async function deleteQuestionPackage(packageItem) {
+    if (!packageItem?.id || packageItem.id === DEFAULT_PACKAGE_ID) {
+      alert("لا يمكن حذف نموذج المسابقة الحالية.");
+      return;
+    }
+
+    if (!window.confirm(`حذف نموذج "${packageItem.name}"؟ سيتم حذف الأسئلة الموجودة داخله أيضًا.`)) return;
+
+    const packageQuestionsSnap = await getDocs(
+      query(collection(db, "rooms", ROOM_ID, "questions"), where("packageId", "==", packageItem.id))
+    );
+
+    await Promise.all(packageQuestionsSnap.docs.map((questionDoc) => deleteDoc(questionDoc.ref)));
+
+    const nextPackages = questionPackages.filter((item) => item.id !== packageItem.id && item.id !== DEFAULT_PACKAGE_ID);
+    await setDoc(
+      doc(db, "rooms", ROOM_ID),
+      {
+        questionPackages: nextPackages,
+        ...(activePackageId === packageItem.id
+          ? { activePackageId: DEFAULT_PACKAGE_ID, activePackageName: DEFAULT_PACKAGE_NAME }
+          : {}),
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true }
+    );
+    setShowPackageModal(false);
   }
 
   async function reorderQuestions(targetQuestionId) {
@@ -2905,7 +2986,8 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
 
   async function applyBulkUpdate() {
     const value = Number(bulkValue);
-    if (!questions.length || !Number.isFinite(value) || value < 0) {
+    const targetQuestions = bulkScope === "practice" ? practiceQuestionRows : mainQuestionRows;
+    if (!targetQuestions.length || !Number.isFinite(value) || value < 0) {
       alert("اكتب قيمة صحيحة لتطبيقها على جميع الأسئلة.");
       return;
     }
@@ -2917,11 +2999,12 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
       answerRevealDelaySeconds: "ثواني ظهور الأجوبة",
     };
 
-    if (!window.confirm(`تطبيق ${labels[bulkField]} = ${value} على جميع الأسئلة؟`)) return;
+    const scopeLabel = bulkScope === "practice" ? "الأسئلة التجريبية" : "أسئلة المسابقة";
+    if (!window.confirm(`تطبيق ${labels[bulkField]} = ${value} على ${scopeLabel}؟`)) return;
 
     setBulkSaving(true);
     await Promise.all(
-      questions.map((question) =>
+      targetQuestions.map((question) =>
         updateDoc(doc(db, "rooms", ROOM_ID, "questions", question.id), {
           [bulkField]: value,
           updatedAt: serverTimestamp(),
@@ -2931,6 +3014,16 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
     setBulkSaving(false);
     setBulkValue("");
     setShowBulkEditor(false);
+  }
+
+  function toggleQuestionSection(sectionId) {
+    setQuestionSectionsOpen((current) => ({ ...current, [sectionId]: !current[sectionId] }));
+  }
+
+  function openBulkEditor(scope) {
+    setBulkScope(scope);
+    setBulkValue("");
+    setShowBulkEditor(true);
   }
 
   function renderQuestionForm() {
@@ -2971,13 +3064,23 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
               <div className="option-editor-row" key={index}>
                 <div className="question-option-fields">
                   <input value={option} onChange={(e) => updateOption(index, e.target.value)} placeholder={`الإجابة ${index + 1}`} disabled={type === "true_false"} />
-                  {type !== "audio" && type !== "video" && <input value={optionImageUrls[index] || ""} onChange={(e) => updateOptionImage(index, e.target.value)} placeholder={`رابط صورة الخيار ${index + 1} - اختياري`} />}
+                  {type !== "audio" && type !== "video" && visibleOptionImages[index] && (
+                    <input value={optionImageUrls[index] || ""} onChange={(e) => updateOptionImage(index, e.target.value)} placeholder={`رابط صورة الخيار ${index + 1}`} />
+                  )}
                 </div>
 
                 <label className="radio-label">
                   <input type="radio" name="correct" checked={correctIndex === index} onChange={() => setCorrectIndex(index)} />
                   الصحيحة
                 </label>
+
+                {type !== "audio" && type !== "video" && !visibleOptionImages[index] && (
+                  <button type="button" className="small-button add-option-image-button" onClick={() => showOptionImageInput(index)}>إضافة صورة</button>
+                )}
+
+                {type !== "audio" && type !== "video" && visibleOptionImages[index] && (
+                  <button type="button" className="small-button remove-option-image-button" onClick={() => hideOptionImageInput(index)}>إلغاء الصورة</button>
+                )}
 
                 {type !== "true_false" && options.length > 2 && <button type="button" className="danger small-button option-delete-button" onClick={() => removeOption(index)}>حذف</button>}
               </div>
@@ -2992,11 +3095,6 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
             <div><label>وقت الإجابة بالثواني</label><input type="number" value={seconds} onChange={(e) => setSeconds(e.target.value)} /></div>
             <div><label>ثواني ظهور الأجوبة</label><input type="number" value={answerRevealDelaySeconds} onChange={(e) => setAnswerRevealDelaySeconds(e.target.value)} /></div>
           </div>
-
-          <label className="practice-question-toggle">
-            <input type="checkbox" checked={isPractice} onChange={(e) => setIsPractice(e.target.checked)} />
-            <span>هذا سؤال تجريبي ولا يدخل في نقاط المسابقة الفعلية</span>
-          </label>
 
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
             <button onClick={saveQuestion} disabled={saving}>{saving ? "جاري الحفظ..." : editingId ? "حفظ التعديل" : "حفظ السؤال"}</button>
@@ -3025,8 +3123,7 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
           </select>
         </label>
         <button className="question-package-button" onClick={() => setShowPackageModal(true)}>+ نموذج جديد</button>
-        <button className="question-add-button" onClick={startCreate}>+ إضافة سؤال</button>
-        <button className="question-bulk-toggle" onClick={() => setShowBulkEditor(true)}>تعديل الكل</button>
+        <button className="question-package-delete-button" onClick={() => deleteQuestionPackage(activePackageItem)} disabled={activePackageId === DEFAULT_PACKAGE_ID}>حذف النموذج</button>
       </div>
 
       {showPackageModal && <div className="modal-backdrop" onClick={() => setShowPackageModal(false)}>
@@ -3035,15 +3132,25 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
           <p className="muted">اختر المسابقة التي تريد إعداد أسئلتها، أو أضف مسابقة جديدة.</p>
           <div className="package-picker-list">
             {availableQuestionPackages.map((packageItem) => (
-              <button
-                type="button"
-                key={packageItem.id}
-                className={packageItem.id === activePackageId ? "active" : ""}
-                onClick={() => selectQuestionPackage(packageItem)}
-              >
-                <strong>{packageItem.name || DEFAULT_PACKAGE_NAME}</strong>
-                <span>{packageItem.id === activePackageId ? "نشطة الآن" : "اضغط للاختيار"}</span>
-              </button>
+              <div className={packageItem.id === activePackageId ? "package-picker-item active" : "package-picker-item"} key={packageItem.id}>
+                <button
+                  type="button"
+                  onClick={() => selectQuestionPackage(packageItem)}
+                >
+                  <strong>{packageItem.name || DEFAULT_PACKAGE_NAME}</strong>
+                  <span>{packageItem.id === activePackageId ? "نشطة الآن" : "اضغط للاختيار"}</span>
+                </button>
+                <button
+                  type="button"
+                  className="danger icon-action-button"
+                  title="حذف النموذج"
+                  aria-label="حذف النموذج"
+                  disabled={packageItem.id === DEFAULT_PACKAGE_ID}
+                  onClick={() => deleteQuestionPackage(packageItem)}
+                >
+                  ×
+                </button>
+              </div>
             ))}
           </div>
           <div className="package-create-row">
@@ -3057,8 +3164,8 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
 
       {showBulkEditor && <div className="modal-backdrop" onClick={() => setShowBulkEditor(false)}>
         <div className="modal-card bulk-question-modal" onClick={(event) => event.stopPropagation()}>
-          <h2>تعديل جميع الأسئلة</h2>
-          <p className="muted">اختر الحقل والقيمة الجديدة، ثم طبّقها على جميع الأسئلة دفعة واحدة.</p>
+          <h2>{bulkScope === "practice" ? "تعديل الأسئلة التجريبية" : "تعديل أسئلة المسابقة"}</h2>
+          <p className="muted">اختر الحقل والقيمة الجديدة، ثم طبّقها على هذا القسم فقط.</p>
           <div className="bulk-question-editor">
             <select value={bulkField} onChange={(event) => setBulkField(event.target.value)}>
               <option value="maxPoints">أعلى نقاط</option>
@@ -3069,18 +3176,26 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
             <input type="number" min="0" value={bulkValue} onChange={(event) => setBulkValue(event.target.value)} placeholder="القيمة الجديدة" />
           </div>
           <div className="bulk-modal-actions">
-            <button type="button" onClick={applyBulkUpdate} disabled={bulkSaving || !questions.length}>
-              {bulkSaving ? "جاري التطبيق..." : "تطبيق على جميع الأسئلة"}
+            <button type="button" onClick={applyBulkUpdate} disabled={bulkSaving || !(bulkScope === "practice" ? practiceQuestionRows.length : mainQuestionRows.length)}>
+              {bulkSaving ? "جاري التطبيق..." : "تطبيق"}
             </button>
             <button type="button" className="danger" onClick={() => setShowBulkEditor(false)}>إلغاء</button>
           </div>
         </div>
       </div>}
 
-      <div className="card">
-        <h2>أسئلة المسابقة</h2>
+      <section className="card questions-section-card">
+        <div className="questions-section-header">
+          <button type="button" className="questions-section-toggle" onClick={() => toggleQuestionSection("main")} aria-expanded={questionSectionsOpen.main}>
+            <span>أسئلة المسابقة</span>
+            <small>{mainQuestionRows.length} سؤال</small>
+            <b>{questionSectionsOpen.main ? "−" : "+"}</b>
+          </button>
+          <button type="button" className="section-add-question-button" onClick={(event) => { event.stopPropagation(); startCreate(false); }}>+ إضافة سؤال</button>
+          <button type="button" className="section-bulk-question-button" onClick={(event) => { event.stopPropagation(); openBulkEditor("main"); }}>تعديل شامل</button>
+        </div>
 
-        {mainQuestionRows.length === 0 ? (
+        {questionSectionsOpen.main && (mainQuestionRows.length === 0 ? (
           <p className="muted">لم تضف أي سؤال فعلي بعد.</p>
         ) : (
           <div className="questions-table-wrap">
@@ -3088,12 +3203,12 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
               <thead>
                 <tr>
                   <th>رقم</th>
+                  <th>إجراء</th>
                   <th>السؤال</th>
                   <th>النوع</th>
                   <th>القيمة</th>
                   <th>وقت الإجابة</th>
                   <th>ظهور الأجوبة</th>
-                  <th>إجراء</th>
                 </tr>
               </thead>
               <tbody>
@@ -3109,17 +3224,17 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
                     onClick={() => setExpandedQuestionId(expandedQuestionId === q.id ? null : q.id)}
                   >
                     <td><button type="button" className="drag-handle" title="اسحب لتغيير الترتيب" aria-label="اسحب لتغيير ترتيب السؤال">☷</button> <strong>{index + 1}</strong></td>
-                    <td><button type="button" className="question-title-button"><strong>{q.text}</strong>{q.isPractice && <span className="question-practice-chip">سؤال تجريبي</span>}</button></td>
-                    <td>{q.isPractice ? "سؤال تجريبي" : getQuestionTypeLabel(q.type)}</td>
-                    <td>{q.minPoints || 100} - {q.maxPoints || 1000}</td>
-                    <td>{q.seconds || 20} ث</td>
-                    <td>{q.answerRevealDelaySeconds ?? 3} ث</td>
                     <td>
                       <div className="question-admin-card-actions">
                         <button className="icon-action-button" title="تعديل" aria-label="تعديل السؤال" onClick={(event) => { event.stopPropagation(); startEdit(q); }}>✎</button>
                         <button className="danger icon-action-button" title="حذف" aria-label="حذف السؤال" onClick={(event) => { event.stopPropagation(); deleteQuestion(q.id); }}>×</button>
                       </div>
                     </td>
+                    <td><button type="button" className="question-title-button"><strong>{q.text}</strong>{q.isPractice && <span className="question-practice-chip">سؤال تجريبي</span>}</button></td>
+                    <td>{q.isPractice ? "سؤال تجريبي" : getQuestionTypeLabel(q.type)}</td>
+                    <td>{q.minPoints || 100} - {q.maxPoints || 1000}</td>
+                    <td>{q.seconds || 20} ث</td>
+                    <td>{q.answerRevealDelaySeconds ?? 3} ث</td>
                   </tr>
                   {expandedQuestionId === q.id && (
                     <tr className="question-details-row">
@@ -3151,13 +3266,21 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
             </table>
 
           </div>
-        )}
-      </div>
+        ))}
+      </section>
 
-      <div className="card practice-questions-card">
-        <h2>الأسئلة التجريبية</h2>
+      <section className="card practice-questions-card questions-section-card">
+        <div className="questions-section-header practice">
+          <button type="button" className="questions-section-toggle" onClick={() => toggleQuestionSection("practice")} aria-expanded={questionSectionsOpen.practice}>
+            <span>الأسئلة التجريبية</span>
+            <small>{practiceQuestionRows.length} سؤال</small>
+            <b>{questionSectionsOpen.practice ? "−" : "+"}</b>
+          </button>
+          <button type="button" className="section-add-question-button practice" onClick={(event) => { event.stopPropagation(); startCreate(true); }}>+ إضافة سؤال تجريبي</button>
+          <button type="button" className="section-bulk-question-button practice" onClick={(event) => { event.stopPropagation(); openBulkEditor("practice"); }}>تعديل شامل</button>
+        </div>
 
-        {practiceQuestionRows.length === 0 ? (
+        {questionSectionsOpen.practice && (practiceQuestionRows.length === 0 ? (
           <p className="muted">لا توجد أسئلة تجريبية. فعّل خيار "سؤال تجريبي" من نموذج إضافة أو تعديل السؤال.</p>
         ) : (
           <div className="questions-table-wrap">
@@ -3165,19 +3288,19 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
               <thead>
                 <tr>
                   <th>رقم</th>
+                  <th>إجراء</th>
                   <th>السؤال</th>
                   <th>النوع</th>
                   <th>القيمة</th>
                   <th>وقت الإجابة</th>
                   <th>ظهور الأجوبة</th>
-                  <th>إجراء</th>
                 </tr>
               </thead>
               <tbody>
                 {practiceQuestionRows.map((q, index) => (
+                  <Fragment key={q.id}>
                   <tr
                     className={`${draggedQuestionId === q.id ? "question-row dragging practice-question-row" : "question-row practice-question-row"}${dragOverQuestionId === q.id && draggedQuestionId !== q.id ? " drop-target" : ""}`}
-                    key={q.id}
                     draggable
                     onDragStart={() => setDraggedQuestionId(q.id)}
                     onDragEnd={() => { setDraggedQuestionId(null); setDragOverQuestionId(null); }}
@@ -3186,24 +3309,41 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
                     onClick={() => setExpandedQuestionId(expandedQuestionId === q.id ? null : q.id)}
                   >
                     <td><button type="button" className="drag-handle" title="اسحب لتغيير الترتيب" aria-label="اسحب لتغيير ترتيب السؤال">☷</button> <strong>{index + 1}</strong></td>
-                    <td><button type="button" className="question-title-button"><strong>{q.text}</strong><span className="question-practice-chip">سؤال تجريبي</span></button></td>
-                    <td>{getQuestionTypeLabel(q.type)}</td>
-                    <td>{q.minPoints || 100} - {q.maxPoints || 1000}</td>
-                    <td>{q.seconds || 20} ث</td>
-                    <td>{q.answerRevealDelaySeconds ?? 3} ث</td>
                     <td>
                       <div className="question-admin-card-actions">
                         <button className="icon-action-button" title="تعديل" aria-label="تعديل السؤال" onClick={(event) => { event.stopPropagation(); startEdit(q); }}>✎</button>
                         <button className="danger icon-action-button" title="حذف" aria-label="حذف السؤال" onClick={(event) => { event.stopPropagation(); deleteQuestion(q.id); }}>×</button>
                       </div>
                     </td>
+                    <td><button type="button" className="question-title-button"><strong>{q.text}</strong><span className="question-practice-chip">سؤال تجريبي</span></button></td>
+                    <td>{getQuestionTypeLabel(q.type)}</td>
+                    <td>{q.minPoints || 100} - {q.maxPoints || 1000}</td>
+                    <td>{q.seconds || 20} ث</td>
+                    <td>{q.answerRevealDelaySeconds ?? 3} ث</td>
                   </tr>
+                  {expandedQuestionId === q.id && (
+                    <tr className="question-details-row">
+                      <td colSpan="7">
+                        <div className="question-inline-details">
+                          <span>نوع السؤال <b>{getQuestionTypeLabel(q.type)}</b></span>
+                          <span>النقاط <b>{q.minPoints || 100} - {q.maxPoints || 1000}</b></span>
+                          <span>وقت الإجابة <b>{q.seconds || 20} ثانية</b></span>
+                          <span>ظهور الخيارات <b>{q.answerRevealDelaySeconds ?? 3} ثانية</b></span>
+                          <span className="question-detail-wide">الإجابة الصحيحة <b>{getOptionText(q.options?.[q.correctIndex]) || "—"}</b></span>
+                          <span className="question-detail-wide">الخيارات <b>{(q.options || []).map(getOptionText).join(" | ")}</b></span>
+                          {getQuestionMediaUrl(q) && <span className="question-detail-wide">رابط الوسائط <b>{getQuestionMediaUrl(q)}</b></span>}
+                          {getQuestionImageUrl(q) && <img className="question-inline-image" src={getQuestionImageUrl(q)} alt="صورة السؤال" />}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
                 ))}
               </tbody>
             </table>
           </div>
-        )}
-      </div>
+        ))}
+      </section>
 
       {showForm && renderQuestionForm()}
     </div>
@@ -3276,6 +3416,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
     history: "سجل المسابقات",
     questions: "إعدادات الأسئلة",
     setup: "تهيئة المسابقة",
+    displaySettings: "إعدادات العرض",
   };
 
   const mainQuestions = getMainQuestions(questions);
@@ -3522,6 +3663,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
             <span>الإعداد</span>
             <button type="button" className={activeAdminSection === "questions" ? "active" : ""} onClick={() => openAdminSection("questions")}>إعدادات الأسئلة</button>
             <button type="button" className={activeAdminSection === "setup" ? "active" : ""} onClick={() => openAdminSection("setup")}>تهيئة المسابقة</button>
+            <button type="button" className={activeAdminSection === "displaySettings" ? "active" : ""} onClick={() => openAdminSection("displaySettings")}>إعدادات العرض</button>
           </div>
         </nav>
         <a className="dashboard-display-button" href={`/?admin=${ADMIN_CODE}&view=display`} target="_blank" rel="noreferrer">فتح صفحة العرض ↗</a>
@@ -3735,6 +3877,27 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
       </div>
       )}
 
+      {activeAdminSection === "displaySettings" && (
+      <div className="card setup-actions-card display-settings-card">
+        <h2>إعدادات العرض</h2>
+        <div className="setup-action-list">
+          <div className="setup-action-row">
+            <div>
+              <strong>مساحة الفيديو في صفحة العرض</strong>
+              <span>يصغّر رسائل المتسابقين ويضيف تحتها مساحة ثابتة تضع فيها الكاميرا أو الفيديو داخل برنامج البث.</span>
+            </div>
+            <button
+              type="button"
+              className={room?.displayVideoSlotEnabled ? "warning-action" : ""}
+              onClick={() => toggleDisplayVideoSlot(!room?.displayVideoSlotEnabled)}
+            >
+              {room?.displayVideoSlotEnabled ? "إخفاء المساحة" : "إظهار المساحة"}
+            </button>
+          </div>
+        </div>
+      </div>
+      )}
+
       {activeAdminSection === "players" && (
       <div className="card">
         <div className="report-section-title"><h2>المتسابقون المسجلون</h2></div>
@@ -3852,6 +4015,7 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
 
   const stage = room?.stage || "home";
   const displayStage = previewStage || stage;
+  const displayVideoSlotEnabled = !!room?.displayVideoSlotEnabled;
   const currentQuestion = room?.currentQuestion || null;
   const currentQuestionIndex = room?.currentQuestionIndex ?? -1;
   const displayQuestionList = room?.practiceMode ? getPracticeQuestions(questions) : getMainQuestions(questions);
@@ -4277,7 +4441,7 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
               </div>
             </div>
 
-            <MessagesPanel messages={messages} />
+            <DisplaySidePanel messages={messages} videoEnabled={displayVideoSlotEnabled} />
           </div>
         )}
 
@@ -4299,7 +4463,7 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
               </div>
             </div>
 
-            <MessagesPanel messages={messages} />
+            <DisplaySidePanel messages={messages} videoEnabled={displayVideoSlotEnabled} />
           </div>
         )}
 
@@ -4316,7 +4480,7 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
               showTimer={!previewStage}
             />
 
-            <MessagesPanel messages={messages} />
+            <DisplaySidePanel messages={messages} videoEnabled={displayVideoSlotEnabled} />
           </div>
         )}
 
@@ -4332,7 +4496,7 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
               visualStage={displayStage}
             />
 
-            <MessagesPanel messages={messages} />
+            <DisplaySidePanel messages={messages} videoEnabled={displayVideoSlotEnabled} />
           </div>
         )}
 
@@ -4351,12 +4515,27 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
 
 function LastGamePanel({ room, gameHistory = [], embedded = false }) {
   const [selectedGameId, setSelectedGameId] = useState(null);
-  const [expandedArchiveSections, setExpandedArchiveSections] = useState({ rankings: true });
+  const [expandedArchiveSections, setExpandedArchiveSections] = useState({ overview: true });
   const selectedGame =
     gameHistory.find((game) => game.id === selectedGameId) ||
     gameHistory[0] ||
     room?.lastGame ||
     null;
+  const selectedPlayers = selectedGame?.players || [];
+  const selectedQuestions = selectedGame?.questions || [];
+  const selectedAnswers = selectedGame?.answers || [];
+  const selectedMessages = selectedGame?.messages || [];
+  const correctAnswersCount = selectedAnswers.filter((answer) => answer.isCorrect).length;
+  const jokerAnswersCount = selectedAnswers.filter((answer) => answer.jokerApplied).length;
+  const savedAtLabel = selectedGame?.savedAtMs ? new Date(selectedGame.savedAtMs).toLocaleString("ar-SA") : "—";
+  const winner = selectedPlayers[0] || null;
+  const answersByArchiveQuestion = selectedQuestions.map((question, index) => {
+    const rows = selectedAnswers.filter((answer) => answer.questionId === question.id || answer.questionId === question.questionId);
+    return { question, questionNumber: question.order || index + 1, rows };
+  });
+  const answersWithoutQuestion = selectedAnswers.filter(
+    (answer) => !selectedQuestions.some((question) => question.id === answer.questionId || question.questionId === answer.questionId)
+  );
 
   function exportLastGameExcel() {
     if (!selectedGame?.players?.length) return;
@@ -4465,7 +4644,10 @@ function LastGamePanel({ room, gameHistory = [], embedded = false }) {
                 <div className={game.id === selectedGame?.id ? "history-item active" : "history-item"} key={game.id}>
                   <button type="button" className="history-open-button" onClick={() => setSelectedGameId(game.id)}>
                     <strong>{game.title || new Date(game.savedAtMs || 0).toLocaleString("ar-SA")}</strong>
-                    <span>{new Date(game.savedAtMs || 0).toLocaleString("ar-SA")} - {game.players?.length || 0} متسابق</span>
+                    <span className="history-meta-table">
+                      <i>التاريخ</i><b>{new Date(game.savedAtMs || 0).toLocaleString("ar-SA")}</b>
+                      <i>المتسابقون</i><b>{game.players?.length || 0}</b>
+                    </span>
                   </button>
                   <button type="button" className="icon-action-button" title="تعديل عنوان المسابقة" aria-label="تعديل عنوان المسابقة" onClick={() => renameArchivedGame(game)}>✎</button>
                   <button type="button" className="danger icon-action-button" title="حذف المسابقة" aria-label="حذف المسابقة" onClick={() => deleteArchivedGame(game.id)}>×</button>
@@ -4480,11 +4662,26 @@ function LastGamePanel({ room, gameHistory = [], embedded = false }) {
           <p className="muted">لا توجد مسابقات محفوظة حتى الآن.</p>
         ) : (
           <div className="archive-details-layout">
+            {renderArchiveSection("overview", "ملخص المسابقة", <div className="archive-overview-box">
+              <div className="archive-title-card">
+                <span>العنوان</span>
+                <strong>{selectedGame.title || savedAtLabel}</strong>
+              </div>
+              <table className="archive-mini-table">
+                <tbody>
+                  <tr><th>تاريخ الحفظ</th><td>{savedAtLabel}</td><th>الفائز</th><td>{winner ? `${winner.name} - ${winner.score || 0} نقطة` : "—"}</td></tr>
+                  <tr><th>المتسابقون</th><td>{selectedPlayers.length}</td><th>الأسئلة</th><td>{selectedQuestions.length}</td></tr>
+                  <tr><th>الإجابات</th><td>{selectedAnswers.length}</td><th>الصحيحة</th><td>{correctAnswersCount}</td></tr>
+                  <tr><th>استخدام الجوكر</th><td>{jokerAnswersCount}</td><th>الرسائل</th><td>{selectedMessages.length}</td></tr>
+                </tbody>
+              </table>
+            </div>, "archive-overview-section")}
+
             {renderArchiveSection("rankings", "ترتيب المتسابقين", <div className="archive-table-wrap">
             <table className="admin-bordered-table archive-table">
               <thead><tr><th>المركز</th><th>الاسم المستعار</th><th>الاسم الثلاثي</th><th>رقم الجوال</th><th>النقاط</th></tr></thead>
               <tbody>
-                {selectedGame.players.map((player) => (
+                {selectedPlayers.map((player) => (
                   <tr key={`${player.id}-${player.rank}`}>
                     <td>{player.rank}</td><td>{player.name}</td><td>{player.fullName || "—"}</td><td>{player.phone || "—"}</td><td>{player.score || 0}</td>
                   </tr>
@@ -4493,29 +4690,73 @@ function LastGamePanel({ room, gameHistory = [], embedded = false }) {
             </table>
               </div>, "archive-first-section")}
 
-            {renderArchiveSection("questions", "تفاصيل الأسئلة", <div className="archive-table-wrap">
-              <table className="admin-bordered-table archive-table">
-                <thead><tr><th>#</th><th>السؤال</th><th>النوع</th><th>النقاط</th><th>الوقت</th><th>ظهور الإجابات</th><th>الإجابة الصحيحة</th><th>الخيارات</th></tr></thead>
-                <tbody>
-                  {(selectedGame.questions || []).map((question) => <tr key={question.id || question.order}><td>{question.order}</td><td>{question.text || "—"}</td><td>{getQuestionTypeLabel(question.type)}</td><td>{question.minPoints || 0} - {question.maxPoints || 0}</td><td>{question.seconds || 0} ثانية</td><td>{question.answerRevealDelaySeconds || 0} ثانية</td><td>{(question.options || [])[question.correctIndex] || "—"}</td><td>{(question.options || []).join(" | ") || "—"}</td></tr>)}
-                </tbody>
-              </table>
+            {renderArchiveSection("questions", "تفاصيل الأسئلة", <div className="archive-question-list compact">
+              {selectedQuestions.map((question, index) => (
+                <details className="archive-question-row" key={question.id || question.order || index}>
+                  <summary>
+                    <span>س{question.order || index + 1}</span>
+                    <strong>{question.text || "—"}</strong>
+                    <small>{getQuestionTypeLabel(question.type)}</small>
+                    <small>{question.minPoints || 0}-{question.maxPoints || 0} نقطة</small>
+                    <small>{question.seconds || 0} ث</small>
+                  </summary>
+                  <div className="archive-question-row-body">
+                    <table className="archive-mini-table compact">
+                      <tbody>
+                        <tr><th>الإجابة الصحيحة</th><td>{(question.options || [])[question.correctIndex] || "—"}</td><th>ظهور الخيارات</th><td>{question.answerRevealDelaySeconds || 0} ثانية</td></tr>
+                      </tbody>
+                    </table>
+                    <div className="archive-options-grid compact">
+                      {(question.options || []).map((option, optionIndex) => (
+                        <span className={optionIndex === Number(question.correctIndex || 0) ? "correct" : ""} key={`${question.id || index}-${optionIndex}`}>
+                          {getOptionText(option)}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                </details>
+              ))}
               </div>)}
 
-            {renderArchiveSection("answers", "إجابات المتسابقين", <div className="archive-table-wrap">
-              <table className="admin-bordered-table archive-table">
-                <thead><tr><th>المتسابق</th><th>السؤال</th><th>الإجابة</th><th>النتيجة</th><th>النقاط</th></tr></thead>
-                <tbody>
-                  {(selectedGame.answers || []).map((answer, index) => {
-                    const question = (selectedGame.questions || []).find((item) => item.id === answer.questionId || item.questionId === answer.questionId);
-                    const player = (selectedGame.players || []).find((item) => item.id === answer.playerId);
-                    return <tr key={answer.id || `${answer.playerId}-${answer.questionId}-${index}`}><td>{player?.name || answer.playerName || "—"}</td><td>{question?.text || answer.questionId || "—"} {answer.jokerApplied ? <span title="استخدم الجوكر">{"\u{1F0CF}"}</span> : null}</td><td>{(question?.options || [])[answer.selectedIndex] ?? answer.selectedIndex ?? "—"}</td><td className={answer.isCorrect ? "archive-correct" : "archive-wrong"}>{answer.isCorrect ? "صح" : "خطأ"}</td><td>{answer.points || 0}</td></tr>;
-                  })}
-                </tbody>
-              </table>
+            {renderArchiveSection("answers", "إجابات المتسابقين", <div className="archive-answer-groups">
+              {answersByArchiveQuestion.map(({ question, questionNumber, rows }) => (
+                <details className="archive-answer-group" key={question.id || questionNumber} open={rows.length > 0}>
+                  <summary>
+                    <strong>{questionNumber}. {question.text || "—"}</strong>
+                    <span>{rows.length} إجابة</span>
+                  </summary>
+                  {rows.length === 0 ? <p className="muted">لا توجد إجابات لهذا السؤال.</p> : (
+                    <div className="archive-table-wrap">
+                      <table className="admin-bordered-table archive-table compact">
+                        <thead><tr><th>المتسابق</th><th>الإجابة</th><th>النتيجة</th><th>النقاط</th><th>جوكر</th></tr></thead>
+                        <tbody>
+                          {rows.map((answer, index) => {
+                            const player = selectedPlayers.find((item) => item.id === answer.playerId);
+                            return <tr key={answer.id || `${answer.playerId}-${question.id}-${index}`}><td>{player?.name || answer.playerName || "—"}</td><td>{(question.options || [])[answer.selectedIndex] ?? answer.selectedIndex ?? "—"}</td><td className={answer.isCorrect ? "archive-correct" : "archive-wrong"}>{answer.isCorrect ? "صح" : "خطأ"}</td><td>{answer.points || 0}</td><td>{answer.jokerApplied ? "\u{1F0CF}" : "—"}</td></tr>;
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </details>
+              ))}
+              {answersWithoutQuestion.length > 0 && (
+                <details className="archive-answer-group">
+                  <summary><strong>إجابات غير مرتبطة بسؤال محفوظ</strong><span>{answersWithoutQuestion.length} إجابة</span></summary>
+                  <div className="archive-table-wrap">
+                    <table className="admin-bordered-table archive-table compact">
+                      <thead><tr><th>المتسابق</th><th>السؤال</th><th>الإجابة</th><th>النتيجة</th><th>النقاط</th></tr></thead>
+                      <tbody>{answersWithoutQuestion.map((answer, index) => {
+                        const player = selectedPlayers.find((item) => item.id === answer.playerId);
+                        return <tr key={answer.id || `${answer.playerId}-${answer.questionId}-${index}`}><td>{player?.name || answer.playerName || "—"}</td><td>{answer.questionId || "—"}</td><td>{answer.selectedIndex ?? "—"}</td><td className={answer.isCorrect ? "archive-correct" : "archive-wrong"}>{answer.isCorrect ? "صح" : "خطأ"}</td><td>{answer.points || 0}</td></tr>;
+                      })}</tbody>
+                    </table>
+                  </div>
+                </details>
+              )}
               </div>)}
 
-            {renderArchiveSection("messages", "رسائل المتسابقين", (selectedGame.messages || []).length === 0 ? <p className="muted">لا توجد رسائل محفوظة في هذه المسابقة.</p> : <div className="archive-table-wrap"><table className="admin-bordered-table archive-table"><thead><tr><th>المتسابق</th><th>الرسالة</th><th>الوقت</th></tr></thead><tbody>{(selectedGame.messages || []).map((message, index) => <tr key={`${message.createdAtMs || 0}-${index}`}><td>{message.playerName || "—"}</td><td>{message.text || "—"}</td><td>{message.createdAtMs ? new Date(message.createdAtMs).toLocaleString("ar-SA") : "—"}</td></tr>)}</tbody></table></div>)}
+            {renderArchiveSection("messages", "رسائل المتسابقين", selectedMessages.length === 0 ? <p className="muted">لا توجد رسائل محفوظة في هذه المسابقة.</p> : <div className="archive-table-wrap"><table className="admin-bordered-table archive-table"><thead><tr><th>المتسابق</th><th>الرسالة</th><th>الوقت</th></tr></thead><tbody>{selectedMessages.map((message, index) => <tr key={`${message.createdAtMs || 0}-${index}`}><td>{message.playerName || "—"}</td><td>{message.text || "—"}</td><td>{message.createdAtMs ? new Date(message.createdAtMs).toLocaleString("ar-SA") : "—"}</td></tr>)}</tbody></table></div>)}
           </div>
         )}
       </details>
