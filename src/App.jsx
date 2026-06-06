@@ -35,8 +35,9 @@ const db = getFirestore(app);
 const ROOM_ID = "family-quiz-001";
 const ADMIN_CODE = "1234";
 
-const QUIZ_TITLE = "مسابقة عائلة المطرود";
+const QUIZ_TITLE = "مسابقة قروب العائلة العائلية";
 const QUIZ_SUBTITLE = "من تقديم الأستاذ إبراهيم ال مطرود";
+const GROUP_NAME_IMAGE_SRC = "/Group_name.png";
 
 const REVEAL_OPTIONS_DELAY_MS = 3000;
 const MEDIA_REVEAL_OPTIONS_DELAY_MS = 5000;
@@ -47,6 +48,11 @@ const DEFAULT_PACKAGE_NAME = "المسابقة الحالية";
 
 function getNow() {
   return Date.now();
+}
+
+function getRandomIndex(length) {
+  if (length <= 0) return 0;
+  return Math.floor(Math.random() * length);
 }
 
 function useNow(interval = 250) {
@@ -368,6 +374,16 @@ const PLAYER_EMOJIS = [
   "\u{1F340}",
 ];
 
+function QuizTitleMark({ compact = false }) {
+  return (
+    <span className={compact ? "quiz-title-mark compact" : "quiz-title-mark"}>
+      <span className="quiz-title-word">مسابقة</span>
+      <img className="quiz-title-logo" src={GROUP_NAME_IMAGE_SRC} alt="قروب العائلة" />
+      <span className="quiz-title-word">العائلية</span>
+    </span>
+  );
+}
+
 function normalizePhoneDigits(value = "") {
   return String(value)
     .replace(/[\u0660-\u0669]/g, (d) => "٠١٢٣٤٥٦٧٨٩".indexOf(d))
@@ -411,6 +427,63 @@ function AnimatedNumber({ value = 0, duration = 700 }) {
   }, [duration, value]);
 
   return <>{displayValue}</>;
+}
+
+function RevealCountNumber({ value = 0, active = false, duration = 1050 }) {
+  const [displayValue, setDisplayValue] = useState(0);
+
+  useEffect(() => {
+    const end = Number(value) || 0;
+    if (!active) {
+      setDisplayValue(0);
+      return undefined;
+    }
+
+    const startedAt = performance.now();
+    let frameId;
+
+    function tick(now) {
+      const progress = clamp((now - startedAt) / duration, 0, 1);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      const nextValue = progress >= 1 ? end : Math.floor(end * eased);
+      setDisplayValue(nextValue);
+      if (progress < 1) frameId = requestAnimationFrame(tick);
+    }
+
+    setDisplayValue(0);
+    frameId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frameId);
+  }, [active, duration, value]);
+
+  return <span className={active ? "reveal-count-number is-counting" : "reveal-count-number"}>{displayValue}</span>;
+}
+
+function useRevealProgressValue(value = 0, active = false, duration = 1050) {
+  const [displayValue, setDisplayValue] = useState(0);
+
+  useEffect(() => {
+    const end = clamp(Number(value) || 0, 0, 100);
+    if (!active) {
+      setDisplayValue(0);
+      return undefined;
+    }
+
+    const startedAt = performance.now();
+    let frameId;
+
+    function tick(now) {
+      const progress = clamp((now - startedAt) / duration, 0, 1);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      setDisplayValue(progress >= 1 ? end : end * eased);
+      if (progress < 1) frameId = requestAnimationFrame(tick);
+    }
+
+    setDisplayValue(0);
+    frameId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frameId);
+  }, [active, duration, value]);
+
+  return displayValue;
 }
 
 /* Hooks */
@@ -1738,10 +1811,24 @@ function DisplayVideoSlot() {
   );
 }
 
-function DisplaySidePanel({ messages, videoEnabled }) {
+function RegistrationQrPanel() {
+  return (
+    <div className="card registration-qr-card">
+      <div className="registration-qr-heading">
+        <h2>للمشاركة امسح الباركود</h2>
+      </div>
+
+      <div className="registration-qr-frame">
+        <img src="/QR.png" alt="باركود التسجيل في المسابقة" />
+      </div>
+    </div>
+  );
+}
+
+function DisplaySidePanel({ messages, videoEnabled, registrationMode = false }) {
   return (
     <div className={videoEnabled ? "display-side-panel has-video-slot" : "display-side-panel"}>
-      <MessagesPanel messages={messages} />
+      {registrationMode ? <RegistrationQrPanel /> : <MessagesPanel messages={messages} />}
       {videoEnabled && <DisplayVideoSlot />}
     </div>
   );
@@ -1770,43 +1857,144 @@ function buildAnswerStats(question, answers) {
   });
 }
 
+function getPrizeWheelPlayers(players = [], prizeWheel = {}) {
+  const previousWinnerIds = new Set((prizeWheel.winners || []).map((winner) => winner.playerId));
+  const basePlayers = (players || []).filter((player) => !isVisitorRecord(player));
+  const eligiblePlayers = prizeWheel.excludePreviousWinners
+    ? basePlayers.filter((player) => !previousWinnerIds.has(player.id))
+    : basePlayers;
+  return eligiblePlayers.length > 0 ? eligiblePlayers : basePlayers;
+}
+
+function PrizeWheelDisplay({ room, players }) {
+  const prizeWheel = room?.prizeWheel || {};
+  const wheelPlayers = getPrizeWheelPlayers(players, prizeWheel);
+  const winner = players.find((player) => player.id === prizeWheel.winnerPlayerId) || null;
+  const winnerIndex = Math.max(0, wheelPlayers.findIndex((player) => player.id === winner?.id));
+  const segment = wheelPlayers.length ? 360 / wheelPlayers.length : 360;
+  const targetRotation = wheelPlayers.length
+    ? 360 * 7 + (360 - (winnerIndex * segment + segment / 2))
+    : 0;
+  const [rotation, setRotation] = useState(0);
+  const [showWinner, setShowWinner] = useState(false);
+  const spinActive = !!prizeWheel.spinning && !!prizeWheel.spinId && !!winner;
+  const gradient = wheelPlayers.length
+    ? `conic-gradient(${wheelPlayers.map((player, index) => {
+        const start = index * segment;
+        const end = (index + 1) * segment;
+        const colors = ["#f7d678", "#9fd8ef", "#f3a7bd", "#b8e2b2", "#c7bbf4", "#f5c58d"];
+        return `${colors[index % colors.length]} ${start}deg ${end}deg`;
+      }).join(", ")})`
+    : "linear-gradient(135deg, #f5fbfd, #e8f4f8)";
+
+  useEffect(() => {
+    if (!spinActive) {
+      setRotation(0);
+      setShowWinner(false);
+      return undefined;
+    }
+
+    setShowWinner(false);
+    setRotation(0);
+    const frame = requestAnimationFrame(() => setRotation(targetRotation));
+    const timer = setTimeout(() => setShowWinner(true), 4300);
+    return () => {
+      cancelAnimationFrame(frame);
+      clearTimeout(timer);
+    };
+  }, [prizeWheel.spinId, spinActive, targetRotation]);
+
+  return (
+    <div className="display-panel prize-wheel-screen">
+      <div className="prize-wheel-header">
+        <span>جائزة مفاجئة</span>
+        <strong>{prizeWheel.prizeTitle || "عجلة الحظ"}</strong>
+      </div>
+
+      <div className="prize-wheel-stage">
+        <div className="prize-wheel-pointer" />
+        <div
+          className={spinActive ? "prize-wheel spinning" : "prize-wheel"}
+          style={{ background: gradient, transform: `rotate(${rotation}deg)` }}
+        >
+          {wheelPlayers.length === 0 ? (
+            <div className="prize-wheel-empty">لا يوجد متسابقون</div>
+          ) : (
+            wheelPlayers.map((player, index) => {
+              const angle = index * segment + segment / 2;
+              return (
+                <span
+                  className="prize-wheel-name"
+                  key={player.id}
+                  style={{ transform: `rotate(${angle}deg) translateY(-41%) rotate(90deg)` }}
+                >
+                  {player.emoji || ""} {player.name}
+                </span>
+              );
+            })
+          )}
+        </div>
+        <div className="prize-wheel-center">🎁</div>
+      </div>
+
+      <div className={showWinner && winner ? "prize-wheel-winner visible" : "prize-wheel-winner"}>
+        {showWinner && winner ? (
+          <>
+            <span>الفائز</span>
+            <strong>{winner.emoji || ""} {winner.name}</strong>
+          </>
+        ) : (
+          <strong>{spinActive ? "العجلة تدور..." : "بانتظار تشغيل العجلة"}</strong>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function LiveAnswerOption({ item, showCorrect }) {
+  const resultClass = showCorrect
+    ? item.correct
+      ? "result-item modern-answer-card answer-correct"
+      : "result-item modern-answer-card answer-wrong"
+    : "result-item modern-answer-card";
+  const optionLetter = ["أ", "ب", "ج", "د", "هـ", "و"][item.index] || item.index + 1;
+  const animatedPercent = useRevealProgressValue(item.percent, showCorrect);
+  const percent = Math.round(animatedPercent);
+
+  return (
+    <div className={resultClass}>
+      <div className="result-top">
+        <b className="answer-option-letter">{optionLetter}</b>
+        <span>{item.option}</span>
+
+        <div
+          className={showCorrect ? "result-count-boxes" : "result-count-boxes is-reserved"}
+          aria-label="إحصائيات الإجابة"
+          aria-hidden={!showCorrect}
+        >
+          <span className="answer-count-box"><small>إجابات</small><b><RevealCountNumber value={item.count} active={showCorrect} /></b></span>
+          <span className={item.jokerCount > 0 ? "joker-answer-count-box" : "joker-answer-count-box is-empty"}><small>{"\u{1F0CF}"}</small><b><RevealCountNumber value={item.jokerCount} active={showCorrect} /></b></span>
+          <span className="answer-percent-box">
+            <span className="reveal-count-number is-counting">{percent}</span>%
+          </span>
+        </div>
+      </div>
+
+      <div className={showCorrect ? "bar" : "bar is-reserved"} aria-hidden={!showCorrect}>
+        <div className={showCorrect ? "bar-fill is-counting" : "bar-fill"} style={{ width: `${percent}%` }} />
+      </div>
+    </div>
+  );
+}
+
 function LiveAnswerStats({ question, answers, showCorrect = false }) {
   const stats = buildAnswerStats(question, answers);
 
   return (
     <div className="live-answer-stats">
-      {stats.map((item) => {
-        const resultClass = showCorrect
-          ? item.correct
-            ? "result-item modern-answer-card answer-correct"
-            : "result-item modern-answer-card answer-wrong"
-          : "result-item modern-answer-card";
-        const optionLetter = ["أ", "ب", "ج", "د", "هـ", "و"][item.index] || item.index + 1;
-        const percent = Math.round(item.percent);
-
-        return (
-          <div className={resultClass} key={item.index}>
-            <div className="result-top">
-              <b className="answer-option-letter">{optionLetter}</b>
-              <span>
-                {item.option}
-              </span>
-
-              <div className="result-count-boxes" aria-label="إحصائيات الإجابة">
-                <span className="answer-count-box"><small>إجابات</small><b>{item.count}</b></span>
-                {item.jokerCount > 0 && <span className="joker-answer-count-box"><small>{"\u{1F0CF}"}</small><b>{item.jokerCount}</b></span>}
-                <span className="answer-percent-box" style={{ "--percent": percent }}>
-                  {percent}%
-                </span>
-              </div>
-            </div>
-
-            <div className="bar">
-              <div className="bar-fill" style={{ "--percent": percent, width: `${item.percent}%` }} />
-            </div>
-          </div>
-        );
-      })}
+      {stats.map((item) => (
+        <LiveAnswerOption item={item} showCorrect={showCorrect} key={item.index} />
+      ))}
     </div>
   );
 }
@@ -1895,7 +2083,7 @@ function AnsweredCountBadge({ answersCount, playersCount }) {
   return (
     <div className={`answered-count-badge ${allAnswered ? "all-answered" : ""}`}>
       <span>الإجابات</span>
-      <strong>{answersCount}</strong>
+      <strong><AnimatedNumber value={answersCount} duration={650} /></strong>
       <small>من {playersCount}</small>
     </div>
   );
@@ -2160,7 +2348,7 @@ function QuestionScreen({
           {question?.isPractice ? "سؤال تجريبي" : `السؤال رقم ${(room?.currentQuestionIndex ?? 0) + 1}`}
         </span>
 
-        {displayMode && (
+        {displayMode && (activeStage === "question" || activeStage === "reveal") && (
           <AnsweredCountBadge
             answersCount={answers.length}
             playersCount={playersCount}
@@ -3403,6 +3591,10 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
   const [previousAdminSection, setPreviousAdminSection] = useState(null);
   const [adminAdvancing, setAdminAdvancing] = useState(false);
   const [quickControlsOpen, setQuickControlsOpen] = useState(false);
+  const [prizeTitleInput, setPrizeTitleInput] = useState("جائزة مفاجئة");
+  const [selectedPrizeWinnerId, setSelectedPrizeWinnerId] = useState("");
+  const [excludePrizeWinners, setExcludePrizeWinners] = useState(true);
+  const [prizeHistoryOpen, setPrizeHistoryOpen] = useState(true);
   const [liveExpandedSections, setLiveExpandedSections] = useState({
     players: true,
     questionStats: true,
@@ -3417,6 +3609,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
     questions: "إعدادات الأسئلة",
     setup: "تهيئة المسابقة",
     displaySettings: "إعدادات العرض",
+    prizes: "الجوائز",
   };
 
   const mainQuestions = getMainQuestions(questions);
@@ -3442,6 +3635,9 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
   const registeredCount = players.filter((player) => !isVisitorRecord(player)).length;
   const openedLinkCount = Math.max(activeVisitors.length, registeredCount);
   const registrationPercent = openedLinkCount > 0 ? Math.min(100, Math.round((registeredCount / openedLinkCount) * 100)) : 0;
+  const prizeWheel = room?.prizeWheel || {};
+  const prizeWinners = prizeWheel.winners || [];
+  const eligiblePrizePlayers = getPrizeWheelPlayers(players, { ...prizeWheel, excludePreviousWinners: excludePrizeWinners });
   const editingPlayerBaseline = editingPlayer
     ? Number(editingPlayer.manualScoreDelta || 0) !== 0 && Number.isFinite(Number(editingPlayer.manualScoreBaseline))
       ? Number(editingPlayer.manualScoreBaseline)
@@ -3460,6 +3656,82 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
     const currentSection = activeAdminSection;
     setActiveAdminSection(previousAdminSection);
     setPreviousAdminSection(currentSection);
+  }
+
+  async function openPrizeWheelStage() {
+    const previousStage = stage === "prizeWheel"
+      ? prizeWheel.previousStage || "registration"
+      : stage;
+    await setDoc(doc(db, "rooms", ROOM_ID), {
+      stage: "prizeWheel",
+      prizeWheel: {
+        ...prizeWheel,
+        previousStage,
+        prizeTitle: prizeTitleInput.trim() || "جائزة مفاجئة",
+        excludePreviousWinners: excludePrizeWinners,
+        spinning: false,
+        winnerPlayerId: null,
+        spinId: null,
+        selectedPlayerId: selectedPrizeWinnerId || null,
+        winners: prizeWinners,
+      },
+      updatedAt: serverTimestamp(),
+    }, { merge: true });
+  }
+
+  async function spinPrizeWheel() {
+    const candidates = eligiblePrizePlayers;
+    if (candidates.length === 0) {
+      alert("لا يوجد متسابقون لتشغيل عجلة الحظ.");
+      return;
+    }
+
+    const selectedWinner =
+      candidates.find((player) => player.id === selectedPrizeWinnerId) ||
+      candidates[getRandomIndex(candidates.length)];
+    const prizeTitle = prizeTitleInput.trim() || "جائزة مفاجئة";
+    const spinId = `${getNow()}-${selectedWinner.id}`;
+    const winnerRecord = {
+      playerId: selectedWinner.id,
+      playerName: selectedWinner.name || "",
+      playerFullName: selectedWinner.fullName || "",
+      playerEmoji: selectedWinner.emoji || "",
+      prizeTitle,
+      awardedAtMs: getNow(),
+      spinId,
+    };
+
+    await updateDoc(doc(db, "rooms", ROOM_ID), {
+      stage: "prizeWheel",
+      "prizeWheel.previousStage": stage === "prizeWheel" ? prizeWheel.previousStage || "registration" : stage,
+      "prizeWheel.prizeTitle": prizeTitle,
+      "prizeWheel.excludePreviousWinners": excludePrizeWinners,
+      "prizeWheel.selectedPlayerId": selectedPrizeWinnerId || null,
+      "prizeWheel.winnerPlayerId": selectedWinner.id,
+      "prizeWheel.spinId": spinId,
+      "prizeWheel.spinStartedAtMs": getNow(),
+      "prizeWheel.spinning": true,
+      "prizeWheel.winners": arrayUnion(winnerRecord),
+      updatedAt: serverTimestamp(),
+    });
+  }
+
+  async function closePrizeWheelStage() {
+    const fallbackStage = prizeWheel.previousStage || "registration";
+    await updateDoc(doc(db, "rooms", ROOM_ID), {
+      stage: fallbackStage === "prizeWheel" ? "registration" : fallbackStage,
+      "prizeWheel.spinning": false,
+      updatedAt: serverTimestamp(),
+    });
+  }
+
+  async function deletePrizeWinner(spinId) {
+    if (!spinId) return;
+    const nextWinners = prizeWinners.filter((winner) => winner.spinId !== spinId);
+    await updateDoc(doc(db, "rooms", ROOM_ID), {
+      "prizeWheel.winners": nextWinners,
+      updatedAt: serverTimestamp(),
+    });
   }
 
   async function advanceFromDashboard(question = (room?.practiceMode ? practiceQuestions[currentQuestionIndex + 1] : competitionQuestions[currentQuestionIndex + 1]), questionIndex = currentQuestionIndex + 1) {
@@ -3640,7 +3912,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
         <div className="dashboard-brand">
           <span>Q</span>
           <div>
-            <strong>{QUIZ_TITLE}</strong>
+            <strong><QuizTitleMark compact /></strong>
             <small>{QUIZ_SUBTITLE}</small>
           </div>
         </div>
@@ -3648,6 +3920,10 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
           <div className="dashboard-nav-group">
             <span>أثناء البث</span>
             <button type="button" className={activeAdminSection === "live" ? "active" : ""} onClick={() => openAdminSection("live")}>متابعة المسابقة</button>
+          </div>
+          <div className="dashboard-nav-group">
+            <span>الجوائز</span>
+            <button type="button" className={activeAdminSection === "prizes" ? "active" : ""} onClick={() => openAdminSection("prizes")}>عجلة الحظ</button>
           </div>
           <div className="dashboard-nav-group">
             <span>المتسابقون</span>
@@ -3895,6 +4171,80 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
             </button>
           </div>
         </div>
+      </div>
+      )}
+
+      {activeAdminSection === "prizes" && (
+      <div className="card prize-control-card">
+        <div className="prize-control-head">
+          <div>
+            <h2>عجلة الحظ</h2>
+            <p className="muted">جوائز جانبية لا تغيّر النقاط ولا ترتيب المتسابقين.</p>
+          </div>
+          <span>{eligiblePrizePlayers.length} متاح</span>
+        </div>
+
+        <div className="prize-control-grid">
+          <label>
+            الجائزة
+            <input
+              value={prizeTitleInput}
+              onChange={(event) => setPrizeTitleInput(event.target.value)}
+              placeholder="مثال: جائزة نقدية / كوبون / هدية"
+            />
+          </label>
+
+          <label>
+            الفائز
+            <select value={selectedPrizeWinnerId} onChange={(event) => setSelectedPrizeWinnerId(event.target.value)}>
+              <option value="">اختيار عشوائي</option>
+              {eligiblePrizePlayers.map((player) => (
+                <option value={player.id} key={player.id}>{player.emoji || ""} {player.name}</option>
+              ))}
+            </select>
+          </label>
+
+          <label className="prize-checkbox-row">
+            <input
+              type="checkbox"
+              checked={excludePrizeWinners}
+              onChange={(event) => setExcludePrizeWinners(event.target.checked)}
+            />
+            <span>استبعاد من فاز سابقًا</span>
+          </label>
+        </div>
+
+        <div className="prize-action-row">
+          <button type="button" onClick={openPrizeWheelStage} disabled={players.length === 0}>عرض العجلة</button>
+          <button type="button" className="warning-action" onClick={spinPrizeWheel} disabled={players.length === 0}>تشغيل العجلة</button>
+          {stage === "prizeWheel" && <button type="button" className="secondary-action" onClick={closePrizeWheelStage}>إغلاق العجلة</button>}
+        </div>
+
+        <section className="prize-history-card">
+          <button type="button" className="prize-history-header" onClick={() => setPrizeHistoryOpen((value) => !value)}>
+            <strong>سجل الجوائز</strong>
+            <span>{prizeWinners.length}</span>
+            <i>{prizeHistoryOpen ? "−" : "+"}</i>
+          </button>
+          {prizeHistoryOpen && (
+            <div className="prize-winners-list">
+              {prizeWinners.length === 0 ? (
+                <p className="muted">لا يوجد فائزون بالجوائز حتى الآن.</p>
+              ) : (
+                prizeWinners.slice().reverse().map((winner) => (
+                  <div className="prize-winner-row" key={winner.spinId || `${winner.playerId}-${winner.awardedAtMs}`}>
+                    <div>
+                      <strong>{winner.playerEmoji || ""} {winner.playerName}</strong>
+                      <small>{winner.playerFullName || "لا يوجد اسم ثلاثي"}</small>
+                    </div>
+                    <span>{winner.prizeTitle}</span>
+                    <button type="button" className="danger icon-action-button" title="حذف من السجل" aria-label="حذف من السجل" onClick={() => deletePrizeWinner(winner.spinId)}>×</button>
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+        </section>
       </div>
       )}
 
@@ -4305,6 +4655,15 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
       );
     } else if (stage === "finished") {
       mainButton = <button onClick={createOrResetRoom}>العودة للصفحة الرئيسية</button>;
+    } else if (stage === "prizeWheel") {
+      mainButton = <button onClick={async () => {
+        const fallbackStage = room?.prizeWheel?.previousStage || "registration";
+        await updateDoc(doc(db, "rooms", ROOM_ID), {
+          stage: fallbackStage === "prizeWheel" ? "registration" : fallbackStage,
+          "prizeWheel.spinning": false,
+          updatedAt: serverTimestamp(),
+        });
+      }}>إغلاق عجلة الحظ</button>;
     }
 
     return (
@@ -4324,7 +4683,7 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
   }
 
   function renderBottomDisplayActions() {
-    if (stage === "home" || stage === "instructions" || stage === "finished") return null;
+    if (stage === "home" || stage === "instructions" || stage === "finished" || stage === "prizeWheel") return null;
 
     return (
       <div className="display-corner-actions">
@@ -4380,7 +4739,7 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
       <AutoLockJokers room={room} players={players} />
       <AutoProcessResults room={room} answers={answers} players={players} />
 
-      {displayStage !== "home" && displayStage !== "ready" && (
+      {displayStage !== "home" && displayStage !== "ready" && displayStage !== "prizeWheel" && (
         <div className="display-history-nav">
           <button type="button" className="display-nav-button display-next-button" onClick={previewNextStep} disabled={!previewStage}>التالي</button>
           <button type="button" className="display-nav-button display-back-button" onClick={previewPreviousStep}>السابق</button>
@@ -4403,10 +4762,7 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
         )}
 
         {displayStage === "home" && (
-          <div className="display-panel display-home">
-            <h1>{QUIZ_TITLE}</h1>
-            <p>{QUIZ_SUBTITLE}</p>
-          </div>
+          <div className="display-panel display-home" aria-label={QUIZ_TITLE} />
         )}
 
         {displayStage === "instructions" && (
@@ -4441,7 +4797,7 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
               </div>
             </div>
 
-            <DisplaySidePanel messages={messages} videoEnabled={displayVideoSlotEnabled} />
+            <DisplaySidePanel messages={messages} videoEnabled={displayVideoSlotEnabled} registrationMode />
           </div>
         )}
 
@@ -4502,6 +4858,10 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
 
         {displayStage === "results" && (
           <ResultsDisplay room={displayRoom} players={displayPlayers} messages={messages} />
+        )}
+
+        {displayStage === "prizeWheel" && (
+          <PrizeWheelDisplay room={room} players={players} />
         )}
 
         {displayStage === "finished" && <FinishedDisplay players={players} messages={messages} />}
@@ -4885,6 +5245,53 @@ function PlayerTopBar({ player, rank = null }) {
   );
 }
 
+function EmojiPicker({ value, onChange, label = "اختيار الإيموجي" }) {
+  const [open, setOpen] = useState(false);
+  const selectedEmoji = value || "👤";
+
+  return (
+    <div className="emoji-picker">
+      <button
+        type="button"
+        className="emoji-picker-button"
+        onClick={() => setOpen((current) => !current)}
+        aria-label={label}
+        aria-expanded={open}
+      >
+        <span>{selectedEmoji}</span>
+      </button>
+
+      {open && (
+        <div className="emoji-picker-menu" role="listbox" aria-label={label}>
+          <button
+            type="button"
+            className={!value ? "emoji-picker-option selected" : "emoji-picker-option"}
+            onClick={() => {
+              onChange("");
+              setOpen(false);
+            }}
+          >
+            👤
+          </button>
+          {PLAYER_EMOJIS.map((item) => (
+            <button
+              type="button"
+              className={value === item ? "emoji-picker-option selected" : "emoji-picker-option"}
+              key={item}
+              onClick={() => {
+                onChange(item);
+                setOpen(false);
+              }}
+            >
+              {item}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function JoinForm({ onJoined, room }) {
   const [nickname, setNickname] = useState("");
   const [emoji, setEmoji] = useState("");
@@ -4991,17 +5398,7 @@ function JoinForm({ onJoined, room }) {
       <p className="muted">اكتب بياناتك. الاسم المستعار هو الذي سيظهر أثناء البث.</p>
 
       <div className="nickname-emoji-row">
-        <select
-          className="emoji-input"
-          value={emoji}
-          onChange={(event) => setEmoji(event.target.value)}
-          aria-label="إيموجي اختياري"
-        >
-          <option value="">👤</option>
-          {PLAYER_EMOJIS.map((item) => (
-            <option key={item} value={item}>{item}</option>
-          ))}
-        </select>
+        <EmojiPicker value={emoji} onChange={setEmoji} label="إيموجي اختياري" />
         <input
           ref={nicknameInputRef}
           value={nickname}
@@ -5188,17 +5585,7 @@ function PlayerWaiting({ room, player, players, setPlayerName, hasNextQuestion =
                   onChange={(e) => setNewNickname(e.target.value)}
                   placeholder="الاسم المستعار"
                 />
-                <select
-                  className="emoji-input"
-                  value={newEmoji}
-                  onChange={(e) => setNewEmoji(e.target.value)}
-                  aria-label="تعديل الإيموجي"
-                >
-                  <option value="">👤</option>
-                  {PLAYER_EMOJIS.map((item) => (
-                    <option key={item} value={item}>{item}</option>
-                  ))}
-                </select>
+                <EmojiPicker value={newEmoji} onChange={setNewEmoji} label="تعديل الإيموجي" />
                 <input
                   value={newFullName}
                   onChange={(e) => setNewFullName(e.target.value)}
@@ -5787,7 +6174,7 @@ export default function App() {
     <div className="app" dir="rtl">
       {!isAdmin && <header className="app-header">
         <div>
-          <h1>{QUIZ_TITLE}</h1>
+          <h1><QuizTitleMark compact /></h1>
           <p>{QUIZ_SUBTITLE}</p>
         </div>
 
