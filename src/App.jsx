@@ -41,10 +41,15 @@ const GROUP_NAME_IMAGE_SRC = "/Group_name.png";
 
 const REVEAL_OPTIONS_DELAY_MS = 3000;
 const MEDIA_REVEAL_OPTIONS_DELAY_MS = 5000;
-const SCORE_ANIMATION_HOLD_MS = 850;
 const QUESTION_START_SYNC_BUFFER_MS = 300;
+const RESULTS_PROCESSING_STALE_MS = 9000;
 const DEFAULT_PACKAGE_ID = "default";
 const DEFAULT_PACKAGE_NAME = "المسابقة الحالية";
+const DEFAULT_PRIZE_ITEMS = [
+  { id: "prize-100-a", title: "100 ريال" },
+  { id: "prize-100-b", title: "100 ريال" },
+  { id: "prize-phone", title: "جوال" },
+];
 
 function getNow() {
   return Date.now();
@@ -70,74 +75,32 @@ function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
+function isSameId(a, b) {
+  return a != null && b != null && String(a) === String(b);
+}
+
+function isResultsProcessingStale(room, questionId) {
+  if (!room?.processingQuestionId || !isSameId(room.processingQuestionId, questionId)) return false;
+  const startedAt = Number(room.processingStartedAtMs || 0);
+  return !startedAt || getNow() - startedAt > RESULTS_PROCESSING_STALE_MS;
+}
+
+function getAnswerStartMs(question = {}) {
+  return Number(question.answerStartAtMs || question.answerRevealAtMs || question.questionStartedAtMs || question.sentAtMs || 0);
+}
+
+function formatAnswerTime(answer) {
+  const seconds = Number(answer?.answerTimeSeconds);
+  if (Number.isFinite(seconds) && seconds >= 0) return `${seconds.toFixed(seconds < 10 ? 1 : 0)} ث`;
+  return "—";
+}
+
 function vibrateDevice(pattern) {
   try {
     navigator.vibrate?.(pattern);
   } catch {
     // Some devices and browsers intentionally do not expose vibration.
   }
-}
-
-function playCountdownBeep(timeLeft = 3) {
-  try {
-    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContextClass) return;
-    const audioContext = new AudioContextClass();
-    const now = audioContext.currentTime;
-
-    function bellStrike({ start, base = 880, duration = 0.34, volume = 0.11 }) {
-      const begin = now + start;
-      const master = audioContext.createGain();
-      master.gain.setValueAtTime(0.001, begin);
-      master.gain.exponentialRampToValueAtTime(volume, begin + 0.008);
-      master.gain.exponentialRampToValueAtTime(0.001, begin + duration);
-      master.connect(audioContext.destination);
-
-      [1, 2.01, 2.72].forEach((ratio, index) => {
-        const oscillator = audioContext.createOscillator();
-        const gain = audioContext.createGain();
-        oscillator.type = index === 0 ? "triangle" : "sine";
-        oscillator.frequency.setValueAtTime(base * ratio, begin);
-        oscillator.frequency.exponentialRampToValueAtTime(base * ratio * 0.985, begin + duration);
-        gain.gain.setValueAtTime(index === 0 ? 0.95 : 0.28, begin);
-        gain.gain.exponentialRampToValueAtTime(0.001, begin + duration * (index === 0 ? 0.92 : 0.68));
-        oscillator.connect(gain);
-        gain.connect(master);
-        oscillator.start(begin);
-        oscillator.stop(begin + duration + 0.03);
-      });
-    }
-
-    if (timeLeft <= 1) {
-      bellStrike({ start: 0, base: 1040, duration: 0.28, volume: 0.13 });
-      bellStrike({ start: 0.24, base: 1240, duration: 0.36, volume: 0.15 });
-    } else if (timeLeft === 2) {
-      bellStrike({ start: 0, base: 940, duration: 0.32, volume: 0.12 });
-    } else {
-      bellStrike({ start: 0, base: 820, duration: 0.3, volume: 0.105 });
-    }
-
-    setTimeout(() => audioContext.close?.(), timeLeft <= 1 ? 820 : 560);
-  } catch {
-    // Browsers can block audio until the page has received a user gesture.
-  }
-}
-
-function useCountdownBeeps({ active, timeLeft, questionId }) {
-  const lastBeepRef = useRef("");
-
-  useEffect(() => {
-    if (!active || !questionId || timeLeft < 1 || timeLeft > 3) return;
-    const beepKey = `${questionId}-${timeLeft}`;
-    if (lastBeepRef.current === beepKey) return;
-    lastBeepRef.current = beepKey;
-    playCountdownBeep(timeLeft);
-    vibrateDevice(timeLeft <= 1 ? [50, 35, 70, 35, 150] : timeLeft === 2 ? [45, 30, 70] : [55]);
-  }, [active, timeLeft, questionId]);
-
-  useEffect(() => {
-    lastBeepRef.current = "";
-  }, [questionId]);
 }
 
 function getAccuracyColor(percent) {
@@ -372,6 +335,18 @@ const PLAYER_EMOJIS = [
   "\u{1F680}",
   "\u{1F451}",
   "\u{1F340}",
+  "\u{1F3C6}",
+  "\u{1F947}",
+  "\u{1F9E0}",
+  "\u{26A1}",
+  "\u{1F3B2}",
+  "\u{1F381}",
+  "\u{1F44F}",
+  "\u{1F399}",
+  "\u{1F4A1}",
+  "\u{1F3AE}",
+  "\u{1F98A}",
+  "\u{1F981}",
 ];
 
 function QuizTitleMark({ compact = false }) {
@@ -761,11 +736,14 @@ async function createOrResetRoom() {
       questionIgnored: false,
       ignoredQuestionIds: {},
       processedQuestionId: null,
+      resultsCalculated: false,
+      resultsCalculatedQuestionId: null,
       collectingBonusByPlayer: {},
       collectingBonusJokerByPlayer: {},
       collectingBonusPlayerId: null,
       collectingBonusPoints: 0,
       rankMovementByPlayer: {},
+      collectingAnswerCorrectByPlayer: {},
       activePackageId: DEFAULT_PACKAGE_ID,
       activePackageName: DEFAULT_PACKAGE_NAME,
       updatedAt: serverTimestamp(),
@@ -887,6 +865,8 @@ function buildQuestionPayload(question, questionStartedAtMs = getNow() + QUESTIO
     videoUrl: question.type === "video" ? getQuestionMediaUrl(question) : "",
     isPractice: !!question.isPractice,
     practiceNote: question.isPractice ? "هذا السؤال للتدريب فقط ولا يؤثر على النقاط أو الترتيب." : "",
+    resultsCalculated: false,
+    resultsCalculatedAt: null,
   };
 
   return {
@@ -924,6 +904,8 @@ async function preloadQuestionForReady(question, index, readyUntilMs) {
     questionIgnored: false,
     isPractice: !!question.isPractice,
     processedQuestionId: null,
+    resultsCalculated: false,
+    resultsCalculatedQuestionId: null,
     processingQuestionId: null,
     processingStartedAtMs: null,
     collectingBonusByPlayer: {},
@@ -1106,6 +1088,27 @@ async function showResults() {
   );
 }
 
+async function beginFinalCountdown(room) {
+  const questionId = room?.currentQuestion?.questionId || room?.currentQuestion?.id;
+  if (questionId && !isSameId(room?.processedQuestionId, questionId)) {
+    await calculateResultsForCurrentQuestion(room, { source: "final", nextStage: null });
+  }
+
+  const startedAtMs = getNow();
+  await setDoc(
+    doc(db, "rooms", ROOM_ID),
+    {
+      stage: "finalCountdown",
+      stageStartedAtMs: startedAtMs,
+      finalCountdownStartedAtMs: startedAtMs,
+      finalCountdownUntilMs: startedAtMs + 3000,
+      revealUndoUntilMs: null,
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true }
+  );
+}
+
 async function toggleDisplayVideoSlot(enabled) {
   await setDoc(
     doc(db, "rooms", ROOM_ID),
@@ -1117,9 +1120,10 @@ async function toggleDisplayVideoSlot(enabled) {
   );
 }
 
-async function archiveLastGame(players = [], questions = [], allAnswers = [], messages = []) {
+async function archiveLastGame(players = [], questions = [], allAnswers = [], messages = [], room = null) {
   const sortedPlayers = [...players].sort((a, b) => (b.score || 0) - (a.score || 0));
   const savedAtMs = getNow();
+  const prizeWinners = room?.prizeWheel?.winners || [];
   const archivedGame = {
     id: `game-${savedAtMs}`,
     savedAtMs,
@@ -1153,6 +1157,7 @@ async function archiveLastGame(players = [], questions = [], allAnswers = [], me
       text: message.text || "",
       createdAtMs: message.createdAtMs || 0,
     })),
+    prizeWinners: prizeWinners.map((winner) => ({ ...winner })),
   };
 
   await setDoc(
@@ -1165,16 +1170,28 @@ async function archiveLastGame(players = [], questions = [], allAnswers = [], me
   );
 }
 
-async function finishGame(players = [], questions = [], allAnswers = [], messages = []) {
+async function finishGame(players = [], questions = [], allAnswers = [], messages = [], room = null) {
+  const roomRef = doc(db, "rooms", ROOM_ID);
+  const canFinish = await runTransaction(db, async (transaction) => {
+    const roomSnap = await transaction.get(roomRef);
+    const roomData = roomSnap.exists() ? roomSnap.data() : {};
+    if (roomData.stage === "finished" || roomData.finalizingGame) return false;
+    transaction.set(roomRef, { finalizingGame: true, updatedAt: serverTimestamp() }, { merge: true });
+    return true;
+  });
+  if (!canFinish) return;
+
   try {
-    await archiveLastGame(players, questions, allAnswers, messages);
+    await archiveLastGame(players, questions, allAnswers, messages, room);
   } catch (error) {
     console.error("Could not archive the finished game.", error);
   }
   await setDoc(
-    doc(db, "rooms", ROOM_ID),
+    roomRef,
     {
       stage: "finished",
+      finalizingGame: false,
+      finalCountdownUntilMs: null,
       updatedAt: serverTimestamp(),
     },
     { merge: true }
@@ -1189,10 +1206,18 @@ async function claimQuestionProcessing(questionId) {
     const roomSnap = await transaction.get(roomRef);
     const roomData = roomSnap.exists() ? roomSnap.data() : {};
 
-    if (
-      roomData.processedQuestionId === questionId ||
-      roomData.processingQuestionId === questionId
-    ) {
+    const alreadyProcessed =
+      isSameId(roomData.processedQuestionId, questionId) ||
+      roomData.currentQuestion?.resultsCalculated === true ||
+      (roomData.resultsCalculated === true && isSameId(roomData.resultsCalculatedQuestionId, questionId));
+    const processingSameQuestion = isSameId(roomData.processingQuestionId, questionId);
+    const processingStartedAt = Number(roomData.processingStartedAtMs || 0);
+    const processingIsFresh =
+      processingSameQuestion &&
+      processingStartedAt &&
+      getNow() - processingStartedAt <= RESULTS_PROCESSING_STALE_MS;
+
+    if (alreadyProcessed || processingIsFresh) {
       return false;
     }
 
@@ -1211,126 +1236,199 @@ async function claimQuestionProcessing(questionId) {
 }
 
 
-// Called by admin when display page is not open and scores are stuck.
-// Reads the current answers and players directly from Firestore and processes them.
-async function forceProcessResults(room, players = [], answers = []) {
-  const questionId = room?.currentQuestion?.questionId;
+async function calculateResultsForCurrentQuestion(room, { source = "auto", nextStage = "results" } = {}) {
+  const questionId = room?.currentQuestion?.questionId || room?.currentQuestion?.id;
   if (!questionId) return;
-  if (!(await claimQuestionProcessing(questionId))) return;
+  console.log(`Starting result calculation for question ${questionId}`, { source });
+
+  if (
+    isSameId(room?.processedQuestionId, questionId) ||
+    room?.currentQuestion?.resultsCalculated === true ||
+    (room?.resultsCalculated === true && isSameId(room?.resultsCalculatedQuestionId, questionId))
+  ) {
+    console.log("Results already calculated, skipping", { questionId });
+    return { skipped: true };
+  }
+
+  const claimed = await claimQuestionProcessing(questionId);
+  if (!claimed) {
+    console.log("Results already calculated, skipping", { questionId, reason: "busy-or-processed" });
+    return { skipped: true };
+  }
 
   const roomRef = doc(db, "rooms", ROOM_ID);
 
   try {
-    const safeAnswers = Array.isArray(answers) ? answers : [];
-    const safePlayers = Array.isArray(players) ? players : [];
+    const [answersSnap, playersSnap] = await Promise.all([
+      getDocs(query(collection(db, "rooms", ROOM_ID, "answers"), where("questionId", "==", questionId))),
+      getDocs(collection(db, "rooms", ROOM_ID, "players")),
+    ]);
+
+    const safeAnswers = answersSnap.docs.map((item) => ({ id: item.id, ...item.data() }));
+    const safePlayers = playersSnap.docs
+      .map((item) => ({ id: item.id, ...item.data() }))
+      .filter((player) => !isVisitorRecord(player));
+
+    console.log("Answers loaded", { questionId, answers: safeAnswers.length, players: safePlayers.length });
 
     if (room?.currentQuestion?.isPractice) {
-      const bonusByPlayer = {};
-      const jokerByPlayer = {};
-      safeAnswers.filter((answer) => answer && answer.playerId).forEach((answer) => {
-        bonusByPlayer[answer.playerId] = Number(answer.points || 0);
-        if (answer.jokerApplied) jokerByPlayer[answer.playerId] = getJokerTimingLabel(answer.jokerMultiplier || 3);
-      });
+      // Practice questions use the same result display flow, but their points are reset
+      // before the real competition starts.
+    }
 
+    const answersToProcess = [...safeAnswers]
+      .filter((answer) => answer && answer.playerId)
+      .sort((a, b) => Number(a.answeredAt || 0) - Number(b.answeredAt || 0));
+    const answerByPlayer = new Map(answersToProcess.map((answer) => [answer.playerId, answer]));
+    const bonusByPlayer = {};
+    const jokerByPlayer = {};
+    const correctByPlayer = {};
+
+    answersToProcess.forEach((answer) => {
+      bonusByPlayer[answer.playerId] = Number(answer.points || 0);
+      correctByPlayer[answer.playerId] = !!answer.isCorrect;
+      if (answer.jokerApplied) {
+        jokerByPlayer[answer.playerId] = getJokerTimingLabel(answer.jokerMultiplier || 3);
+      }
+    });
+
+    const sortedBefore = [...safePlayers].sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
+    const previousRankByPlayer = {};
+    sortedBefore.forEach((player, index) => {
+      previousRankByPlayer[player.id] = index + 1;
+    });
+
+    if (room.questionIgnored) {
       await setDoc(
         roomRef,
         {
           processedQuestionId: questionId,
-          collectingBonusByPlayer: bonusByPlayer,
-          collectingBonusJokerByPlayer: jokerByPlayer,
+          resultsCalculated: true,
+          resultsCalculatedQuestionId: questionId,
+          "currentQuestion.resultsCalculated": true,
+          "currentQuestion.resultsCalculatedAt": serverTimestamp(),
+          questionResultsById: {
+            [questionId]: {
+              questionId,
+              ignored: true,
+              answersCount: 0,
+              calculatedAtMs: getNow(),
+            },
+          },
+          collectingBonusByPlayer: {},
+          collectingBonusJokerByPlayer: {},
           collectingBonusPlayerId: null,
           collectingBonusPoints: 0,
           rankMovementByPlayer: {},
+          collectingAnswerCorrectByPlayer: {},
           resultsAnimationPhase: "done",
           processingQuestionId: null,
           processingStartedAtMs: null,
+          resultsError: null,
           updatedAt: serverTimestamp(),
         },
         { merge: true }
       );
-      return;
+      console.log("Question marked as calculated", { questionId, ignored: true });
+      return { skipped: false };
     }
 
-    const answersToProcess = [...safeAnswers]
-      .filter((a) => a && a.playerId)
-      .sort((a, b) => Number(a.answeredAt || 0) - Number(b.answeredAt || 0));
-
-    const bonusByPlayer = {};
-    const jokerByPlayer = {};
-
-    answersToProcess.forEach((answer) => {
-      bonusByPlayer[answer.playerId] = Number(answer.points || 0);
-      if (answer.jokerApplied) jokerByPlayer[answer.playerId] = true;
-    });
-
-    const sortedBefore = [...safePlayers].sort(
-      (a, b) => Number(b.score || 0) - Number(a.score || 0)
-    );
-    const previousRankByPlayer = {};
-    sortedBefore.forEach((p, i) => { previousRankByPlayer[p.id] = i + 1; });
-
-    const finalPlayers = safePlayers.map((p) => ({
-      ...p,
-      __finalScore: Number(p.score || 0) + Number(bonusByPlayer[p.id] || 0),
-    }));
-    const sortedAfter = [...finalPlayers].sort(
-      (a, b) => Number(b.__finalScore || 0) - Number(a.__finalScore || 0)
-    );
-    const rankMovementByPlayer = {};
-    sortedAfter.forEach((p, i) => {
-      rankMovementByPlayer[p.id] = (previousRankByPlayer[p.id] || i + 1) - (i + 1);
+    const playerUpdates = safePlayers.map((player) => {
+      const answer = answerByPlayer.get(player.id);
+      const points = Number(answer?.points || 0);
+      const alreadyApplied = isSameId(player.lastQuestionId, questionId);
+      const nextScore = alreadyApplied ? Number(player.score || 0) : Number(player.score || 0) + points;
+      return {
+        player,
+        answer,
+        points,
+        alreadyApplied,
+        nextScore,
+      };
     });
 
     await Promise.all(
-      safePlayers.map(async (player) => {
-        const answer = answersToProcess.find((a) => a.playerId === player.id);
-        const points = Number(answer?.points || 0);
-        await updateDoc(doc(db, "rooms", ROOM_ID, "players", player.id), {
-          score: Number(player.score || 0) + points,
-          answeredCount: Number(player.answeredCount || 0) + (answer ? 1 : 0),
+      playerUpdates.map(({ player, answer, points, alreadyApplied, nextScore }) =>
+        updateDoc(doc(db, "rooms", ROOM_ID, "players", player.id), {
+          score: nextScore,
+          answeredCount: Number(player.answeredCount || 0) + (!alreadyApplied && answer ? 1 : 0),
           lastQuestionPoints: points,
           lastQuestionId: questionId,
+          lastQuestionCorrect: answer ? !!answer.isCorrect : null,
           lastAnswerAt: answer ? serverTimestamp() : player.lastAnswerAt || null,
-        });
-      })
+        })
+      )
     );
+    console.log("Player scores updated", { questionId, players: playerUpdates.length });
+
+    const sortedAfter = [...playerUpdates]
+      .map(({ player, nextScore }) => ({ ...player, __finalScore: nextScore }))
+      .sort((a, b) => Number(b.__finalScore || 0) - Number(a.__finalScore || 0));
+    const rankMovementByPlayer = {};
+    sortedAfter.forEach((player, index) => {
+      rankMovementByPlayer[player.id] = (previousRankByPlayer[player.id] || index + 1) - (index + 1);
+    });
 
     await setDoc(
       roomRef,
       {
         processedQuestionId: questionId,
+        resultsCalculated: true,
+        resultsCalculatedQuestionId: questionId,
+        "currentQuestion.resultsCalculated": true,
+        "currentQuestion.resultsCalculatedAt": serverTimestamp(),
+        questionResultsById: {
+          [questionId]: {
+            questionId,
+            answersCount: answersToProcess.length,
+            correctCount: answersToProcess.filter((answer) => answer.isCorrect).length,
+            jokerCount: answersToProcess.filter((answer) => answer.jokerApplied).length,
+            bonusByPlayer,
+            jokerByPlayer,
+            correctByPlayer,
+            rankMovementByPlayer,
+            calculatedAtMs: getNow(),
+          },
+        },
         collectingBonusByPlayer: bonusByPlayer,
         collectingBonusJokerByPlayer: jokerByPlayer,
         collectingBonusPlayerId: null,
         collectingBonusPoints: 0,
         rankMovementByPlayer,
+        collectingAnswerCorrectByPlayer: correctByPlayer,
         resultsAnimationPhase: "done",
         processingQuestionId: null,
         processingStartedAtMs: null,
+        resultsError: null,
+        ...(nextStage ? { stage: nextStage } : {}),
         updatedAt: serverTimestamp(),
       },
       { merge: true }
     );
+    console.log("Question marked as calculated", { questionId });
+    return { skipped: false };
   } catch (error) {
-    console.error("forceProcessResults failed:", error);
-    // Even on error, unblock the admin so the game can continue
+    console.error("Calculation failed", error);
     await setDoc(
       roomRef,
       {
-        processedQuestionId: questionId,
-        collectingBonusByPlayer: {},
-        collectingBonusJokerByPlayer: {},
-        collectingBonusPlayerId: null,
-        collectingBonusPoints: 0,
-        rankMovementByPlayer: {},
-        resultsAnimationPhase: "done",
+        resultsError: String(error?.message || error),
         processingQuestionId: null,
         processingStartedAtMs: null,
         updatedAt: serverTimestamp(),
       },
       { merge: true }
     );
+    throw error;
+  } finally {
+    console.log("Calculation finished", { questionId });
   }
+}
+
+// Called by admin when display page is not open and scores are stuck.
+// Reads the current answers and players directly from Firestore and processes them.
+async function forceProcessResults(room) {
+  return calculateResultsForCurrentQuestion(room, { source: "manual" });
 }
 
 /* Automation */
@@ -1429,243 +1527,61 @@ function AutoProcessResults({ room, answers = [], players = [] }) {
 
   useEffect(() => {
     async function processScores() {
-      const questionId = room?.currentQuestion?.questionId;
+      const questionId = room?.currentQuestion?.questionId || room?.currentQuestion?.id;
 
       if (!room || room.stage !== "results" || !questionId) return;
-      if (room.processedQuestionId === questionId) return;
-      if (room.processingQuestionId === questionId) return;
+      if (isSameId(room.processedQuestionId, questionId)) return;
+      if (isSameId(room.processingQuestionId, questionId) && !isResultsProcessingStale(room, questionId)) return;
       if (processingQuestionId === questionId) return;
 
       setProcessingQuestionId(questionId);
 
-      const roomRef = doc(db, "rooms", ROOM_ID);
-
       try {
-        if (!(await claimQuestionProcessing(questionId))) return;
-
-        if (room.currentQuestion?.isPractice) {
-          const safeAnswers = Array.isArray(answers) ? answers : [];
-          const safePlayers = Array.isArray(players) ? players : [];
-          const answersToProcess = [...safeAnswers]
-            .filter((answer) => answer && answer.playerId)
-            .sort((a, b) => Number(a.answeredAt || 0) - Number(b.answeredAt || 0));
-          const bonusByPlayer = {};
-          const jokerByPlayer = {};
-          answersToProcess.forEach((answer) => {
-            bonusByPlayer[answer.playerId] = Number(answer.points || 0);
-            if (answer.jokerApplied) jokerByPlayer[answer.playerId] = getJokerTimingLabel(answer.jokerMultiplier || 3);
-          });
-          const sortedBefore = [...safePlayers].sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
-          const previousRankByPlayer = {};
-          sortedBefore.forEach((player, index) => {
-            previousRankByPlayer[player.id] = index + 1;
-          });
-          const finalPlayers = safePlayers.map((player) => ({
-            ...player,
-            __finalScore: Number(player.score || 0) + Number(bonusByPlayer[player.id] || 0),
-          }));
-          const rankMovementByPlayer = {};
-          [...finalPlayers]
-            .sort((a, b) => Number(b.__finalScore || 0) - Number(a.__finalScore || 0))
-            .forEach((player, index) => {
-              rankMovementByPlayer[player.id] = (previousRankByPlayer[player.id] || index + 1) - (index + 1);
-            });
-
-          await setDoc(
-            roomRef,
-            {
-              collectingBonusByPlayer: bonusByPlayer,
-              collectingBonusJokerByPlayer: jokerByPlayer,
-              collectingBonusPlayerId: null,
-              collectingBonusPoints: 0,
-              rankMovementByPlayer: {},
-              resultsAnimationPhase: "showPoints",
-              updatedAt: serverTimestamp(),
-            },
-            { merge: true }
-          );
-
-          await new Promise((resolve) => setTimeout(resolve, SCORE_ANIMATION_HOLD_MS || 900));
-
-          await Promise.all(
-            safePlayers.map(async (player) => {
-              const answer = answersToProcess.find((item) => item.playerId === player.id);
-              const points = Number(answer?.points || 0);
-              await updateDoc(doc(db, "rooms", ROOM_ID, "players", player.id), {
-                score: Number(player.score || 0) + points,
-                answeredCount: Number(player.answeredCount || 0) + (answer ? 1 : 0),
-                lastQuestionPoints: points,
-                lastQuestionId: questionId,
-                lastAnswerAt: answer ? serverTimestamp() : player.lastAnswerAt || null,
-              });
-            })
-          );
-
-          await new Promise((resolve) => setTimeout(resolve, 450));
-
-          await setDoc(
-            roomRef,
-            {
-              processedQuestionId: questionId,
-              collectingBonusByPlayer: bonusByPlayer,
-              collectingBonusJokerByPlayer: jokerByPlayer,
-              collectingBonusPlayerId: null,
-              collectingBonusPoints: 0,
-              rankMovementByPlayer,
-              resultsAnimationPhase: "done",
-              processingQuestionId: null,
-              processingStartedAtMs: null,
-              updatedAt: serverTimestamp(),
-            },
-            { merge: true }
-          );
-          return;
-        }
-
-        if (room.questionIgnored) {
-          await setDoc(
-            roomRef,
-            {
-              processedQuestionId: questionId,
-              collectingBonusByPlayer: {},
-              collectingBonusJokerByPlayer: {},
-              collectingBonusPlayerId: null,
-              collectingBonusPoints: 0,
-              rankMovementByPlayer: {},
-              resultsAnimationPhase: "done",
-              processingQuestionId: null,
-              processingStartedAtMs: null,
-              updatedAt: serverTimestamp(),
-            },
-            { merge: true }
-          );
-          return;
-        }
-
-        const safeAnswers = Array.isArray(answers) ? answers : [];
-        const safePlayers = Array.isArray(players) ? players : [];
-
-        const answersToProcess = [...safeAnswers]
-          .filter((answer) => answer && answer.playerId)
-          .sort((a, b) => Number(a.answeredAt || 0) - Number(b.answeredAt || 0));
-
-        const bonusByPlayer = {};
-        const jokerByPlayer = {};
-
-        answersToProcess.forEach((answer) => {
-          bonusByPlayer[answer.playerId] = Number(answer.points || 0);
-          if (answer.jokerApplied) {
-            jokerByPlayer[answer.playerId] = getJokerTimingLabel(answer.jokerMultiplier || 3);
-          }
-        });
-
-        const sortedBefore = [...safePlayers].sort(
-          (a, b) => Number(b.score || 0) - Number(a.score || 0)
-        );
-
-        const previousRankByPlayer = {};
-        sortedBefore.forEach((player, index) => {
-          previousRankByPlayer[player.id] = index + 1;
-        });
-
-        const finalPlayers = safePlayers.map((player) => ({
-          ...player,
-          __finalScore:
-            Number(player.score || 0) + (room?.currentQuestion?.isPractice ? 0 : Number(bonusByPlayer[player.id] || 0)),
-        }));
-
-        const sortedAfter = [...finalPlayers].sort(
-          (a, b) => Number(b.__finalScore || 0) - Number(a.__finalScore || 0)
-        );
-
-        const rankMovementByPlayer = {};
-        sortedAfter.forEach((player, index) => {
-          const previousRank = previousRankByPlayer[player.id] || index + 1;
-          const newRank = index + 1;
-          rankMovementByPlayer[player.id] = previousRank - newRank;
-        });
-
-        await setDoc(
-          roomRef,
-          {
-            collectingBonusByPlayer: bonusByPlayer,
-            collectingBonusJokerByPlayer: jokerByPlayer,
-            rankMovementByPlayer: {},
-            resultsAnimationPhase: "showPoints",
-            updatedAt: serverTimestamp(),
-          },
-          { merge: true }
-        );
-
-        await new Promise((resolve) =>
-          setTimeout(resolve, SCORE_ANIMATION_HOLD_MS || 900)
-        );
-
-        await Promise.all(
-          safePlayers.map(async (player) => {
-            const answer = answersToProcess.find(
-              (item) => item.playerId === player.id
-            );
-
-            const points = Number(answer?.points || 0);
-
-            await updateDoc(doc(db, "rooms", ROOM_ID, "players", player.id), {
-              score: room?.currentQuestion?.isPractice ? Number(player.score || 0) : Number(player.score || 0) + points,
-              answeredCount: Number(player.answeredCount || 0) + (room?.currentQuestion?.isPractice ? 0 : (answer ? 1 : 0)),
-              lastQuestionPoints: points,
-              lastQuestionId: questionId,
-              lastAnswerAt: answer ? serverTimestamp() : player.lastAnswerAt || null,
-            });
-          })
-        );
-
-        await new Promise((resolve) => setTimeout(resolve, 450));
-
-        await setDoc(
-          roomRef,
-          {
-            processedQuestionId: questionId,
-            collectingBonusByPlayer: bonusByPlayer,
-            collectingBonusJokerByPlayer: jokerByPlayer,
-            collectingBonusPlayerId: null,
-            collectingBonusPoints: 0,
-            rankMovementByPlayer,
-            resultsAnimationPhase: "done",
-            processingQuestionId: null,
-            processingStartedAtMs: null,
-            updatedAt: serverTimestamp(),
-          },
-          { merge: true }
-        );
+        await calculateResultsForCurrentQuestion(room, { source: "auto" });
       } catch (error) {
         console.error("AutoProcessResults failed:", error);
-
-        await setDoc(
-          roomRef,
-          {
-            processedQuestionId: questionId,
-            collectingBonusByPlayer: {},
-            collectingBonusJokerByPlayer: {},
-            collectingBonusPlayerId: null,
-            collectingBonusPoints: 0,
-            rankMovementByPlayer: {},
-            resultsAnimationPhase: "done",
-            resultsError: String(error?.message || error),
-            processingQuestionId: null,
-            processingStartedAtMs: null,
-            updatedAt: serverTimestamp(),
-          },
-          { merge: true }
-        );
+      } finally {
+        setProcessingQuestionId(null);
       }
     }
 
     processScores();
-  }, [room, answers, players, processingQuestionId]);
+  }, [room, processingQuestionId, answers, players]);
 
   useEffect(() => {
     if (room?.stage !== "results") {
       setProcessingQuestionId(null);
+    }
+  }, [room?.stage]);
+
+  return null;
+}
+
+function AutoFinishFinalCountdown({ room, players = [], questions = [], allAnswers = [], messages = [] }) {
+  const now = useNow(250);
+  const [finalizing, setFinalizing] = useState(false);
+
+  useEffect(() => {
+    async function finishAfterCountdown() {
+      if (!room || room.stage !== "finalCountdown" || finalizing) return;
+      const untilMs = Number(room.finalCountdownUntilMs || 0);
+      if (!untilMs || now < untilMs) return;
+
+      setFinalizing(true);
+      try {
+        await finishGame(players, getMainQuestions(questions), allAnswers || [], messages, room);
+      } catch (error) {
+        console.error("Final countdown finish failed:", error);
+        setFinalizing(false);
+      }
+    }
+
+    finishAfterCountdown();
+  }, [room, now, finalizing, players, questions, allAnswers, messages]);
+
+  useEffect(() => {
+    if (room?.stage !== "finalCountdown") {
+      setFinalizing(false);
     }
   }, [room?.stage]);
 
@@ -1682,11 +1598,23 @@ function Leaderboard({
   currentQuestionId = null,
   showRankMovement = true,
   resultLabel = "",
+  answerCorrectByPlayer = {},
 }) {
   const visiblePlayers = players;
 
   function renderFlashBadges(player) {
-    const delta = Number(bonusPointsByPlayer?.[player.id] || 0);
+    const hasBonusEntry = Object.prototype.hasOwnProperty.call(bonusPointsByPlayer || {}, player.id);
+    const isSameQuestion =
+      currentQuestionId &&
+      player.lastQuestionId != null &&
+      String(player.lastQuestionId) === String(currentQuestionId);
+    const savedLastQuestionPoints =
+      isSameQuestion
+        ? Number(player.lastQuestionPoints || 0)
+        : 0;
+    const delta = hasBonusEntry
+      ? Number(bonusPointsByPlayer?.[player.id] || 0)
+      : savedLastQuestionPoints;
     const movement = showRankMovement ? Number(rankMovementByPlayer?.[player.id] || 0) : 0;
 
     if (delta === 0 && movement === 0) return null;
@@ -1725,6 +1653,22 @@ function Leaderboard({
                 player.jokerUsed &&
                 currentQuestionId &&
                 player.jokerQuestionId === currentQuestionId;
+              const hasCurrentAnswerResult =
+                !!currentQuestionId &&
+                player.lastQuestionId === currentQuestionId &&
+                typeof player.lastQuestionCorrect === "boolean";
+              const currentAnswerCorrect =
+                typeof answerCorrectByPlayer?.[player.id] === "boolean"
+                  ? answerCorrectByPlayer[player.id]
+                  : hasCurrentAnswerResult
+                    ? player.lastQuestionCorrect
+                    : null;
+              const scoreToneClass =
+                currentAnswerCorrect === true
+                  ? " score-correct"
+                  : currentAnswerCorrect === false
+                    ? " score-wrong"
+                    : "";
 
               return (
                 <motion.div
@@ -1757,7 +1701,7 @@ function Leaderboard({
                     )}
                   </div>
 
-                  <div className="leaderboard-score-wrap">
+                  <div className={`leaderboard-score-wrap${scoreToneClass}`}>
                     <span className="leaderboard-score-label">النقاط</span>
                     <motion.strong
                       className="leaderboard-total-score"
@@ -1866,85 +1810,144 @@ function getPrizeWheelPlayers(players = [], prizeWheel = {}) {
   return eligiblePlayers.length > 0 ? eligiblePlayers : basePlayers;
 }
 
+async function spinPrizeWheelForRoom(room, players, overrides = {}) {
+  const currentPrizeWheel = room?.prizeWheel || {};
+  const nextPrizeWheel = {
+    ...currentPrizeWheel,
+    ...overrides,
+  };
+  const candidates = getPrizeWheelPlayers(players, nextPrizeWheel);
+  if (candidates.length === 0) {
+    alert("لا يوجد متسابقون لتشغيل سحب الجوائز.");
+    return;
+  }
+
+  const selectedWinner =
+    candidates.find((player) => player.id === nextPrizeWheel.selectedPlayerId) ||
+    candidates[getRandomIndex(candidates.length)];
+  const prizeTitle = (nextPrizeWheel.prizeTitle || "").trim() || "جائزة مفاجئة";
+  const prizeItemId = nextPrizeWheel.activePrizeItemId || overrides.prizeItemId || null;
+  const spinId = `${getNow()}-${selectedWinner.id}`;
+  const winnerRecord = {
+    prizeItemId,
+    playerId: selectedWinner.id,
+    playerName: selectedWinner.name || "",
+    playerFullName: selectedWinner.fullName || "",
+    playerEmoji: selectedWinner.emoji || "",
+    prizeTitle,
+    gameTitle: QUIZ_TITLE,
+    awardedAtMs: getNow(),
+    spinId,
+  };
+
+  await updateDoc(doc(db, "rooms", ROOM_ID), {
+    stage: "prizeWheel",
+    "prizeWheel.previousStage": room?.stage === "prizeWheel" ? currentPrizeWheel.previousStage || "registration" : room?.stage || "registration",
+    "prizeWheel.prizeTitle": prizeTitle,
+    "prizeWheel.activePrizeItemId": prizeItemId,
+    "prizeWheel.excludePreviousWinners": !!nextPrizeWheel.excludePreviousWinners,
+    "prizeWheel.selectedPlayerId": nextPrizeWheel.selectedPlayerId || null,
+    "prizeWheel.winnerPlayerId": selectedWinner.id,
+    "prizeWheel.spinId": spinId,
+    "prizeWheel.spinStartedAtMs": getNow(),
+    "prizeWheel.spinning": true,
+    "prizeWheel.winners": arrayUnion(winnerRecord),
+    updatedAt: serverTimestamp(),
+  });
+}
+
 function PrizeWheelDisplay({ room, players }) {
   const prizeWheel = room?.prizeWheel || {};
-  const wheelPlayers = getPrizeWheelPlayers(players, prizeWheel);
+  const displayPrizeWheel = {
+    ...prizeWheel,
+    winners: (prizeWheel.winners || []).filter((winnerItem) => winnerItem.spinId !== prizeWheel.spinId),
+  };
+  const wheelPlayers = getPrizeWheelPlayers(players, displayPrizeWheel);
   const winner = players.find((player) => player.id === prizeWheel.winnerPlayerId) || null;
   const winnerIndex = Math.max(0, wheelPlayers.findIndex((player) => player.id === winner?.id));
-  const segment = wheelPlayers.length ? 360 / wheelPlayers.length : 360;
-  const targetRotation = wheelPlayers.length
-    ? 360 * 7 + (360 - (winnerIndex * segment + segment / 2))
-    : 0;
-  const [rotation, setRotation] = useState(0);
+  const [highlightedIndex, setHighlightedIndex] = useState(null);
   const [showWinner, setShowWinner] = useState(false);
   const spinActive = !!prizeWheel.spinning && !!prizeWheel.spinId && !!winner;
-  const gradient = wheelPlayers.length
-    ? `conic-gradient(${wheelPlayers.map((player, index) => {
-        const start = index * segment;
-        const end = (index + 1) * segment;
-        const colors = ["#f7d678", "#9fd8ef", "#f3a7bd", "#b8e2b2", "#c7bbf4", "#f5c58d"];
-        return `${colors[index % colors.length]} ${start}deg ${end}deg`;
-      }).join(", ")})`
-    : "linear-gradient(135deg, #f5fbfd, #e8f4f8)";
 
   useEffect(() => {
     if (!spinActive) {
-      setRotation(0);
+      setHighlightedIndex(null);
       setShowWinner(false);
       return undefined;
     }
 
     setShowWinner(false);
-    setRotation(0);
-    const frame = requestAnimationFrame(() => setRotation(targetRotation));
-    const timer = setTimeout(() => setShowWinner(true), 4300);
+    setHighlightedIndex(0);
+    const timers = [];
+    const cardCount = wheelPlayers.length;
+    const baseSteps = Math.min(76, Math.max(30, cardCount * 2 + 18));
+    const finalStep = baseSteps + ((winnerIndex - (baseSteps % cardCount) + cardCount) % cardCount);
+
+    function scheduleStep(step) {
+      const progress = step / Math.max(1, finalStep);
+      const delay = 45 + Math.round((progress ** 2.25) * 250);
+      const timer = setTimeout(() => {
+        const nextIndex = step % cardCount;
+        setHighlightedIndex(nextIndex);
+        if (step >= finalStep) {
+          setShowWinner(true);
+          return;
+        }
+        scheduleStep(step + 1);
+      }, delay);
+      timers.push(timer);
+    }
+
+    scheduleStep(1);
     return () => {
-      cancelAnimationFrame(frame);
-      clearTimeout(timer);
+      timers.forEach((timer) => clearTimeout(timer));
     };
-  }, [prizeWheel.spinId, spinActive, targetRotation]);
+  }, [prizeWheel.spinId, spinActive, wheelPlayers.length, winnerIndex]);
 
   return (
-    <div className="display-panel prize-wheel-screen">
-      <div className="prize-wheel-header">
-        <span>جائزة مفاجئة</span>
-        <strong>{prizeWheel.prizeTitle || "عجلة الحظ"}</strong>
+    <div className={room?.displayVideoSlotEnabled ? "display-panel prize-draw-screen prize-draw-with-video-space" : "display-panel prize-draw-screen"}>
+      <div className="prize-draw-header">
+        <span>سحب الجوائز</span>
+        <strong>{prizeWheel.prizeTitle || "جائزة مفاجئة"}</strong>
       </div>
 
-      <div className="prize-wheel-stage">
-        <div className="prize-wheel-pointer" />
-        <div
-          className={spinActive ? "prize-wheel spinning" : "prize-wheel"}
-          style={{ background: gradient, transform: `rotate(${rotation}deg)` }}
-        >
-          {wheelPlayers.length === 0 ? (
-            <div className="prize-wheel-empty">لا يوجد متسابقون</div>
-          ) : (
-            wheelPlayers.map((player, index) => {
-              const angle = index * segment + segment / 2;
-              return (
-                <span
-                  className="prize-wheel-name"
-                  key={player.id}
-                  style={{ transform: `rotate(${angle}deg) translateY(-41%) rotate(90deg)` }}
-                >
-                  {player.emoji || ""} {player.name}
-                </span>
-              );
-            })
-          )}
-        </div>
-        <div className="prize-wheel-center">🎁</div>
+      <div className={spinActive ? "prize-draw-grid is-drawing" : "prize-draw-grid"}>
+        {wheelPlayers.length === 0 ? (
+          <div className="prize-draw-empty">لا يوجد متسابقون</div>
+        ) : (
+          wheelPlayers.map((player, index) => {
+            const isHighlighted = highlightedIndex === index;
+            const isWinner = showWinner && winner?.id === player.id;
+            return (
+              <div
+                className={[
+                  "prize-draw-card",
+                  isHighlighted ? "is-highlighted" : "",
+                  isWinner ? "is-winner" : "",
+                  showWinner && !isWinner ? "is-dimmed" : "",
+                ].filter(Boolean).join(" ")}
+                key={player.id}
+              >
+                <span className="prize-draw-number">{index + 1}</span>
+                <strong>{player.emoji || "⭐"} {player.name}</strong>
+              </div>
+            );
+          })
+        )}
       </div>
 
-      <div className={showWinner && winner ? "prize-wheel-winner visible" : "prize-wheel-winner"}>
+      <div className={showWinner && winner ? "prize-draw-footer prize-wheel-winner visible" : "prize-draw-footer"}>
         {showWinner && winner ? (
           <>
             <span>الفائز</span>
             <strong>{winner.emoji || ""} {winner.name}</strong>
           </>
+        ) : spinActive ? (
+          <strong>جاري السحب...</strong>
         ) : (
-          <strong>{spinActive ? "العجلة تدور..." : "بانتظار تشغيل العجلة"}</strong>
+          <button type="button" className="prize-wheel-spin-button" onClick={() => spinPrizeWheelForRoom(room, players)} disabled={wheelPlayers.length === 0}>
+            سحب
+          </button>
         )}
       </div>
     </div>
@@ -2002,56 +2005,76 @@ function LiveAnswerStats({ question, answers, showCorrect = false }) {
 
 
 function InstructionsPage({ isAdmin = false, room = null, players = [], onOpenRegistration = null }) {
+  const showInstructionVideoSlot = isAdmin && !!room?.displayVideoSlotEnabled;
+
   return (
-    <div className={isAdmin ? "display-panel instructions-page" : "card instructions-page"}>
-      <div className="instructions-hero">
-        <span>✦</span>
-        <div>
-          <h1>طريقة المسابقة</h1>
-          <p>معلومات سريعة قبل بداية اللعب.</p>
-        </div>
-      </div>
+    <div className={[
+      isAdmin ? "display-panel instructions-page" : "card instructions-page",
+      showInstructionVideoSlot ? "instructions-with-video" : "",
+    ].filter(Boolean).join(" ")}>
+      {showInstructionVideoSlot && (
+        <div className="instructions-video-spacer" aria-hidden="true" />
+      )}
 
-      <div className="instructions-board" aria-label="طريقة المسابقة">
-        <div className="instruction-mini-card speed">
-          <span>⚡</span>
-          <strong>السؤال يوصلك على جوالك</strong>
-          <p>يرسله المقدم، وكلما جاوبت أسرع أخذت نقاطًا أكثر.</p>
-          <small>الصحيح يرفع نقاطك، والخطأ لا ينقصك.</small>
-        </div>
-
-        <div className="instruction-joker-card">
-          <div className="joker-card-head">
-            <span>{"\u{1F0CF}"}</span>
-            <div>
-              <strong>لك جوكر واحد طول المسابقة</strong>
-              <p>استخدمه في الوقت المناسب.</p>
-            </div>
-          </div>
-          <div className="joker-focus-card" aria-label="شرح الجوكر">
-            <div className="joker-use-note">
-              <span>لو استخدمته</span>
-            </div>
-            <div className="joker-multiplier-pair">
-              <div className="joker-multiplier-option before">
-                <small>قبل ما تشوف السؤال</small>
-                <b>x3</b>
-              </div>
-              <div className="joker-multiplier-option after">
-                <small>بعد ما تشوف السؤال</small>
-                <b>x2</b>
-              </div>
-            </div>
-            <div className="joker-result-note">
-              <span className="negative">↘ الخطأ يخصم قيمة السؤال</span>
-            </div>
+      <div className="instructions-content-stack">
+        <div className="instructions-hero">
+          <span>✦</span>
+          <div>
+            <h1>طريقة المسابقة</h1>
+            <p>معلومات سريعة قبل بداية اللعب.</p>
           </div>
         </div>
 
-        <div className="instruction-mini-card results">
-          <span>🏆</span>
-          <strong>النتائج بعد كل جواب</strong>
-          <p>تعرف نقاطك وترتيبك مباشرة.</p>
+        <div className="instructions-board" aria-label="طريقة المسابقة">
+          <div className="instruction-mini-card speed">
+            <span>⚡</span>
+            <strong>السؤال يوصلك على جوالك</strong>
+            <p>يرسله المقدم، وكلما جاوبت أسرع أخذت نقاطًا أكثر.</p>
+            <div className="score-rule-visual" aria-label="تأثير الإجابة على النقاط">
+              <div className="score-rule-pill up">
+                <b>↑</b>
+                <span>الصحيح يرفع نقاطك</span>
+              </div>
+              <div className="score-rule-pill safe">
+                <b>0</b>
+                <span>الخطأ لا ينقصك</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="instruction-joker-card">
+            <div className="joker-card-head">
+              <span>{"\u{1F0CF}"}</span>
+              <div>
+                <strong>لك جوكر واحد طول المسابقة</strong>
+                <p>استخدمه في الوقت المناسب.</p>
+              </div>
+            </div>
+            <div className="joker-focus-card" aria-label="شرح الجوكر">
+              <div className="joker-use-note">
+                <span>لو استخدمته</span>
+              </div>
+              <div className="joker-multiplier-pair">
+                <div className="joker-multiplier-option before">
+                  <small>قبل ما تشوف السؤال</small>
+                  <b>x3</b>
+                </div>
+                <div className="joker-multiplier-option after">
+                  <small>بعد ما تشوف السؤال</small>
+                  <b>x2</b>
+                </div>
+              </div>
+              <div className="joker-result-note">
+                <span className="negative">↘ الخطأ يخصم قيمة السؤال</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="instruction-mini-card results">
+            <span>🏆</span>
+            <strong>النتائج بعد كل جواب</strong>
+            <p>تعرف نقاطك وترتيبك مباشرة.</p>
+          </div>
         </div>
       </div>
 
@@ -2176,10 +2199,23 @@ function MediaQuestionPlayer({ question, room, isAdmin, displayMode }) {
     }
   }
 
+  async function handleMediaPlay() {
+    if (isAdmin && displayMode && !mediaStarted) {
+      await startMediaQuestion();
+    }
+  }
+
   async function handleEnded() {
     if (isAdmin && displayMode && !mediaEnded) {
       await finishMediaQuestion(question);
     }
+  }
+
+  async function handleFinishMedia() {
+    if (mediaRef.current) {
+      mediaRef.current.pause?.();
+    }
+    await finishMediaQuestion(question);
   }
 
   if (!mediaUrl) return null;
@@ -2188,12 +2224,13 @@ function MediaQuestionPlayer({ question, room, isAdmin, displayMode }) {
   const showControls = (isAdmin && displayMode) || canParticipantPlay;
 
   return (
-    <div className="reveal-box" style={{ marginBottom: "18px" }}>
+    <div className="reveal-box media-question-player">
       {isVideo ? (
         <video
           ref={mediaRef}
           controls={showControls}
           src={mediaUrl}
+          onPlay={handleMediaPlay}
           onEnded={handleEnded}
           style={{ width: "100%", maxHeight: displayMode ? "34vh" : "220px", borderRadius: "16px" }}
         />
@@ -2202,28 +2239,19 @@ function MediaQuestionPlayer({ question, room, isAdmin, displayMode }) {
           ref={mediaRef}
           controls={showControls}
           src={mediaUrl}
+          onPlay={handleMediaPlay}
           onEnded={handleEnded}
           style={{ width: "100%" }}
         />
       )}
 
-      {isAdmin && displayMode && !mediaStarted && (
-        <button
-          type="button"
-          onClick={handleStartMedia}
-          style={{ marginTop: "14px", width: "100%" }}
-        >
-          تشغيل {isVideo ? "الفيديو" : "الصوت"}
-        </button>
-      )}
-
       {isAdmin && displayMode && !mediaEnded && (
         <button
           type="button"
-          onClick={() => finishMediaQuestion(question)}
-          className="send-answers-now-button" style={{ marginTop: "14px", width: "100%" }}
+          onClick={mediaStarted ? handleFinishMedia : handleStartMedia}
+          className="media-primary-action"
         >
-          {mediaStarted ? "إنهاء المقطع وإظهار الخيارات" : "تجاوز المقطع وإظهار الخيارات"}
+          {mediaStarted ? "إظهار الخيارات" : "تشغيل المقطع"}
         </button>
       )}
 
@@ -2271,11 +2299,6 @@ function QuestionScreen({
 
   const canAnswer = !isAdmin && !waitingForQuestionStart && optionsVisible && activeStage === "question";
   const liveProgressPercent = getPointsProgressPercent(question, room, now);
-  useCountdownBeeps({
-    active: activeStage === "question" && optionsVisible && !isQuestionEnded,
-    timeLeft,
-    questionId: question?.questionId,
-  });
 
   const progressPercent =
     selectedIndex !== null && frozenProgressPercent !== null
@@ -2538,9 +2561,15 @@ function QuestionScreen({
 }
 
 function ResultsDisplay({ room, players, messages }) {
+  const currentQuestionId = room?.currentQuestion?.questionId || room?.currentQuestion?.id || null;
   const isCollecting =
-    room?.processedQuestionId !== room?.currentQuestion?.questionId;
+    currentQuestionId && room?.processedQuestionId !== currentQuestionId;
   const questionNumber = (room?.currentQuestionIndex ?? 0) + 1;
+  const answerCorrectByPlayer =
+    currentQuestionId &&
+    (room?.processedQuestionId === currentQuestionId || room?.processingQuestionId === currentQuestionId)
+      ? room?.collectingAnswerCorrectByPlayer || {}
+      : {};
   const videoEnabled = !!room?.displayVideoSlotEnabled;
 
   return (
@@ -2557,15 +2586,29 @@ function ResultsDisplay({ room, players, messages }) {
           isCollecting={isCollecting}
           bonusPointsByPlayer={room?.collectingBonusByPlayer || {}}
           rankMovementByPlayer={room?.rankMovementByPlayer || {}}
-          currentQuestionId={room?.currentQuestion?.questionId}
+          currentQuestionId={currentQuestionId}
           showRankMovement={(room?.currentQuestionIndex ?? 0) > 0}
           resultLabel={`نتائج السؤال ${questionNumber}`}
+          answerCorrectByPlayer={answerCorrectByPlayer}
         />
       </div>
 
       <div className="results-messages-area">
         <DisplaySidePanel messages={messages} videoEnabled={videoEnabled} />
       </div>
+    </div>
+  );
+}
+
+function FinalCountdownDisplay({ room }) {
+  const now = useNow(120);
+  const remaining = Math.max(0, Math.ceil((Number(room?.finalCountdownUntilMs || 0) - now) / 1000));
+  const displayNumber = remaining || 1;
+
+  return (
+    <div className="display-panel final-countdown-screen">
+      <span>استعدوا لإعلان الفائزين</span>
+      <strong key={displayNumber}>{displayNumber}</strong>
     </div>
   );
 }
@@ -3591,10 +3634,11 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
   const [previousAdminSection, setPreviousAdminSection] = useState(null);
   const [adminAdvancing, setAdminAdvancing] = useState(false);
   const [quickControlsOpen, setQuickControlsOpen] = useState(false);
-  const [prizeTitleInput, setPrizeTitleInput] = useState("جائزة مفاجئة");
-  const [selectedPrizeWinnerId, setSelectedPrizeWinnerId] = useState("");
+  const [selectedPrizeWinnerByPrize, setSelectedPrizeWinnerByPrize] = useState({});
   const [excludePrizeWinners, setExcludePrizeWinners] = useState(true);
-  const [prizeHistoryOpen, setPrizeHistoryOpen] = useState(true);
+  const [isPrizeAddOpen, setIsPrizeAddOpen] = useState(false);
+  const [newPrizeTitle, setNewPrizeTitle] = useState("");
+  const [expandedPrizeItems, setExpandedPrizeItems] = useState({});
   const [liveExpandedSections, setLiveExpandedSections] = useState({
     players: true,
     questionStats: true,
@@ -3635,8 +3679,17 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
   const registeredCount = players.filter((player) => !isVisitorRecord(player)).length;
   const openedLinkCount = Math.max(activeVisitors.length, registeredCount);
   const registrationPercent = openedLinkCount > 0 ? Math.min(100, Math.round((registeredCount / openedLinkCount) * 100)) : 0;
+  const adminCurrentQuestionId = room?.currentQuestion?.questionId || room?.currentQuestion?.id || null;
+  const adminCurrentProcessed = isSameId(room?.processedQuestionId, adminCurrentQuestionId);
+  const adminQuestionList = room?.practiceMode ? practiceQuestions : competitionQuestions;
+  const adminCurrentIsLastQuestion = currentQuestionIndex >= 0 && currentQuestionIndex >= adminQuestionList.length - 1;
+  const adminNextQuestionIsLast = currentQuestionIndex + 1 >= adminQuestionList.length - 1;
   const prizeWheel = room?.prizeWheel || {};
   const prizeWinners = prizeWheel.winners || [];
+  const prizeItems = Array.isArray(prizeWheel.prizeItems)
+    ? prizeWheel.prizeItems
+    : DEFAULT_PRIZE_ITEMS;
+  const activePrizeItemId = prizeWheel.activePrizeItemId || prizeItems[0]?.id || null;
   const eligiblePrizePlayers = getPrizeWheelPlayers(players, { ...prizeWheel, excludePreviousWinners: excludePrizeWinners });
   const editingPlayerBaseline = editingPlayer
     ? Number(editingPlayer.manualScoreDelta || 0) !== 0 && Number.isFinite(Number(editingPlayer.manualScoreBaseline))
@@ -3658,7 +3711,43 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
     setPreviousAdminSection(currentSection);
   }
 
-  async function openPrizeWheelStage() {
+  async function savePrizeItems(nextItems) {
+    await setDoc(doc(db, "rooms", ROOM_ID), {
+      prizeWheel: {
+        ...prizeWheel,
+        prizeItems: nextItems,
+        activePrizeItemId: nextItems.some((item) => item.id === activePrizeItemId) ? activePrizeItemId : nextItems[0]?.id || null,
+      },
+      updatedAt: serverTimestamp(),
+    }, { merge: true });
+  }
+
+  async function addPrizeItem() {
+    const title = newPrizeTitle.trim();
+    if (!title) return;
+    const nextItems = [...prizeItems, { id: `prize-${getNow()}`, title }];
+    await savePrizeItems(nextItems);
+    setNewPrizeTitle("");
+    setIsPrizeAddOpen(false);
+  }
+
+  async function deletePrizeItem(prizeItemId) {
+    const nextItems = prizeItems.filter((item) => item.id !== prizeItemId);
+    await savePrizeItems(nextItems);
+    setSelectedPrizeWinnerByPrize((prev) => {
+      const next = { ...prev };
+      delete next[prizeItemId];
+      return next;
+    });
+  }
+
+  function togglePrizeItem(prizeItemId) {
+    setExpandedPrizeItems((prev) => ({ ...prev, [prizeItemId]: !prev[prizeItemId] }));
+  }
+
+  async function openPrizeWheelStage(prizeItem = null, selectedWinnerId = "") {
+    const selectedPrizeItem = prizeItem || prizeItems.find((item) => item.id === activePrizeItemId) || prizeItems[0] || null;
+    const selectedPrizeTitle = selectedPrizeItem?.title || "جائزة مفاجئة";
     const previousStage = stage === "prizeWheel"
       ? prizeWheel.previousStage || "registration"
       : stage;
@@ -3667,52 +3756,27 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
       prizeWheel: {
         ...prizeWheel,
         previousStage,
-        prizeTitle: prizeTitleInput.trim() || "جائزة مفاجئة",
+        prizeItems,
+        activePrizeItemId: selectedPrizeItem?.id || null,
+        prizeTitle: selectedPrizeTitle,
         excludePreviousWinners: excludePrizeWinners,
         spinning: false,
         winnerPlayerId: null,
         spinId: null,
-        selectedPlayerId: selectedPrizeWinnerId || null,
+        selectedPlayerId: selectedWinnerId || null,
         winners: prizeWinners,
       },
       updatedAt: serverTimestamp(),
     }, { merge: true });
   }
 
-  async function spinPrizeWheel() {
-    const candidates = eligiblePrizePlayers;
-    if (candidates.length === 0) {
-      alert("لا يوجد متسابقون لتشغيل عجلة الحظ.");
-      return;
-    }
-
-    const selectedWinner =
-      candidates.find((player) => player.id === selectedPrizeWinnerId) ||
-      candidates[getRandomIndex(candidates.length)];
-    const prizeTitle = prizeTitleInput.trim() || "جائزة مفاجئة";
-    const spinId = `${getNow()}-${selectedWinner.id}`;
-    const winnerRecord = {
-      playerId: selectedWinner.id,
-      playerName: selectedWinner.name || "",
-      playerFullName: selectedWinner.fullName || "",
-      playerEmoji: selectedWinner.emoji || "",
-      prizeTitle,
-      awardedAtMs: getNow(),
-      spinId,
-    };
-
-    await updateDoc(doc(db, "rooms", ROOM_ID), {
-      stage: "prizeWheel",
-      "prizeWheel.previousStage": stage === "prizeWheel" ? prizeWheel.previousStage || "registration" : stage,
-      "prizeWheel.prizeTitle": prizeTitle,
-      "prizeWheel.excludePreviousWinners": excludePrizeWinners,
-      "prizeWheel.selectedPlayerId": selectedPrizeWinnerId || null,
-      "prizeWheel.winnerPlayerId": selectedWinner.id,
-      "prizeWheel.spinId": spinId,
-      "prizeWheel.spinStartedAtMs": getNow(),
-      "prizeWheel.spinning": true,
-      "prizeWheel.winners": arrayUnion(winnerRecord),
-      updatedAt: serverTimestamp(),
+  async function spinPrizeWheel(prizeItem = null, selectedWinnerId = "") {
+    const selectedPrizeItem = prizeItem || prizeItems.find((item) => item.id === activePrizeItemId) || prizeItems[0] || null;
+    await spinPrizeWheelForRoom(room, players, {
+      prizeTitle: selectedPrizeItem?.title || "جائزة مفاجئة",
+      activePrizeItemId: selectedPrizeItem?.id || null,
+      excludePreviousWinners: excludePrizeWinners,
+      selectedPlayerId: selectedWinnerId || null,
     });
   }
 
@@ -3900,6 +3964,48 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
     setEditingPlayer(null);
   }
 
+  async function addTestPlayers(count = 30) {
+    const testNames = [
+      "سارة", "علي", "حسن", "فاطمة", "مريم", "مازن", "فاضل", "زينب", "ورد", "سراج",
+      "محمد", "إبراهيم", "نورة", "حوراء", "جعفر", "بتول", "رضا", "ليان", "هاشم", "حسين",
+      "رقيه", "عباس", "دانة", "مصطفى", "جود", "صالح", "زهراء", "أحمد", "نور", "مهدي",
+    ];
+    const emojis = ["😀", "😎", "⭐", "🏆", "⚡", "🔥", "🌟", "🎯", "🚀", "💎", "🎲", "🎁"];
+    const createdAtMs = getNow();
+
+    await Promise.all(
+      Array.from({ length: count }, (_, index) => {
+        const number = index + 1;
+        const id = `test-player-${String(number).padStart(2, "0")}`;
+        return setDoc(doc(db, "rooms", ROOM_ID, "players", id), {
+          name: testNames[index] || `متسابق ${number}`,
+          fullName: `متسابق تجريبي رقم ${number}`,
+          phone: `05${String(50000000 + number).padStart(8, "0")}`,
+          emoji: emojis[index % emojis.length],
+          score: Math.max(0, 3000 - index * 87 + (index % 4) * 23),
+          jokerUsed: index % 5 === 0,
+          pendingJoker: false,
+          jokerQuestionId: index % 5 === 0 ? "test-preview" : null,
+          jokerQuestionNumber: index % 5 === 0 ? 1 : null,
+          answeredCount: 0,
+          lastQuestionPoints: index % 3 === 0 ? 120 + index * 3 : 0,
+          lastQuestionId: null,
+          lastQuestionCorrect: index % 4 !== 0,
+          manualScoreDelta: 0,
+          isTestPlayer: true,
+          createdAtMs,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        }, { merge: true });
+      })
+    );
+  }
+
+  async function deleteTestPlayers() {
+    const testPlayersSnap = await getDocs(query(collection(db, "rooms", ROOM_ID, "players"), where("isTestPlayer", "==", true)));
+    await Promise.all(testPlayersSnap.docs.map((item) => deleteDoc(item.ref)));
+  }
+
   function toggleQuestion(questionId) { setExpandedQuestions((prev) => ({ ...prev, [questionId]: !prev[questionId] })); }
   function togglePlayerReport(playerId) { setExpandedPlayers((prev) => ({ ...prev, [playerId]: !prev[playerId] })); }
   function toggleLiveSection(section) {
@@ -3920,10 +4026,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
           <div className="dashboard-nav-group">
             <span>أثناء البث</span>
             <button type="button" className={activeAdminSection === "live" ? "active" : ""} onClick={() => openAdminSection("live")}>متابعة المسابقة</button>
-          </div>
-          <div className="dashboard-nav-group">
-            <span>الجوائز</span>
-            <button type="button" className={activeAdminSection === "prizes" ? "active" : ""} onClick={() => openAdminSection("prizes")}>عجلة الحظ</button>
+            <button type="button" className={activeAdminSection === "prizes" ? "active" : ""} onClick={() => openAdminSection("prizes")}>سحب الجوائز</button>
           </div>
           <div className="dashboard-nav-group">
             <span>المتسابقون</span>
@@ -3937,9 +4040,9 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
           </div>
           <div className="dashboard-nav-group">
             <span>الإعداد</span>
+            <button type="button" className={activeAdminSection === "displaySettings" ? "active" : ""} onClick={() => openAdminSection("displaySettings")}>إعدادات العرض</button>
             <button type="button" className={activeAdminSection === "questions" ? "active" : ""} onClick={() => openAdminSection("questions")}>إعدادات الأسئلة</button>
             <button type="button" className={activeAdminSection === "setup" ? "active" : ""} onClick={() => openAdminSection("setup")}>تهيئة المسابقة</button>
-            <button type="button" className={activeAdminSection === "displaySettings" ? "active" : ""} onClick={() => openAdminSection("displaySettings")}>إعدادات العرض</button>
           </div>
         </nav>
         <a className="dashboard-display-button" href={`/?admin=${ADMIN_CODE}&view=display`} target="_blank" rel="noreferrer">فتح صفحة العرض ↗</a>
@@ -3973,15 +4076,15 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
                   {stage === "practiceComplete" && <button onClick={startRealCompetition} disabled={adminAdvancing || competitionQuestions.length === 0 || players.length === 0}>{adminAdvancing ? "استعدوا..." : "ابدأ المسابقة"}</button>}
                   {stage === "registration" && !room?.practiceFinished && <button onClick={showInstructionsPage} disabled={players.length === 0}>عرض معلومات المسابقة</button>}
                   {stage === "question" && <button className="warning-action" onClick={() => extendQuestionTime(room, 10)}>+10 ثوانٍ</button>}
-                  {stage === "question" && isMediaQuestion(room?.currentQuestion) && !hasMediaEnded(room, room.currentQuestion) && <button className="warning-action" onClick={() => finishMediaQuestion(room.currentQuestion)}>إنهاء المقطع وإظهار الخيارات</button>}
+                  {stage === "question" && isMediaQuestion(room?.currentQuestion) && !hasMediaEnded(room, room.currentQuestion) && <button className="warning-action" onClick={() => finishMediaQuestion(room.currentQuestion)}>تجاوز المقطع وإظهار الخيارات</button>}
                   {stage === "question" && <button onClick={() => endQuestionAndReveal(room, { allowUndo: true })}>إنهاء السؤال وإظهار الإجابة</button>}
                   {stage === "reveal" && Number(room?.revealUndoUntilMs || 0) > adminNow && getQuestionTimeLeft(room?.currentQuestion, room, adminNow) > 0 && <button className="warning-action" onClick={() => reopenQuestion(room)}>تراجع</button>}
-                  {stage === "reveal" && <button onClick={showResults}>إظهار النتائج</button>}
+                  {stage === "reveal" && (!room?.practiceMode && adminCurrentIsLastQuestion ? <button onClick={() => beginFinalCountdown(room)}>إعلان الفائزين</button> : <button onClick={showResults}>إظهار النتائج</button>)}
                   {stage === "results" && room?.practiceMode && <button className="secondary-action" onClick={launchInstructionsClarityPoll}>تصويت</button>}
                   {stage === "results" && room?.practiceMode && <button className="warning-action" onClick={finishPracticeAndReturnToStart}>إنهاء التجربة</button>}
-                  {stage === "results" && (room?.practiceMode ? practiceQuestions[currentQuestionIndex + 1] : competitionQuestions[currentQuestionIndex + 1]) && <button onClick={advanceFromDashboard} disabled={adminAdvancing || room?.processedQuestionId !== room?.currentQuestion?.questionId}>{adminAdvancing ? "استعدوا..." : room?.processedQuestionId === room?.currentQuestion?.questionId ? "السؤال التالي" : "جاري احتساب النتائج..."}</button>}
+                  {stage === "results" && (room?.practiceMode ? practiceQuestions[currentQuestionIndex + 1] : competitionQuestions[currentQuestionIndex + 1]) && <button onClick={advanceFromDashboard} disabled={adminAdvancing || !adminCurrentProcessed}>{adminAdvancing ? "استعدوا..." : adminCurrentProcessed ? (adminNextQuestionIsLast ? "السؤال الأخير" : "السؤال التالي") : "جاري احتساب النتائج..."}</button>}
                   {stage !== "home" && stage !== "finished" && <button className="secondary-action" onClick={() => launchSystemCheck()}>استفتاء</button>}
-                  {stage !== "home" && stage !== "finished" && <button className="danger" onClick={() => { if (window.confirm("هل تريد إنهاء المسابقة الآن؟")) finishGame(players, questions, allAnswers || [], messages); }}>إنهاء المسابقة الآن</button>}
+                  {stage !== "home" && stage !== "finished" && <button className="danger" onClick={() => { if (window.confirm("هل تريد إنهاء المسابقة الآن؟")) finishGame(players, questions, allAnswers || [], messages, room); }}>إنهاء المسابقة الآن</button>}
                 </div>
               )}
             </div>
@@ -4088,7 +4191,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
                     <div className="question-report-title"><strong>{questionNumber}. {question.text} <span className="report-accuracy-inline" style={{ color: getAccuracyColor(percent) }}>({percent}%)</span></strong></div>
                     <span className="expand-indicator">{expanded ? "−" : "+"}</span>
                   </button>
-                  {expanded && <div className="question-report-body">{rows.length === 0 ? <span className="muted">لا توجد إجابات لهذا السؤال.</span> : <div className="admin-table-wrap"><table className="admin-table live-question-answers-table"><thead><tr><th>المتسابق</th><th>الاسم الثلاثي</th><th>الإجابة</th><th>النتيجة</th><th>النقاط</th><th>جوكر</th></tr></thead><tbody>{rows.map(({ answer, player, selectedText }) => <tr className={answer.isCorrect ? "live-answer-row-correct" : "live-answer-row-wrong"} key={answer.id}><td><strong>{player?.name || answer.playerName}</strong></td><td>{player?.fullName || answer.fullName || "—"}</td><td>{selectedText}</td><td style={{ color: answer.isCorrect ? "#18733a" : "#a51f1f", fontWeight: 900 }}>{answer.isCorrect ? "صح" : "خطأ"}</td><td><strong>{answer.points || 0}</strong></td><td>{answer.jokerApplied ? "\u{1F0CF}" : "—"}</td></tr>)}</tbody></table></div>}</div>}
+                  {expanded && <div className="question-report-body">{rows.length === 0 ? <span className="muted">لا توجد إجابات لهذا السؤال.</span> : <div className="admin-table-wrap"><table className="admin-table live-question-answers-table"><thead><tr><th>المتسابق</th><th>الاسم الثلاثي</th><th>الإجابة</th><th>النتيجة</th><th>النقاط</th><th>الوقت</th><th>جوكر</th></tr></thead><tbody>{rows.map(({ answer, player, selectedText }) => <tr className={answer.isCorrect ? "live-answer-row-correct" : "live-answer-row-wrong"} key={answer.id}><td><strong>{player?.name || answer.playerName}</strong></td><td>{player?.fullName || answer.fullName || "—"}</td><td>{selectedText}</td><td style={{ color: answer.isCorrect ? "#18733a" : "#a51f1f", fontWeight: 900 }}>{answer.isCorrect ? "صح" : "خطأ"}</td><td><strong>{answer.points || 0}</strong></td><td>{formatAnswerTime(answer)}</td><td>{answer.jokerApplied ? "\u{1F0CF}" : "—"}</td></tr>)}</tbody></table></div>}</div>}
                 </div>
               );
             })}</div>
@@ -4115,7 +4218,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
                     <div className="player-report-title"><strong>{player.emoji || ""} {player.name} {player.fullName && <small className="player-fullname-inline">({player.fullName})</small>} <span className="report-accuracy-inline" style={{ color: getAccuracyColor(percent) }}>({percent}%)</span></strong></div>
                     <span className="expand-indicator">{expanded ? "−" : "+"}</span>
                   </button>
-                  {expanded && <div className="player-report-body"><div className="admin-table-wrap"><table className="admin-table live-player-answers-table"><thead><tr><th>رقم السؤال</th><th>السؤال</th><th>إجابة المتسابق</th><th>النتيجة</th><th>النقاط</th></tr></thead><tbody>{playerAnswers.map(({ question, questionNumber, answer, selectedText }) => <tr className={answer ? (answer.isCorrect ? "live-answer-row-correct" : "live-answer-row-wrong") : ""} key={`${player.id}-${question.id}`}><td>{questionNumber}</td><td>{question.text} {answer?.jokerApplied && <span className="inline-joker-mark" title="استخدم الجوكر">{"\u{1F0CF}"}</span>}</td><td>{selectedText}</td><td style={{ fontWeight: 900, color: answer ? (answer.isCorrect ? "#18733a" : "#a51f1f") : undefined }}>{answer ? (answer.isCorrect ? "صح" : "خطأ") : "—"}</td><td>{answer?.points ?? "—"}</td></tr>)}</tbody></table></div></div>}
+                  {expanded && <div className="player-report-body"><div className="admin-table-wrap"><table className="admin-table live-player-answers-table"><thead><tr><th>رقم السؤال</th><th>السؤال</th><th>إجابة المتسابق</th><th>النتيجة</th><th>النقاط</th><th>الوقت</th></tr></thead><tbody>{playerAnswers.map(({ question, questionNumber, answer, selectedText }) => <tr className={answer ? (answer.isCorrect ? "live-answer-row-correct" : "live-answer-row-wrong") : ""} key={`${player.id}-${question.id}`}><td>{questionNumber}</td><td>{question.text} {answer?.jokerApplied && <span className="inline-joker-mark" title="استخدم الجوكر">{"\u{1F0CF}"}</span>}</td><td>{selectedText}</td><td style={{ fontWeight: 900, color: answer ? (answer.isCorrect ? "#18733a" : "#a51f1f") : undefined }}>{answer ? (answer.isCorrect ? "صح" : "خطأ") : "—"}</td><td>{answer?.points ?? "—"}</td><td>{answer ? formatAnswerTime(answer) : "—"}</td></tr>)}</tbody></table></div></div>}
                 </div>
               );
             })}</div>
@@ -4178,32 +4281,16 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
       <div className="card prize-control-card">
         <div className="prize-control-head">
           <div>
-            <h2>عجلة الحظ</h2>
+            <h2>سحب الجوائز</h2>
             <p className="muted">جوائز جانبية لا تغيّر النقاط ولا ترتيب المتسابقين.</p>
           </div>
-          <span>{eligiblePrizePlayers.length} متاح</span>
+          <div className="prize-head-actions">
+            <span>{eligiblePrizePlayers.length} متاح</span>
+            <button type="button" onClick={() => setIsPrizeAddOpen(true)}>+ إضافة جائزة</button>
+          </div>
         </div>
 
-        <div className="prize-control-grid">
-          <label>
-            الجائزة
-            <input
-              value={prizeTitleInput}
-              onChange={(event) => setPrizeTitleInput(event.target.value)}
-              placeholder="مثال: جائزة نقدية / كوبون / هدية"
-            />
-          </label>
-
-          <label>
-            الفائز
-            <select value={selectedPrizeWinnerId} onChange={(event) => setSelectedPrizeWinnerId(event.target.value)}>
-              <option value="">اختيار عشوائي</option>
-              {eligiblePrizePlayers.map((player) => (
-                <option value={player.id} key={player.id}>{player.emoji || ""} {player.name}</option>
-              ))}
-            </select>
-          </label>
-
+        <div className="prize-settings-strip">
           <label className="prize-checkbox-row">
             <input
               type="checkbox"
@@ -4214,43 +4301,126 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
           </label>
         </div>
 
-        <div className="prize-action-row">
-          <button type="button" onClick={openPrizeWheelStage} disabled={players.length === 0}>عرض العجلة</button>
-          <button type="button" className="warning-action" onClick={spinPrizeWheel} disabled={players.length === 0}>تشغيل العجلة</button>
-          {stage === "prizeWheel" && <button type="button" className="secondary-action" onClick={closePrizeWheelStage}>إغلاق العجلة</button>}
+        <div className="prize-ready-list">
+          {prizeItems.length === 0 && (
+            <div className="prize-empty-state">لا توجد جوائز جاهزة. أضف جائزة من الزر بالأعلى.</div>
+          )}
+          {prizeItems.map((item) => {
+            const itemWinners = prizeWinners.filter((winner) => winner.prizeItemId === item.id || (!winner.prizeItemId && winner.prizeTitle === item.title));
+            const expanded = !!expandedPrizeItems[item.id];
+            const isActivePrize = activePrizeItemId === item.id;
+            const selectedWinnerId = selectedPrizeWinnerByPrize[item.id] || "";
+            return (
+              <section className={isActivePrize ? "prize-ready-card active" : "prize-ready-card"} key={item.id}>
+                <div className="prize-ready-main">
+                  <button type="button" className="prize-ready-toggle" onClick={() => togglePrizeItem(item.id)} aria-expanded={expanded}>
+                    <strong>{item.title}</strong>
+                    <span>{itemWinners.length} فائز</span>
+                    <i>{expanded ? "−" : "+"}</i>
+                  </button>
+                  <div className="prize-ready-actions">
+                    <select
+                      className="prize-winner-select"
+                      value={selectedWinnerId}
+                      onChange={(event) => setSelectedPrizeWinnerByPrize((prev) => ({ ...prev, [item.id]: event.target.value }))}
+                      title="اختيار الفائز"
+                      aria-label={`اختيار فائز ${item.title}`}
+                    >
+                      <option value="">فائز عشوائي</option>
+                      {eligiblePrizePlayers.map((player) => (
+                        <option value={player.id} key={player.id}>
+                          {player.emoji || ""} {player.name}{player.fullName ? ` (${player.fullName})` : ""}
+                        </option>
+                      ))}
+                    </select>
+                    {stage === "prizeWheel" && isActivePrize ? (
+                      <>
+                        <button type="button" className="warning-action" onClick={() => spinPrizeWheel(item, selectedWinnerId)} disabled={players.length === 0 || prizeWheel.spinning}>سحب</button>
+                        <button type="button" className="secondary-action" onClick={closePrizeWheelStage}>إغلاق</button>
+                      </>
+                    ) : (
+                      <button type="button" onClick={() => openPrizeWheelStage(item, selectedWinnerId)} disabled={players.length === 0}>عرض السحب</button>
+                    )}
+                    <button
+                      type="button"
+                      className="danger icon-action-button"
+                      title="حذف الجائزة"
+                      aria-label="حذف الجائزة"
+                      onClick={() => {
+                        if (window.confirm(`حذف جائزة "${item.title}" من القائمة؟`)) deletePrizeItem(item.id);
+                      }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                </div>
+                {expanded && (
+                  <div className="prize-ready-details">
+                    {itemWinners.length === 0 ? (
+                      <span className="muted">لا يوجد فائز لهذه الجائزة بعد.</span>
+                    ) : (
+                      itemWinners.slice().reverse().map((winner) => (
+                        <div className="prize-winner-row compact" key={winner.spinId || `${winner.playerId}-${winner.awardedAtMs}`}>
+                          <div>
+                            <strong>{winner.playerEmoji || ""} {winner.playerName}</strong>
+                            <small>{winner.playerFullName || "لا يوجد اسم ثلاثي"}</small>
+                          </div>
+                          <small>{winner.awardedAtMs ? new Date(winner.awardedAtMs).toLocaleTimeString("ar-SA") : "—"}</small>
+                          <button type="button" className="danger icon-action-button" title="حذف من السجل" aria-label="حذف من السجل" onClick={() => deletePrizeWinner(winner.spinId)}>×</button>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
+              </section>
+            );
+          })}
         </div>
 
-        <section className="prize-history-card">
-          <button type="button" className="prize-history-header" onClick={() => setPrizeHistoryOpen((value) => !value)}>
-            <strong>سجل الجوائز</strong>
-            <span>{prizeWinners.length}</span>
-            <i>{prizeHistoryOpen ? "−" : "+"}</i>
-          </button>
-          {prizeHistoryOpen && (
-            <div className="prize-winners-list">
-              {prizeWinners.length === 0 ? (
-                <p className="muted">لا يوجد فائزون بالجوائز حتى الآن.</p>
-              ) : (
-                prizeWinners.slice().reverse().map((winner) => (
-                  <div className="prize-winner-row" key={winner.spinId || `${winner.playerId}-${winner.awardedAtMs}`}>
-                    <div>
-                      <strong>{winner.playerEmoji || ""} {winner.playerName}</strong>
-                      <small>{winner.playerFullName || "لا يوجد اسم ثلاثي"}</small>
-                    </div>
-                    <span>{winner.prizeTitle}</span>
-                    <button type="button" className="danger icon-action-button" title="حذف من السجل" aria-label="حذف من السجل" onClick={() => deletePrizeWinner(winner.spinId)}>×</button>
-                  </div>
-                ))
-              )}
+        {isPrizeAddOpen && (
+          <div className="modal-backdrop" onClick={() => setIsPrizeAddOpen(false)}>
+            <div className="modal-card prize-add-modal" onClick={(event) => event.stopPropagation()}>
+              <h2>إضافة جائزة</h2>
+              <label>
+                اسم الجائزة
+                <input
+                  value={newPrizeTitle}
+                  onChange={(event) => setNewPrizeTitle(event.target.value)}
+                  placeholder="مثال: 100 ريال"
+                  autoFocus
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") addPrizeItem();
+                  }}
+                />
+              </label>
+              <div className="prize-add-modal-actions">
+                <button type="button" onClick={addPrizeItem} disabled={!newPrizeTitle.trim()}>حفظ</button>
+                <button type="button" className="secondary-action" onClick={() => setIsPrizeAddOpen(false)}>إلغاء</button>
+              </div>
             </div>
-          )}
-        </section>
+          </div>
+        )}
       </div>
       )}
 
       {activeAdminSection === "players" && (
       <div className="card">
-        <div className="report-section-title"><h2>المتسابقون المسجلون</h2></div>
+        <div className="report-section-title players-tools-title">
+          <h2>المتسابقون المسجلون</h2>
+          <div className="test-player-tools">
+            <span>تجربة الشكل مع جمهور كبير</span>
+            <button type="button" onClick={() => addTestPlayers(30)}>إضافة 30 تجريبي</button>
+            <button
+              type="button"
+              className="warning-action"
+              onClick={() => {
+                if (window.confirm("حذف المتسابقين التجريبيين فقط؟")) deleteTestPlayers();
+              }}
+            >
+              حذف التجريبيين
+            </button>
+          </div>
+        </div>
         {players.length === 0 ? <p className="muted">لا يوجد متسابقون حتى الآن.</p> : (
           <div className="admin-table-wrap">
             <table className="admin-table"><thead><tr><th>الاسم المستعار</th><th>الاسم الثلاثي</th><th>رقم الجوال</th><th>النقاط</th><th>آخر سؤال</th><th>الجوكر</th><th>تحكم</th></tr></thead>
@@ -4360,6 +4530,8 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
   const [previewQuestionIndex, setPreviewQuestionIndex] = useState(null);
   const [readyCountdown, setReadyCountdown] = useState(null);
   const [showForceProcess, setShowForceProcess] = useState(false);
+  const [isManuallyCalculating, setIsManuallyCalculating] = useState(false);
+  const [showFinalQuestionResults, setShowFinalQuestionResults] = useState(false);
   const readyTimerRef = useRef(null);
   const displayNow = useNow(250);
 
@@ -4369,7 +4541,30 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
   const currentQuestion = room?.currentQuestion || null;
   const currentQuestionIndex = room?.currentQuestionIndex ?? -1;
   const displayQuestionList = room?.practiceMode ? getPracticeQuestions(questions) : getMainQuestions(questions);
+  const finalQuestionIndex = Math.max(0, displayQuestionList.length - 1);
+  const finalQuestionSource = displayQuestionList[finalQuestionIndex] || currentQuestion;
+  const finalQuestion = finalQuestionSource
+    ? { ...finalQuestionSource, questionId: finalQuestionSource.questionId || finalQuestionSource.id }
+    : null;
+  const finalQuestionAnswers = finalQuestion
+    ? (allAnswers || []).filter((answer) => answer.questionId === finalQuestion.questionId)
+    : [];
+  const finalQuestionPlayers = players;
+  const finalQuestionRoom = finalQuestion
+    ? {
+        ...room,
+        currentQuestion: { ...finalQuestion, answerRevealAtMs: 1, answerStartAtMs: 1, answerEndAtMs: 1 },
+        currentQuestionIndex: finalQuestionIndex,
+        processedQuestionId: finalQuestion.questionId,
+        collectingBonusByPlayer: Object.fromEntries(finalQuestionAnswers.map((answer) => [answer.playerId, Number(answer.points || 0)])),
+        collectingBonusJokerByPlayer: Object.fromEntries(finalQuestionAnswers.filter((answer) => answer.jokerApplied).map((answer) => [answer.playerId, getJokerTimingLabel(answer.jokerMultiplier || 3)])),
+        collectingAnswerCorrectByPlayer: Object.fromEntries(finalQuestionAnswers.map((answer) => [answer.playerId, !!answer.isCorrect])),
+        rankMovementByPlayer: {},
+      }
+    : room;
   const nextQuestion = displayQuestionList?.[currentQuestionIndex + 1];
+  const isCurrentLastQuestion = currentQuestionIndex >= 0 && currentQuestionIndex >= displayQuestionList.length - 1;
+  const nextQuestionIsLast = !!nextQuestion && currentQuestionIndex + 1 >= displayQuestionList.length - 1;
   const displayQuestionIndex = previewStage && previewQuestionIndex !== null ? previewQuestionIndex : currentQuestionIndex;
   const displayQuestionSource = previewStage && displayQuestionIndex >= 0 ? displayQuestionList?.[displayQuestionIndex] : currentQuestion;
   const displayQuestion = displayQuestionSource
@@ -4404,8 +4599,9 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
       }
     : room;
 
-  const currentProcessed =
-    room?.processedQuestionId === room?.currentQuestion?.questionId;
+  const liveQuestionId = room?.currentQuestion?.questionId || room?.currentQuestion?.id || null;
+  const currentProcessed = isSameId(room?.processedQuestionId, liveQuestionId);
+  const currentProcessingStale = isResultsProcessingStale(room, liveQuestionId);
 
   useEffect(() => {
     setPreviewStage(null);
@@ -4426,6 +4622,12 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
     const timeout = setTimeout(() => setShowForceProcess(true), 5000);
     return () => clearTimeout(timeout);
   }, [stage, currentProcessed, room?.currentQuestion?.questionId]);
+
+  useEffect(() => {
+    if (stage !== "finished") {
+      setShowFinalQuestionResults(false);
+    }
+  }, [stage]);
 
   useEffect(() => {
     return () => {
@@ -4484,8 +4686,13 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
       setPreviewQuestionIndex(index);
       setPreviewStage("reveal");
     } else if (displayStage === "reveal") {
-      setPreviewQuestionIndex(index);
-      setPreviewStage("results");
+      if (index === currentQuestionIndex && stage === "results") {
+        setPreviewQuestionIndex(null);
+        setPreviewStage(null);
+      } else {
+        setPreviewQuestionIndex(index);
+        setPreviewStage("results");
+      }
     } else if (displayStage === "results" && index < currentQuestionIndex) {
       setPreviewQuestionIndex(index + 1);
       setPreviewStage("question");
@@ -4581,11 +4788,27 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
         await finishPracticeToRegistration();
         return;
       }
-      await finishGame(players, getMainQuestions(questions), allAnswers || [], messages);
+      await finishGame(players, getMainQuestions(questions), allAnswers || [], messages, room);
       return;
     }
 
     await startReadyThenSend(nextQuestion, currentQuestionIndex + 1);
+  }
+
+  async function handleManualResultCalculation() {
+    if (isManuallyCalculating) return;
+    setIsManuallyCalculating(true);
+    try {
+      await forceProcessResults(room);
+    } catch (error) {
+      console.error("Manual result calculation failed:", error);
+    } finally {
+      setIsManuallyCalculating(false);
+    }
+  }
+
+  async function handleAnnounceFinalWinners() {
+    await beginFinalCountdown(room);
   }
 
   async function startPracticeFromDisplay() {
@@ -4632,29 +4855,34 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
     } else if (stage === "question") {
       mainButton = <button onClick={() => endQuestionAndReveal(room, { allowUndo: true })}>إنهاء السؤال الآن وإظهار الإجابة الصحيحة</button>;
     } else if (stage === "reveal") {
-      mainButton = <button onClick={showResults}>إظهار النتائج</button>;
+      mainButton = !room?.practiceMode && isCurrentLastQuestion
+        ? <button onClick={handleAnnounceFinalWinners}>إعلان الفائزين</button>
+        : <button onClick={showResults}>إظهار النتائج</button>;
     } else if (stage === "results") {
       mainButton = (
         <>
           <button onClick={goNextQuestion} disabled={!currentProcessed}>
-            {currentProcessed ? (nextQuestion ? "السؤال التالي" : (room?.practiceMode ? "إنهاء التجربة" : "إنهاء المسابقة")) : "جاري تجميع النتائج..."}
+            {currentProcessed ? (nextQuestion ? (nextQuestionIsLast ? "السؤال الأخير" : "السؤال التالي") : (room?.practiceMode ? "إنهاء التجربة" : "إنهاء المسابقة")) : "جاري تجميع النتائج..."}
           </button>
           {/* FIX: Fallback force-process button shown when scores are stuck.
               This unblocks the admin if AutoProcessResults did not run
               (e.g. display page was not open when results were shown). */}
-          {!currentProcessed && !room?.processingQuestionId && showForceProcess && (
+          {!currentProcessed && (!room?.processingQuestionId || currentProcessingStale) && showForceProcess && (
             <button
-              onClick={() => forceProcessResults(room, players, answers)}
+              onClick={handleManualResultCalculation}
               className="force-process-button"
+              disabled={isManuallyCalculating}
               title="احسب النتائج يدويًا إذا توقف التجميع التلقائي"
             >
-              إعادة محاولة احتساب النتائج
+              {isManuallyCalculating ? "جاري الاحتساب..." : "احتساب النتائج يدويًا"}
             </button>
           )}
         </>
       );
     } else if (stage === "finished") {
-      mainButton = <button onClick={createOrResetRoom}>العودة للصفحة الرئيسية</button>;
+      mainButton = showFinalQuestionResults
+        ? <button onClick={() => setShowFinalQuestionResults(false)}>العودة للفائزين</button>
+        : <button onClick={() => setShowFinalQuestionResults(true)} disabled={!finalQuestion}>نتائج السؤال الأخير</button>;
     } else if (stage === "prizeWheel") {
       mainButton = <button onClick={async () => {
         const fallbackStage = room?.prizeWheel?.previousStage || "registration";
@@ -4663,7 +4891,7 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
           "prizeWheel.spinning": false,
           updatedAt: serverTimestamp(),
         });
-      }}>إغلاق عجلة الحظ</button>;
+      }}>إغلاق سحب الجوائز</button>;
     }
 
     return (
@@ -4697,6 +4925,15 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
             +10 ثوانٍ
           </button>
         )}
+        {stage === "question" && isMediaQuestion(currentQuestion) && !hasMediaEnded(room, currentQuestion) && (
+          <button
+            type="button"
+            className="display-corner-button media-skip"
+            onClick={() => finishMediaQuestion(currentQuestion)}
+          >
+            تجاوز المقطع وإظهار الخيارات
+          </button>
+        )}
         {stage === "results" && room?.practiceMode && currentProcessed && (
           <>
             <button
@@ -4725,7 +4962,7 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
         <button
           type="button"
           className="display-corner-button finish"
-          onClick={() => { if (window.confirm("هل تريد إنهاء المسابقة الآن؟")) finishGame(players, questions, allAnswers || [], messages); }}
+          onClick={() => { if (window.confirm("هل تريد إنهاء المسابقة الآن؟")) finishGame(players, questions, allAnswers || [], messages, room); }}
         >
           إنهاء المسابقة الآن
         </button>
@@ -4738,8 +4975,9 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
       <AutoRevealCorrectAnswer room={room} />
       <AutoLockJokers room={room} players={players} />
       <AutoProcessResults room={room} answers={answers} players={players} />
+      <AutoFinishFinalCountdown room={room} players={players} questions={questions} allAnswers={allAnswers} messages={messages} />
 
-      {displayStage !== "home" && displayStage !== "ready" && displayStage !== "prizeWheel" && (
+      {displayStage !== "home" && displayStage !== "ready" && displayStage !== "prizeWheel" && displayStage !== "finalCountdown" && (
         <div className="display-history-nav">
           <button type="button" className="display-nav-button display-next-button" onClick={previewNextStep} disabled={!previewStage}>التالي</button>
           <button type="button" className="display-nav-button display-back-button" onClick={previewPreviousStep}>السابق</button>
@@ -4864,7 +5102,15 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
           <PrizeWheelDisplay room={room} players={players} />
         )}
 
-        {displayStage === "finished" && <FinishedDisplay players={players} messages={messages} />}
+        {displayStage === "finalCountdown" && (
+          <FinalCountdownDisplay room={room} />
+        )}
+
+        {displayStage === "finished" && (
+          showFinalQuestionResults
+            ? <ResultsDisplay room={finalQuestionRoom} players={finalQuestionPlayers} messages={messages} />
+            : <FinishedDisplay players={players} messages={messages} />
+        )}
       </div>
 
       {renderBottomDisplayActions()}
@@ -4885,6 +5131,7 @@ function LastGamePanel({ room, gameHistory = [], embedded = false }) {
   const selectedQuestions = selectedGame?.questions || [];
   const selectedAnswers = selectedGame?.answers || [];
   const selectedMessages = selectedGame?.messages || [];
+  const selectedPrizeWinners = selectedGame?.prizeWinners || [];
   const correctAnswersCount = selectedAnswers.filter((answer) => answer.isCorrect).length;
   const jokerAnswersCount = selectedAnswers.filter((answer) => answer.jokerApplied).length;
   const savedAtLabel = selectedGame?.savedAtMs ? new Date(selectedGame.savedAtMs).toLocaleString("ar-SA") : "—";
@@ -4940,6 +5187,17 @@ function LastGamePanel({ room, gameHistory = [], embedded = false }) {
             answer.jokerApplied ? "نعم" : "لا",
           ];
         }),
+      },
+      {
+        name: "فائزون سحب الجوائز",
+        headers: ["الفائز", "الاسم الثلاثي", "الجائزة", "المسابقة", "الوقت"],
+        rows: (selectedGame.prizeWinners || []).map((winner) => [
+          winner.playerName || "",
+          winner.playerFullName || "",
+          winner.prizeTitle || "",
+          winner.gameTitle || selectedGame.title || "",
+          winner.awardedAtMs ? new Date(winner.awardedAtMs).toLocaleString("ar-SA") : "",
+        ]),
       },
     ]);
   }
@@ -5117,6 +5375,8 @@ function LastGamePanel({ room, gameHistory = [], embedded = false }) {
               </div>)}
 
             {renderArchiveSection("messages", "رسائل المتسابقين", selectedMessages.length === 0 ? <p className="muted">لا توجد رسائل محفوظة في هذه المسابقة.</p> : <div className="archive-table-wrap"><table className="admin-bordered-table archive-table"><thead><tr><th>المتسابق</th><th>الرسالة</th><th>الوقت</th></tr></thead><tbody>{selectedMessages.map((message, index) => <tr key={`${message.createdAtMs || 0}-${index}`}><td>{message.playerName || "—"}</td><td>{message.text || "—"}</td><td>{message.createdAtMs ? new Date(message.createdAtMs).toLocaleString("ar-SA") : "—"}</td></tr>)}</tbody></table></div>)}
+
+            {renderArchiveSection("prizeWinners", "فائزون سحب الجوائز", selectedPrizeWinners.length === 0 ? <p className="muted">لا توجد جوائز سحب محفوظة في هذه المسابقة.</p> : <div className="archive-table-wrap"><table className="admin-bordered-table archive-table"><thead><tr><th>الفائز</th><th>الاسم الثلاثي</th><th>الجائزة</th><th>المسابقة</th><th>الوقت</th></tr></thead><tbody>{selectedPrizeWinners.map((winner, index) => <tr key={winner.spinId || `${winner.playerId}-${index}`}><td>{winner.playerEmoji || ""} {winner.playerName || "—"}</td><td>{winner.playerFullName || "—"}</td><td>{winner.prizeTitle || "—"}</td><td>{winner.gameTitle || selectedGame.title || "—"}</td><td>{winner.awardedAtMs ? new Date(winner.awardedAtMs).toLocaleString("ar-SA") : "—"}</td></tr>)}</tbody></table></div>)}
           </div>
         )}
       </details>
@@ -5150,6 +5410,7 @@ function AdminPanel({ initialView = "control" }) {
       <AutoRevealCorrectAnswer room={room} />
       <AutoLockJokers room={room} players={players} />
       <AutoProcessResults room={room} answers={answers} players={players} />
+      <AutoFinishFinalCountdown room={room} players={players} questions={questions} allAnswers={allAnswers} messages={messages} />
     </>
   );
 
@@ -5247,31 +5508,31 @@ function PlayerTopBar({ player, rank = null }) {
 
 function EmojiPicker({ value, onChange, label = "اختيار الإيموجي" }) {
   const [open, setOpen] = useState(false);
-  const selectedEmoji = value || "👤";
 
   return (
     <div className="emoji-picker">
       <button
         type="button"
-        className="emoji-picker-button"
+        className={value ? "emoji-picker-button" : "emoji-picker-button no-emoji-selected"}
         onClick={() => setOpen((current) => !current)}
         aria-label={label}
         aria-expanded={open}
       >
-        <span>{selectedEmoji}</span>
+        {value ? <span>{value}</span> : <small>اختيار</small>}
       </button>
 
       {open && (
         <div className="emoji-picker-menu" role="listbox" aria-label={label}>
           <button
             type="button"
-            className={!value ? "emoji-picker-option selected" : "emoji-picker-option"}
+            className={!value ? "emoji-picker-option no-emoji-option selected" : "emoji-picker-option no-emoji-option"}
             onClick={() => {
               onChange("");
               setOpen(false);
             }}
           >
-            👤
+            <span className="no-emoji-mark" aria-hidden="true" />
+            <small>بدون</small>
           </button>
           {PLAYER_EMOJIS.map((item) => (
             <button
@@ -5728,6 +5989,20 @@ function PlayerReadyScreen({ seconds }) {
   );
 }
 
+function PlayerPrizeWinnerScreen({ player, prize }) {
+  return (
+    <div className="main-column">
+      <div className="waiting-card card player-prize-winner-card">
+        <div className="big-icon">🎁</div>
+        <h2>مبروك الفوز!</h2>
+        <p>فزت في سحب الجوائز</p>
+        <strong>{prize?.prizeTitle || "جائزة مفاجئة"}</strong>
+      </div>
+      <PlayerChat playerId={player.id} playerName={player.name} />
+    </div>
+  );
+}
+
 function PracticeJokerHint({ room, player, inline = false }) {
   const stage = room?.stage;
   const currentQuestion = room?.currentQuestion;
@@ -5868,12 +6143,24 @@ function PlayerPanel() {
   const lastAnswerIsCorrect = lastAnswer?.isCorrect;
   const playerNow = useNow(250);
   const readySeconds = Math.max(0, Math.ceil((Number(room?.nextQuestionReadyUntilMs || 0) - playerNow) / 1000));
+  const latestPrizeWinner = (room?.prizeWheel?.winners || []).slice(-1)[0] || null;
+  const isCurrentPrizeWinner =
+    stage === "prizeWheel" &&
+    !!latestPrizeWinner &&
+    latestPrizeWinner.playerId === playerId &&
+    room?.prizeWheel?.winnerPlayerId === playerId;
   const isWaitingForReadyQuestion =
     stage === "ready" ||
     Number(room?.nextQuestionReadyQuestionIndex ?? -1) > currentQuestionIndex &&
     (stage === "instructions" || stage === "registration" || stage === "practiceComplete" || stage === "reveal" || stage === "results");
 
   useEffect(() => {
+    const shouldTrackVisitor =
+      !player?.id &&
+      (stage === "home" || stage === "registration" || stage === "instructions");
+
+    if (!shouldTrackVisitor) return undefined;
+
     const visitorId = getOrCreateVisitorId();
 
     async function markVisitorSeen() {
@@ -5898,7 +6185,7 @@ function PlayerPanel() {
     markVisitorSeen();
     const interval = setInterval(markVisitorSeen, 20000);
     return () => clearInterval(interval);
-  }, [player?.id, player?.name, playerName]);
+  }, [player?.id, player?.name, playerName, stage]);
 
   useEffect(() => {
     if (stage === "question" && currentQuestion?.questionId && typeof navigator !== "undefined") {
@@ -5924,6 +6211,12 @@ function PlayerPanel() {
   }, [stage, playerId, players]);
 
   useEffect(() => {
+    if (isCurrentPrizeWinner) {
+      vibrateDevice([120, 60, 120, 60, 220]);
+    }
+  }, [isCurrentPrizeWinner, latestPrizeWinner?.spinId]);
+
+  useEffect(() => {
     const localLock = readLocalAnswerLock(playerId, currentQuestion?.questionId);
     setSelectedIndex(null);
     setAnswerMessage("");
@@ -5946,6 +6239,8 @@ function PlayerPanel() {
 
     const answeredAt = getNow();
     const revealCountdown = getRevealCountdown(currentQuestion, room, answeredAt);
+    const answerStartAtMs = getAnswerStartMs(currentQuestion);
+    const answerTimeSeconds = answerStartAtMs ? Math.max(0, (answeredAt - answerStartAtMs) / 1000) : null;
 
     if (stage !== "question" || revealCountdown === null || revealCountdown > 0) return;
 
@@ -6002,6 +6297,8 @@ function PlayerPanel() {
       isPractice: !!currentQuestion.isPractice,
       points,
       answeredAt,
+      answerStartAtMs,
+      answerTimeSeconds,
       createdAt: serverTimestamp(),
     });
   }
@@ -6075,6 +6372,31 @@ function PlayerPanel() {
         <PlayerTopBar player={player} rank={playerRank || null} />
         <PlayerHealthCheck room={room} player={player} />
         <PlayerFinalScreen player={player} players={players} />
+      </>
+    );
+  }
+
+  if (stage === "finalCountdown") {
+    return (
+      <>
+        <PlayerTopBar player={player} rank={playerRank || null} />
+        <PlayerHealthCheck room={room} player={player} />
+        <div className="main-column">
+          <div className="waiting-card card">
+            <h2>إعلان الفائزين بعد لحظات</h2>
+            <p className="muted">استعدوا للنتيجة النهائية.</p>
+          </div>
+        </div>
+      </>
+    );
+  }
+
+  if (isCurrentPrizeWinner) {
+    return (
+      <>
+        <PlayerTopBar player={player} rank={playerRank || null} />
+        <PlayerHealthCheck room={room} player={player} />
+        <PlayerPrizeWinnerScreen player={player} prize={latestPrizeWinner} />
       </>
     );
   }
