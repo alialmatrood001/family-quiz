@@ -9,6 +9,7 @@ import {
   onSnapshot,
   collection,
   addDoc,
+  getDoc,
   getDocs,
   query,
   where,
@@ -923,9 +924,31 @@ async function preloadQuestionForReady(question, index, readyUntilMs) {
   });
 }
 
-async function activatePreloadedQuestion() {
+async function activatePreloadedQuestion(expectedQuestionId = null, expectedQuestionIndex = null) {
   const stageStartedAtMs = getNow();
-  await updateDoc(doc(db, "rooms", ROOM_ID), {
+  const roomRef = doc(db, "rooms", ROOM_ID);
+  const roomSnap = await getDoc(roomRef);
+  const latestRoom = roomSnap.exists() ? roomSnap.data() : null;
+  const latestQuestionId = latestRoom?.currentQuestion?.questionId || latestRoom?.currentQuestion?.id || null;
+  const expectedId = expectedQuestionId || latestQuestionId;
+
+  if (
+    !latestRoom ||
+    latestRoom.stage !== "ready" ||
+    (expectedId && !isSameId(latestQuestionId, expectedId)) ||
+    (expectedQuestionIndex !== null && Number(latestRoom.currentQuestionIndex) !== Number(expectedQuestionIndex))
+  ) {
+    console.warn("Skipped stale question activation", {
+      expectedQuestionId: expectedId,
+      latestQuestionId,
+      expectedQuestionIndex,
+      latestQuestionIndex: latestRoom?.currentQuestionIndex,
+      latestStage: latestRoom?.stage,
+    });
+    return false;
+  }
+
+  await updateDoc(roomRef, {
     stage: "question",
     questionSentAt: serverTimestamp(),
     nextQuestionReadyUntilMs: null,
@@ -936,6 +959,7 @@ async function activatePreloadedQuestion() {
     resultsStartedAtMs: null,
     updatedAt: serverTimestamp(),
   });
+  return true;
 }
 
 async function startMediaQuestion() {
@@ -973,7 +997,7 @@ async function endQuestionAndReveal(room, { allowUndo = false } = {}) {
     await finishMediaQuestion(room.currentQuestion);
   }
 
-  await revealCorrectAnswer({ allowUndo });
+  await revealCorrectAnswer({ allowUndo, expectedQuestionId: room?.currentQuestion?.questionId || room?.currentQuestion?.id || null });
 }
 
 
@@ -1033,10 +1057,28 @@ async function answerSystemCheck({ playerId, playerName, answerText }) {
   });
 }
 
-async function revealCorrectAnswer({ allowUndo = false } = {}) {
+async function revealCorrectAnswer({ allowUndo = false, expectedQuestionId = null } = {}) {
   const stageStartedAtMs = getNow();
+  const roomRef = doc(db, "rooms", ROOM_ID);
+  const roomSnap = await getDoc(roomRef);
+  const latestRoom = roomSnap.exists() ? roomSnap.data() : null;
+  const latestQuestionId = latestRoom?.currentQuestion?.questionId || latestRoom?.currentQuestion?.id || null;
+
+  if (
+    !latestRoom ||
+    latestRoom.stage !== "question" ||
+    (expectedQuestionId && !isSameId(latestQuestionId, expectedQuestionId))
+  ) {
+    console.warn("Skipped stale reveal request", {
+      expectedQuestionId,
+      latestQuestionId,
+      latestStage: latestRoom?.stage,
+    });
+    return false;
+  }
+
   await setDoc(
-    doc(db, "rooms", ROOM_ID),
+    roomRef,
     {
       stage: "reveal",
       stageStartedAtMs,
@@ -1047,6 +1089,7 @@ async function revealCorrectAnswer({ allowUndo = false } = {}) {
     },
     { merge: true }
   );
+  return true;
 }
 
 async function reopenQuestion(room) {
@@ -1447,7 +1490,7 @@ function AutoRevealCorrectAnswer({ room }) {
 
     if (revealCountdown <= 0 && timeLeft <= 0) {
       setDoneQuestionId(question.questionId);
-      revealCorrectAnswer();
+      revealCorrectAnswer({ expectedQuestionId: question.questionId || question.id || null });
     }
   }, [room, question, timeLeft, revealCountdown, doneQuestionId]);
 
@@ -3633,6 +3676,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
   const [activeAdminSection, setActiveAdminSection] = useState("live");
   const [previousAdminSection, setPreviousAdminSection] = useState(null);
   const [adminAdvancing, setAdminAdvancing] = useState(false);
+  const adminAdvancingRef = useRef(false);
   const [quickControlsOpen, setQuickControlsOpen] = useState(false);
   const [selectedPrizeWinnerByPrize, setSelectedPrizeWinnerByPrize] = useState({});
   const [excludePrizeWinners, setExcludePrizeWinners] = useState(true);
@@ -3800,15 +3844,29 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
 
   async function advanceFromDashboard(question = (room?.practiceMode ? practiceQuestions[currentQuestionIndex + 1] : competitionQuestions[currentQuestionIndex + 1]), questionIndex = currentQuestionIndex + 1) {
     const nextQuestion = question;
-    if (!nextQuestion || adminAdvancing) return;
+    if (!nextQuestion || adminAdvancingRef.current) return;
+    adminAdvancingRef.current = true;
     setAdminAdvancing(true);
-    const readyDelayMs = 3000;
-    const readyUntilMs = getNow() + readyDelayMs;
-    await preloadQuestionForReady(nextQuestion, questionIndex, readyUntilMs);
-    setTimeout(async () => {
-      await activatePreloadedQuestion();
+    try {
+      const readyDelayMs = 3000;
+      const readyUntilMs = getNow() + readyDelayMs;
+      await preloadQuestionForReady(nextQuestion, questionIndex, readyUntilMs);
+      setTimeout(async () => {
+        try {
+          const activated = await activatePreloadedQuestion(nextQuestion.id || nextQuestion.questionId, questionIndex);
+          if (!activated) {
+            console.warn("Dashboard question activation was ignored because it was stale.");
+          }
+        } finally {
+          adminAdvancingRef.current = false;
+          setAdminAdvancing(false);
+        }
+      }, readyDelayMs);
+    } catch (error) {
+      console.error("Failed to advance dashboard question", error);
+      adminAdvancingRef.current = false;
       setAdminAdvancing(false);
-    }, readyDelayMs);
+    }
   }
 
   async function startPracticeQuestions() {
@@ -4531,8 +4589,10 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
   const [readyCountdown, setReadyCountdown] = useState(null);
   const [showForceProcess, setShowForceProcess] = useState(false);
   const [isManuallyCalculating, setIsManuallyCalculating] = useState(false);
+  const [isAdvancingDisplayQuestion, setIsAdvancingDisplayQuestion] = useState(false);
   const [showFinalQuestionResults, setShowFinalQuestionResults] = useState(false);
   const readyTimerRef = useRef(null);
+  const displayAdvancingRef = useRef(false);
   const displayNow = useNow(250);
 
   const stage = room?.stage || "home";
@@ -4730,29 +4790,48 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
   }
 
   async function startReadyThenSend(question, questionIndex) {
+    if (displayAdvancingRef.current) return;
+    displayAdvancingRef.current = true;
+    setIsAdvancingDisplayQuestion(true);
     if (readyTimerRef.current) clearInterval(readyTimerRef.current);
 
-    const readyDelayMs = 3000;
-    const readyUntilMs = getNow() + readyDelayMs;
-    await preloadQuestionForReady(question, questionIndex, readyUntilMs);
+    try {
+      const readyDelayMs = 3000;
+      const readyUntilMs = getNow() + readyDelayMs;
+      await preloadQuestionForReady(question, questionIndex, readyUntilMs);
 
-    setPreviewStage("ready");
-    setReadyCountdown(3);
+      setPreviewStage("ready");
+      setReadyCountdown(3);
 
-    let counter = 3;
-    readyTimerRef.current = setInterval(async () => {
-      counter -= 1;
-      if (counter > 0) {
-        setReadyCountdown(counter);
-        return;
-      }
+      let counter = 3;
+      readyTimerRef.current = setInterval(async () => {
+        counter -= 1;
+        if (counter > 0) {
+          setReadyCountdown(counter);
+          return;
+        }
 
-      clearInterval(readyTimerRef.current);
-      readyTimerRef.current = null;
-      setReadyCountdown(null);
-      await activatePreloadedQuestion();
+        clearInterval(readyTimerRef.current);
+        readyTimerRef.current = null;
+        setReadyCountdown(null);
+        try {
+          const activated = await activatePreloadedQuestion(question.id || question.questionId, questionIndex);
+          if (!activated) {
+            console.warn("Display question activation was ignored because it was stale.");
+          }
+        } finally {
+          setPreviewStage(null);
+          displayAdvancingRef.current = false;
+          setIsAdvancingDisplayQuestion(false);
+        }
+      }, 1000);
+    } catch (error) {
+      console.error("Failed to advance display question", error);
       setPreviewStage(null);
-    }, 1000);
+      setReadyCountdown(null);
+      displayAdvancingRef.current = false;
+      setIsAdvancingDisplayQuestion(false);
+    }
   }
 
   async function finishPracticeToRegistration() {
@@ -4861,8 +4940,8 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
     } else if (stage === "results") {
       mainButton = (
         <>
-          <button onClick={goNextQuestion} disabled={!currentProcessed}>
-            {currentProcessed ? (nextQuestion ? (nextQuestionIsLast ? "السؤال الأخير" : "السؤال التالي") : (room?.practiceMode ? "إنهاء التجربة" : "إنهاء المسابقة")) : "جاري تجميع النتائج..."}
+          <button onClick={goNextQuestion} disabled={!currentProcessed || isAdvancingDisplayQuestion}>
+            {isAdvancingDisplayQuestion ? "جاري تجهيز السؤال..." : currentProcessed ? (nextQuestion ? (nextQuestionIsLast ? "السؤال الأخير" : "السؤال التالي") : (room?.practiceMode ? "إنهاء التجربة" : "إنهاء المسابقة")) : "جاري تجميع النتائج..."}
           </button>
           {/* FIX: Fallback force-process button shown when scores are stuck.
               This unblocks the admin if AutoProcessResults did not run
