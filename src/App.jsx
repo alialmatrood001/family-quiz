@@ -1479,24 +1479,63 @@ async function forceProcessResults(room) {
 function AutoRevealCorrectAnswer({ room }) {
   const now = useNow(500);
   const question = room?.currentQuestion;
+  const currentAutoRevealQuestionId = question?.questionId || question?.id || null;
   const timeLeft = getQuestionTimeLeft(question, room, now);
   const revealCountdown = getRevealCountdown(question, room, now);
   const [doneQuestionId, setDoneQuestionId] = useState(null);
+  const revealTimingRef = useRef({
+    questionId: null,
+    questionSeenAtMs: null,
+    mediaAnswerSeenAtMs: null,
+  });
 
   useEffect(() => {
     if (!room || room.stage !== "question" || !question) return;
-    if (doneQuestionId === question.questionId) return;
+    const questionId = question.questionId || question.id || null;
+    if (!questionId) return;
+
+    if (revealTimingRef.current.questionId !== questionId || !revealTimingRef.current.questionSeenAtMs) {
+      revealTimingRef.current = {
+        questionId,
+        questionSeenAtMs: Date.now(),
+        mediaAnswerSeenAtMs: null,
+      };
+    }
+
+    if (isMediaQuestion(question) && hasMediaEnded(room, question) && !revealTimingRef.current.mediaAnswerSeenAtMs) {
+      revealTimingRef.current = {
+        ...revealTimingRef.current,
+        mediaAnswerSeenAtMs: Date.now(),
+      };
+    }
+
+    if (doneQuestionId === questionId) return;
     if (revealCountdown === null) return;
 
+    const seconds = Math.max(1, Number(question.seconds || question.time || 20) || 20);
+    const revealDelayMs = getRevealDelayMs(question);
+    const localStartAt = isMediaQuestion(question)
+      ? revealTimingRef.current.mediaAnswerSeenAtMs
+      : revealTimingRef.current.questionSeenAtMs;
+    const requiredLocalElapsedMs = revealDelayMs + seconds * 1000;
+    const localElapsedMs = localStartAt ? Date.now() - localStartAt : 0;
+
+    if (localElapsedMs + 500 < requiredLocalElapsedMs) return;
+
     if (revealCountdown <= 0 && timeLeft <= 0) {
-      setDoneQuestionId(question.questionId);
-      revealCorrectAnswer({ expectedQuestionId: question.questionId || question.id || null });
+      setDoneQuestionId(questionId);
+      revealCorrectAnswer({ expectedQuestionId: questionId });
     }
   }, [room, question, timeLeft, revealCountdown, doneQuestionId]);
 
   useEffect(() => {
     setDoneQuestionId(null);
-  }, [question?.questionId]);
+    revealTimingRef.current = {
+      questionId: currentAutoRevealQuestionId,
+      questionSeenAtMs: room?.stage === "question" && currentAutoRevealQuestionId ? Date.now() : null,
+      mediaAnswerSeenAtMs: null,
+    };
+  }, [currentAutoRevealQuestionId, room?.stage]);
 
   return null;
 }
