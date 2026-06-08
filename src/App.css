@@ -12284,3 +12284,54 @@ button.danger,
 .question-settings-page .questions-table td:nth-child(7) {
   width: 96px !important;
 }
+
+/* Broadcast laptop safety: keep leaderboard score numbers on one line. */
+.leaderboard-score-wrap,
+.leaderboard-row.rank-1 .leaderboard-score-wrap,
+.leaderboard-row.rank-2 .leaderboard-score-wrap,
+.leaderboard-row.rank-3 .leaderboard-score-wrap {
+  grid-template-columns: minmax(92px, 5.1vw) minmax(74px, 4.2vw) !important;
+  width: clamp(178px, 10.4vw, 226px) !important;
+  min-width: clamp(178px, 10.4vw, 226px) !important;
+}
+
+.leaderboard-score-wrap strong,
+.leaderboard-score-wrap .leaderboard-total-score,
+.leaderboard-row.rank-1 .leaderboard-score-wrap strong,
+.leaderboard-row.rank-2 .leaderboard-score-wrap strong,
+.leaderboard-row.rank-3 .leaderboard-score-wrap strong {
+  width: clamp(92px, 5.1vw, 112px) !important;
+  min-width: clamp(92px, 5.1vw, 112px) !important;
+  white-space: nowrap !important;
+  word-break: keep-all !important;
+  overflow-wrap: normal !important;
+  line-height: 1 !important;
+}
+
+.display-frame .leaderboard-score-wrap,
+.display-frame .leaderboard-row.rank-1 .leaderboard-score-wrap,
+.display-frame .leaderboard-row.rank-2 .leaderboard-score-wrap,
+.display-frame .leaderboard-row.rank-3 .leaderboard-score-wrap {
+  grid-template-columns: minmax(72px, 4.9vw) minmax(58px, 4vw) !important;
+  width: clamp(144px, 10vw, 194px) !important;
+  min-width: clamp(144px, 10vw, 194px) !important;
+}
+
+.display-frame .leaderboard-score-wrap strong,
+.display-frame .leaderboard-score-wrap .leaderboard-total-score,
+.display-frame .leaderboard-row.rank-1 .leaderboard-score-wrap strong,
+.display-frame .leaderboard-row.rank-2 .leaderboard-score-wrap strong,
+.display-frame .leaderboard-row.rank-3 .leaderboard-score-wrap strong {
+  width: clamp(72px, 4.9vw, 92px) !important;
+  min-width: clamp(72px, 4.9vw, 92px) !important;
+  white-space: nowrap !important;
+  word-break: keep-all !important;
+  overflow-wrap: normal !important;
+}
+
+.display-frame .leaderboard-row,
+.display-frame .leaderboard-row.rank-1,
+.display-frame .leaderboard-row.rank-2,
+.display-frame .leaderboard-row.rank-3 {
+  grid-template-columns: 1.85vw minmax(0, 1fr) clamp(144px, 10vw, 194px) !important;
+}
