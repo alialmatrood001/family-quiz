@@ -19,6 +19,8 @@ import {
   runTransaction,
   writeBatch,
 } from "firebase/firestore";
+// [Cloud Functions] — callable client for finalizeQuestion
+import { getFunctions, httpsCallable, connectFunctionsEmulator } from "firebase/functions";
 import "./App.css";
 
 const firebaseConfig = {
@@ -33,6 +35,17 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
+
+// [Cloud Functions] — initialize and create the callable reference.
+// To test against the local emulator, uncomment connectFunctionsEmulator below
+// and run: firebase emulators:start --only functions
+const firebaseFunctions = getFunctions(app);
+
+if (window.location.hostname === "localhost") {
+  connectFunctionsEmulator(firebaseFunctions, "localhost", 5001);
+}
+
+const callFinalizeQuestion = httpsCallable(firebaseFunctions, "finalizeQuestion");
 
 const ROOM_ID = "family-quiz-001";
 const ADMIN_CODE = "1234";
@@ -1147,33 +1160,45 @@ async function showResults() {
   );
 }
 
-// Calculates results first (with nextStage:"results" so stage+snapshot are atomic),
-// then falls back to plain showResults() if already processed or if calculation fails.
+// [Cloud Functions] Calls the server-side finalizeQuestion function which calculates
+// results and atomically sets stage:"results". Falls back to the local frontend
+// implementation if the Cloud Function is unreachable or returns an error.
 // This prevents the loading flash: when stage="results" arrives, snapshot is already there.
 async function showResultsWithCalc(room) {
   const questionId = room?.currentQuestion?.questionId || room?.currentQuestion?.id;
   if (!questionId) { await showResults(); return; }
   if (isSameId(room?.processedQuestionId, questionId)) {
-    // Already processed — snapshot exists, just switch stage
+    // Already processed (e.g. AutoPreCalculateResults ran first) — just switch stage.
     await showResults();
     return;
   }
   try {
-    const result = await calculateResultsForCurrentQuestion(room, { source: "show-results", nextStage: "results" });
-    if (result?.skipped) {
-      const freshSnap = await getDoc(doc(db, "rooms", ROOM_ID));
-      const freshRoom = freshSnap.exists() ? freshSnap.data() : {};
-      if (
-        isSameId(freshRoom?.processedQuestionId, questionId) ||
-        isSameId(freshRoom?.resultsCalculatedQuestionId, questionId) ||
-        isSameId(freshRoom?.processingQuestionId, questionId)
-      ) {
-        await showResults();
-      }
+    const result = await callFinalizeQuestion({ questionId, nextStage: "results" });
+    if (result?.data?.skipped) {
+      // Server said it was already processed (race condition) — switch stage directly.
+      await showResults();
     }
+    // Success: the Cloud Function already wrote stage:"results" — nothing else needed.
   } catch (err) {
-    console.error("showResultsWithCalc failed, falling back to showResults:", err);
-    await showResults();
+    // [Cloud Functions] Network error or function threw — fall back to local calculation.
+    console.warn("finalizeQuestion cloud call failed, using local fallback:", err);
+    try {
+      const localResult = await calculateResultsForCurrentQuestion(room, { source: "show-results-fallback", nextStage: "results" });
+      if (localResult?.skipped) {
+        const freshSnap = await getDoc(doc(db, "rooms", ROOM_ID));
+        const freshRoom = freshSnap.exists() ? freshSnap.data() : {};
+        if (
+          isSameId(freshRoom?.processedQuestionId, questionId) ||
+          isSameId(freshRoom?.resultsCalculatedQuestionId, questionId) ||
+          isSameId(freshRoom?.processingQuestionId, questionId)
+        ) {
+          await showResults();
+        }
+      }
+    } catch (fallbackErr) {
+      console.error("showResultsWithCalc fallback also failed:", fallbackErr);
+      await showResults();
+    }
   }
 }
 
