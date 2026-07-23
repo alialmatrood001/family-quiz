@@ -13,6 +13,7 @@
     "emulators:import": "firebase emulators:start --only auth,functions,firestore,database --import=./emulator-data",
     "emulators:check": "node scripts/check-emulator-connection.mjs",
     "emulators:exec:check": "firebase emulators:exec --only auth,functions,firestore,database \"npm run emulators:check\"",
+    "test:unit": "npm --prefix functions run test:unit",
     "test:baseline": "firebase emulators:exec --project demo-family-quiz --only auth,functions,firestore,database \"npm --prefix functions run test:baseline\"",
     "test:baseline:50": "firebase emulators:exec --project demo-family-quiz --only auth,functions,firestore,database \"npm --prefix functions run test:baseline:50\"",
     "test:baseline:edge": "firebase emulators:exec --project demo-family-quiz --only auth,functions,firestore,database \"npm --prefix functions run test:baseline:edge\"",

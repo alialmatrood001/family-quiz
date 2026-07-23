@@ -21,19 +21,24 @@ for (let run = 1; run <= 3; run += 1) {
 
     const before = await readState(scenario.roomId);
     const startedAt = performance.now();
-    const result = await callFinalizeQuestion(scenario);
+    const result = await callFinalizeQuestion({
+      roomId: scenario.roomId,
+      questionId: scenario.questionId,
+    });
     const elapsed = performance.now() - startedAt;
     emitMetric(`baseline_50_run_${run}`, elapsed);
     const after = await readState(scenario.roomId);
     const playersAfter = playerMap(after.players);
 
-    assert.deepEqual(result, { success: true, skipped: false });
+    assert.equal(result.success, true);
+    assert.equal(result.status, "finalized");
     assert.equal(after.room.stage, "results");
     assert.equal(after.room.processedQuestionId, scenario.questionId);
     assert.equal(after.room.currentQuestion.resultsCalculated, true);
     assert.deepEqual(after.room.unrelatedSentinel, before.room.unrelatedSentinel);
     assert.equal(after.players.length, 50);
     assert.equal(after.answers.length, 45);
+    assert.equal(after.results.length, 1);
 
     for (const originalPlayer of scenario.players) {
       const actual = playersAfter.get(originalPlayer.id);
@@ -49,6 +54,8 @@ for (let run = 1; run <= 3; run += 1) {
     assert.equal(after.room.resultsDisplaySnapshot.leaderboardBefore.length, 50);
     assert.equal(after.room.resultsDisplaySnapshot.leaderboardAfter.length, 50);
     assert.equal(new Set(after.room.resultsDisplaySnapshot.leaderboardAfter.map((p) => p.id)).size, 50);
+    assert.equal(after.results[0].counts.players, 50);
+    assert.equal(after.results[0].counts.validAnswers, 45);
 
     const wrongWithX3 = scenario.answers.find(
       (answer) => !answer.isCorrect && answer.jokerApplied && answer.jokerMultiplier === 3

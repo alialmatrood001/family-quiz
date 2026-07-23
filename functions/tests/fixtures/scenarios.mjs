@@ -34,6 +34,7 @@ export function buildScenario({
     const number = index + 1;
     const id = `player-${String(number).padStart(3, "0")}`;
     const jokerMultiplier = number % 10 === 0 ? 3 : number % 7 === 0 ? 2 : null;
+    const jokerTiming = jokerMultiplier === 3 ? "before" : jokerMultiplier === 2 ? "during" : null;
     return {
       id,
       name: `Player ${String(number).padStart(3, "0")}`,
@@ -43,6 +44,13 @@ export function buildScenario({
       jokerUsed: jokerMultiplier !== null,
       jokerQuestionId: jokerMultiplier !== null ? questionId : null,
       jokerMultiplier,
+      jokerTiming,
+      jokerLockedAtMs:
+        jokerTiming === "before"
+          ? answerStartAtMs - 1_000
+          : jokerTiming === "during"
+            ? answerStartAtMs + 500
+            : null,
       unrelatedPlayerField: `keep-${id}`,
     };
   });
@@ -75,6 +83,7 @@ export function buildScenario({
       jokerTiming: jokerApplied ? (player.jokerMultiplier === 2 ? "during" : "before") : null,
       points,
       answeredAt: answerStartAtMs + elapsedSeconds * 1000,
+      createdAtMs: answerStartAtMs + elapsedSeconds * 1000,
       answerStartAtMs,
       answerTimeSeconds: elapsedSeconds,
     });

@@ -1,252 +1,260 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { Timestamp } from "firebase-admin/firestore";
 import {
   callFinalizeQuestion,
   deleteRoom,
-  playerMap,
   readState,
   roomRef,
   writeScenario,
 } from "../helpers/emulator.mjs";
-import { buildScenario } from "../fixtures/scenarios.mjs";
+import { buildScenario, calculateBasePoints } from "../fixtures/scenarios.mjs";
 
-test("missing room is currently created and finalized instead of rejected", { timeout: 30_000 }, async (t) => {
-  const roomId = "edge-missing-room";
-  t.after(() => deleteRoom(roomId));
-  await deleteRoom(roomId);
-  const result = await callFinalizeQuestion({ roomId, questionId: "missing-room-question" });
-  const state = await readState(roomId);
-  assert.deepEqual(result, { success: true, skipped: false });
-  assert.equal(state.roomExists, true);
-  assert.equal(state.room.processedQuestionId, "missing-room-question");
-});
+async function expectCallableError(action, code) {
+  await assert.rejects(action, (error) => {
+    assert.equal(error.code, code);
+    return true;
+  });
+}
 
-test("missing questionId is currently exposed to callers only as INTERNAL", { timeout: 30_000 }, async () => {
-  await assert.rejects(
-    () => callFinalizeQuestion({ roomId: "edge-missing-question-id", questionId: undefined }),
-    /INTERNAL/
+test("unauthenticated caller is rejected", async () => {
+  await expectCallableError(
+    () => callFinalizeQuestion({ roomId: "auth-room", questionId: "auth-question" }, { authRole: "none" }),
+    "UNAUTHENTICATED"
   );
 });
 
-test("unknown question ID in an existing room is currently accepted", { timeout: 30_000 }, async (t) => {
-  const scenario = buildScenario({
-    roomId: "edge-unknown-question",
-    playerCount: 2,
-    correctCount: 0,
-    wrongCount: 0,
-  });
-  t.after(() => deleteRoom(scenario.roomId));
-  await writeScenario(scenario);
-  const result = await callFinalizeQuestion({
-    roomId: scenario.roomId,
-    questionId: "not-the-current-question",
-  });
-  assert.deepEqual(result, { success: true, skipped: false });
+test("authenticated non-admin caller is rejected", async () => {
+  await expectCallableError(
+    () => callFinalizeQuestion({ roomId: "auth-room", questionId: "auth-question" }, { authRole: "user" }),
+    "PERMISSION_DENIED"
+  );
 });
 
-test("no answers finishes safely and preserves all scores", { timeout: 30_000 }, async (t) => {
-  const scenario = buildScenario({
-    roomId: "edge-no-answers",
-    playerCount: 4,
-    correctCount: 0,
-    wrongCount: 0,
-  });
+test("invalid and unexpected callable inputs are rejected", async () => {
+  await expectCallableError(
+    () => callFinalizeQuestion({ roomId: "../bad", questionId: "q" }),
+    "INVALID_ARGUMENT"
+  );
+  await expectCallableError(
+    () => callFinalizeQuestion({ roomId: "safe", questionId: "q", points: 999 }),
+    "INVALID_ARGUMENT"
+  );
+});
+
+test("missing room is rejected", async () => {
+  const roomId = "edge-missing-room";
+  await deleteRoom(roomId);
+  await expectCallableError(
+    () => callFinalizeQuestion({ roomId, questionId: "missing-question" }),
+    "NOT_FOUND"
+  );
+});
+
+test("unknown or inactive question is rejected", async (t) => {
+  const scenario = buildScenario({ roomId: "edge-inactive", playerCount: 1, correctCount: 0, wrongCount: 0 });
   t.after(() => deleteRoom(scenario.roomId));
   await writeScenario(scenario);
-  await callFinalizeQuestion(scenario);
+  await expectCallableError(
+    () => callFinalizeQuestion({ roomId: scenario.roomId, questionId: "other-question" }),
+    "NOT_FOUND"
+  );
+  await roomRef(scenario.roomId).update({ stage: "lobby" });
+  await expectCallableError(
+    () => callFinalizeQuestion({ roomId: scenario.roomId, questionId: scenario.questionId }),
+    "FAILED_PRECONDITION"
+  );
+});
+
+test("server ignores client points and isCorrect", async (t) => {
+  const scenario = buildScenario({ roomId: "edge-client-trust", playerCount: 1, correctCount: 1, wrongCount: 0 });
+  scenario.answers[0].points = 99_999_999;
+  scenario.answers[0].isCorrect = false;
+  t.after(() => deleteRoom(scenario.roomId));
+  await writeScenario(scenario);
+  await callFinalizeQuestion({ roomId: scenario.roomId, questionId: scenario.questionId });
+  const state = await readState(scenario.roomId);
+  const answer = scenario.answers[0];
+  const expectedBase = calculateBasePoints({ elapsedSeconds: answer.answerTimeSeconds });
+  const expected = scenario.players[0].jokerMultiplier
+    ? expectedBase * scenario.players[0].jokerMultiplier
+    : expectedBase;
+  assert.equal(state.players[0].score, scenario.players[0].score + expected);
+  assert.equal(state.results[0].results[0].isCorrect, true);
+});
+
+test("earliest valid server-timestamped duplicate wins", async (t) => {
+  const scenario = buildScenario({ roomId: "edge-duplicate", playerCount: 1, correctCount: 0, wrongCount: 0 });
+  const player = scenario.players[0];
+  scenario.answers.push(
+    {
+      id: "answer-late",
+      playerId: player.id,
+      questionId: scenario.questionId,
+      selectedIndex: 0,
+      createdAtMs: scenario.question.answerStartAtMs + 5_000,
+      points: 999_999,
+      isCorrect: false,
+    },
+    {
+      id: "answer-early",
+      playerId: player.id,
+      questionId: scenario.questionId,
+      selectedIndex: 1,
+      createdAtMs: scenario.question.answerStartAtMs + 1_000,
+      points: -999_999,
+      isCorrect: false,
+    }
+  );
+  t.after(() => deleteRoom(scenario.roomId));
+  await writeScenario(scenario);
+  await callFinalizeQuestion({ roomId: scenario.roomId, questionId: scenario.questionId });
+  const state = await readState(scenario.roomId);
+  assert.equal(state.results[0].counts.duplicateAnswerCount, 1);
+  assert.equal(state.results[0].results[0].selectedIndex, 1);
+  assert.equal(state.results[0].results[0].isCorrect, true);
+});
+
+test("orphan and malformed answers are diagnostic only", async (t) => {
+  const scenario = buildScenario({ roomId: "edge-diagnostics", playerCount: 1, correctCount: 0, wrongCount: 0 });
+  scenario.answers.push(
+    {
+      id: "orphan",
+      playerId: "missing-player",
+      questionId: scenario.questionId,
+      selectedIndex: 1,
+      createdAtMs: scenario.question.answerStartAtMs + 1_000,
+    },
+    {
+      id: "malformed",
+      playerId: scenario.players[0].id,
+      questionId: scenario.questionId,
+      selectedIndex: -1,
+      createdAtMs: scenario.question.answerStartAtMs + 1_000,
+    }
+  );
+  t.after(() => deleteRoom(scenario.roomId));
+  await writeScenario(scenario);
+  await callFinalizeQuestion({ roomId: scenario.roomId, questionId: scenario.questionId });
+  const state = await readState(scenario.roomId);
+  assert.equal(state.players.length, 1);
+  assert.equal(state.results[0].counts.orphanAnswerCount, 1);
+  assert.equal(state.results[0].counts.invalidAnswerCount, 1);
+  assert.equal(state.results[0].counts.validAnswers, 0);
+});
+
+test("no answers finalizes every player with zero question points", async (t) => {
+  const scenario = buildScenario({ roomId: "edge-no-answers", playerCount: 4, correctCount: 0, wrongCount: 0 });
+  t.after(() => deleteRoom(scenario.roomId));
+  await writeScenario(scenario);
+  await callFinalizeQuestion({ roomId: scenario.roomId, questionId: scenario.questionId });
   const state = await readState(scenario.roomId);
   assert.deepEqual(
     state.players.map((player) => player.score).sort((a, b) => a - b),
     scenario.players.map((player) => player.score).sort((a, b) => a - b)
   );
-  assert.equal(state.room.questionResultsById[scenario.questionId].answersCount, 0);
+  assert.equal(state.results[0].counts.unanswered, 4);
 });
 
-test("orphan answer does not crash and is present in result maps", { timeout: 30_000 }, async (t) => {
-  const scenario = buildScenario({
-    roomId: "edge-orphan-answer",
-    playerCount: 2,
-    correctCount: 1,
-    wrongCount: 0,
-  });
-  scenario.answers.push({
-    id: "orphan-answer",
-    playerId: "missing-player",
-    questionId: scenario.questionId,
-    selectedIndex: 1,
-    points: 777,
-    isCorrect: true,
-    answeredAt: 1_800_000_015_000,
-  });
+test("invalid official joker is ignored instead of becoming x3", async (t) => {
+  const scenario = buildScenario({ roomId: "edge-invalid-joker", playerCount: 1, correctCount: 1, wrongCount: 0 });
+  scenario.players[0].jokerUsed = true;
+  scenario.players[0].jokerQuestionId = scenario.questionId;
+  scenario.players[0].jokerTiming = "before";
+  scenario.players[0].jokerMultiplier = 99;
+  scenario.players[0].jokerLockedAtMs = scenario.question.answerStartAtMs - 1_000;
   t.after(() => deleteRoom(scenario.roomId));
   await writeScenario(scenario);
-  await callFinalizeQuestion(scenario);
+  await callFinalizeQuestion({ roomId: scenario.roomId, questionId: scenario.questionId });
   const state = await readState(scenario.roomId);
-  const result = state.room.questionResultsById[scenario.questionId];
-  assert.equal(state.players.length, 2);
-  assert.equal(result.answersCount, 2);
-  assert.equal(result.bonusByPlayer["missing-player"], 777);
+  assert.equal(state.results[0].counts.invalidJoker, 1);
+  assert.equal(state.results[0].results[0].jokerApplied, false);
+  assert.equal(state.results[0].results[0].points, state.results[0].results[0].basePoints);
 });
 
-test("later duplicate answer wins while both documents are counted", { timeout: 30_000 }, async (t) => {
-  const scenario = buildScenario({
-    roomId: "edge-duplicate-answer",
-    playerCount: 1,
-    correctCount: 1,
-    wrongCount: 0,
-  });
-  const player = scenario.players[0];
-  scenario.answers[0] = {
-    ...scenario.answers[0],
-    id: "duplicate-early",
-    answeredAt: 1_800_000_001_000,
-    points: 100,
-  };
-  scenario.answers.push({
-    ...scenario.answers[0],
-    id: "duplicate-late",
-    answeredAt: 1_800_000_002_000,
-    points: 900,
-  });
-  t.after(() => deleteRoom(scenario.roomId));
-  await writeScenario(scenario);
-  await callFinalizeQuestion(scenario);
-  const state = await readState(scenario.roomId);
-  assert.equal(playerMap(state.players).get(player.id).score, player.score + 900);
-  assert.equal(state.room.questionResultsById[scenario.questionId].answersCount, 2);
-});
-
-test("client-supplied absurd points are currently trusted", { timeout: 30_000 }, async (t) => {
-  const scenario = buildScenario({
-    roomId: "edge-untrusted-points",
-    playerCount: 1,
-    correctCount: 1,
-    wrongCount: 0,
-  });
-  scenario.answers[0].points = 99_999_999;
-  t.after(() => deleteRoom(scenario.roomId));
-  await writeScenario(scenario);
-  await callFinalizeQuestion(scenario);
-  const state = await readState(scenario.roomId);
-  assert.equal(state.players[0].score, scenario.players[0].score + 99_999_999);
-});
-
-test("missing optional answer fields become zero/false", { timeout: 30_000 }, async (t) => {
-  const scenario = buildScenario({
-    roomId: "edge-missing-fields",
-    playerCount: 1,
-    correctCount: 0,
-    wrongCount: 0,
-  });
-  scenario.answers.push({
-    id: "minimal-answer",
-    playerId: scenario.players[0].id,
-    questionId: scenario.questionId,
-    selectedIndex: 0,
-    answeredAt: 1_800_000_001_000,
-  });
-  t.after(() => deleteRoom(scenario.roomId));
-  await writeScenario(scenario);
-  await callFinalizeQuestion(scenario);
-  const state = await readState(scenario.roomId);
-  assert.equal(state.players[0].lastQuestionPoints, 0);
-  assert.equal(state.players[0].lastQuestionCorrect, false);
-});
-
-test("invalid selectedIndex is ignored", { timeout: 30_000 }, async (t) => {
-  const scenario = buildScenario({
-    roomId: "edge-invalid-index",
-    playerCount: 1,
-    correctCount: 0,
-    wrongCount: 0,
-  });
-  scenario.answers.push({
-    id: "invalid-index-answer",
-    playerId: scenario.players[0].id,
-    questionId: scenario.questionId,
-    selectedIndex: -1,
-    points: 500,
-    isCorrect: true,
-    answeredAt: 1_800_000_001_000,
-  });
-  t.after(() => deleteRoom(scenario.roomId));
-  await writeScenario(scenario);
-  await callFinalizeQuestion(scenario);
-  const state = await readState(scenario.roomId);
-  assert.equal(state.room.questionResultsById[scenario.questionId].answersCount, 0);
-  assert.equal(state.players[0].score, scenario.players[0].score);
-});
-
-test("invalid joker multiplier is labeled x3 and its supplied points remain trusted", { timeout: 30_000 }, async (t) => {
-  const scenario = buildScenario({
-    roomId: "edge-invalid-joker",
-    playerCount: 1,
-    correctCount: 1,
-    wrongCount: 0,
-  });
-  scenario.answers[0].jokerApplied = true;
-  scenario.answers[0].jokerMultiplier = 99;
-  scenario.answers[0].points = 12_345;
-  t.after(() => deleteRoom(scenario.roomId));
-  await writeScenario(scenario);
-  await callFinalizeQuestion(scenario);
-  const state = await readState(scenario.roomId);
-  const result = state.room.questionResultsById[scenario.questionId];
-  assert.equal(result.jokerByPlayer[scenario.players[0].id], "x3");
-  assert.equal(state.players[0].score, scenario.players[0].score + 12_345);
-});
-
-test("callable currently accepts an unauthenticated request", { timeout: 30_000 }, async (t) => {
-  const scenario = buildScenario({
-    roomId: "edge-no-auth",
-    playerCount: 1,
-    correctCount: 0,
-    wrongCount: 0,
-  });
-  t.after(() => deleteRoom(scenario.roomId));
-  await writeScenario(scenario);
-  const result = await callFinalizeQuestion(scenario, { includeAuth: false });
-  assert.deepEqual(result, { success: true, skipped: false });
-});
-
-test("writing a new result currently replaces prior questionResultsById entries", { timeout: 30_000 }, async (t) => {
-  const scenario = buildScenario({
-    roomId: "edge-result-history",
-    playerCount: 1,
-    correctCount: 0,
-    wrongCount: 0,
-  });
+test("previous result documents and compatibility map entries are preserved", async (t) => {
+  const scenario = buildScenario({ roomId: "edge-history", playerCount: 1, correctCount: 0, wrongCount: 0 });
   scenario.room.questionResultsById = { "previous-question": { questionId: "previous-question" } };
   t.after(() => deleteRoom(scenario.roomId));
   await writeScenario(scenario);
-  await callFinalizeQuestion(scenario);
+  await roomRef(scenario.roomId).collection("questionResults").doc("previous-question").set({
+    questionId: "previous-question",
+    runId: "previous-run",
+  });
+  await callFinalizeQuestion({ roomId: scenario.roomId, questionId: scenario.questionId });
   const state = await readState(scenario.roomId);
-  assert.equal(state.room.questionResultsById["previous-question"], undefined);
+  assert.ok(state.room.questionResultsById["previous-question"]);
   assert.ok(state.room.questionResultsById[scenario.questionId]);
+  assert.equal(state.results.length, 2);
 });
 
-test("a fresh processing lock returns the current busy response", { timeout: 30_000 }, async (t) => {
+test("fresh lock aborts and stale lock is recoverable", async (t) => {
+  const scenario = buildScenario({ roomId: "edge-lock", playerCount: 1, correctCount: 0, wrongCount: 0 });
+  t.after(() => deleteRoom(scenario.roomId));
+  await writeScenario(scenario);
+  await roomRef(scenario.roomId).update({
+    finalization: {
+      status: "processing",
+      questionId: scenario.questionId,
+      startedAtMs: Date.now(),
+      runId: "fresh-run",
+    },
+  });
+  await expectCallableError(
+    () => callFinalizeQuestion({ roomId: scenario.roomId, questionId: scenario.questionId }),
+    "ABORTED"
+  );
+  await roomRef(scenario.roomId).update({ "finalization.startedAtMs": Date.now() - 60_000 });
+  const result = await callFinalizeQuestion({ roomId: scenario.roomId, questionId: scenario.questionId });
+  assert.equal(result.status, "finalized");
+});
+
+test("post-claim failure records a recoverable failed state without partial scores", { timeout: 30_000 }, async (t) => {
   const scenario = buildScenario({
-    roomId: "edge-fresh-lock",
-    playerCount: 1,
+    roomId: "edge-atomic-limit",
+    playerCount: 401,
     correctCount: 0,
     wrongCount: 0,
   });
-  scenario.room.processingQuestionId = scenario.questionId;
-  scenario.room.processingStartedAtMs = Date.now();
   t.after(() => deleteRoom(scenario.roomId));
   await writeScenario(scenario);
-  const result = await callFinalizeQuestion(scenario);
-  assert.deepEqual(result, {
-    success: false,
-    skipped: true,
-    reason: "already-processed-or-busy",
-  });
+  await expectCallableError(
+    () => callFinalizeQuestion({ roomId: scenario.roomId, questionId: scenario.questionId }),
+    "FAILED_PRECONDITION"
+  );
+  const state = await readState(scenario.roomId);
+  assert.equal(state.room.finalization.status, "failed");
+  assert.equal(state.room.processingQuestionId, null);
+  assert.equal(state.results.length, 0);
+  assert.deepEqual(
+    state.players.map((player) => player.score).sort((a, b) => a - b),
+    scenario.players.map((player) => player.score).sort((a, b) => a - b)
+  );
 });
 
-test("test cleanup removes its synthetic room", { timeout: 30_000 }, async () => {
-  const roomId = "edge-cleanup-proof";
+test("answer without a server timestamp is ignored", async (t) => {
+  const scenario = buildScenario({ roomId: "edge-no-server-time", playerCount: 1, correctCount: 0, wrongCount: 0 });
+  scenario.answers.push({
+    id: "client-time-only",
+    playerId: scenario.players[0].id,
+    questionId: scenario.questionId,
+    selectedIndex: 1,
+    answeredAt: scenario.question.answerStartAtMs + 1_000,
+  });
+  t.after(() => deleteRoom(scenario.roomId));
+  await writeScenario(scenario);
+  await callFinalizeQuestion({ roomId: scenario.roomId, questionId: scenario.questionId });
+  const state = await readState(scenario.roomId);
+  assert.equal(state.results[0].counts.invalidAnswerCount, 1);
+  assert.equal(state.players[0].score, scenario.players[0].score);
+});
+
+test("cleanup removes official result documents", async () => {
+  const roomId = "edge-cleanup";
   await roomRef(roomId).set({ synthetic: true });
+  await roomRef(roomId).collection("questionResults").doc("q").set({
+    finalizedAt: Timestamp.now(),
+  });
   await deleteRoom(roomId);
   assert.equal((await roomRef(roomId).get()).exists, false);
 });

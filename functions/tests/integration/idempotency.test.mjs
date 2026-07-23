@@ -20,18 +20,19 @@ test("concurrent and sequential repeats do not apply points twice", { timeout: 3
   await writeScenario(scenario);
 
   const startedAt = performance.now();
-  const concurrent = await Promise.all([
-    callFinalizeQuestion(scenario),
-    callFinalizeQuestion(scenario),
+  const concurrent = await Promise.allSettled([
+    callFinalizeQuestion({ roomId: scenario.roomId, questionId: scenario.questionId }),
+    callFinalizeQuestion({ roomId: scenario.roomId, questionId: scenario.questionId }),
   ]);
   emitMetric("idempotency_concurrent_pair", performance.now() - startedAt);
 
-  const successes = concurrent.filter((result) => result.success === true);
-  const skips = concurrent.filter(
-    (result) => result.skipped === true && result.reason === "already-processed-or-busy"
+  const fulfilled = concurrent.filter((item) => item.status === "fulfilled").map((item) => item.value);
+  const rejected = concurrent.filter((item) => item.status === "rejected").map((item) => item.reason);
+  assert.equal(fulfilled.filter((item) => item.status === "finalized").length, 1);
+  assert.ok(
+    fulfilled.some((item) => item.status === "already-finalized") ||
+      rejected.some((error) => error.code === "ABORTED")
   );
-  assert.equal(successes.length, 1);
-  assert.equal(skips.length, 1);
 
   const afterConcurrent = await readState(scenario.roomId);
   const scoresAfterConcurrent = Object.fromEntries(
@@ -39,12 +40,16 @@ test("concurrent and sequential repeats do not apply points twice", { timeout: 3
   );
   const snapshotAfterConcurrent = afterConcurrent.room.resultsDisplaySnapshot;
 
-  const sequential = await callFinalizeQuestion(scenario);
-  assert.deepEqual(sequential, {
-    success: false,
-    skipped: true,
-    reason: "already-processed-or-busy",
+  const sequential = await callFinalizeQuestion({
+    roomId: scenario.roomId,
+    questionId: scenario.questionId,
   });
+  assert.equal(sequential.success, true);
+  assert.equal(sequential.status, "already-finalized");
+  assert.equal(
+    sequential.runId,
+    fulfilled.find((item) => item.status === "finalized").runId
+  );
 
   const afterSequential = await readState(scenario.roomId);
   assert.deepEqual(
