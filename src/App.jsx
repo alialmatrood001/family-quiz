@@ -35,7 +35,7 @@ const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
 const ROOM_ID = "family-quiz-001";
-const ADMIN_CODE = "1234";
+const LOCAL_ADMIN_DEV_BYPASS = import.meta.env.DEV === true;
 
 const QUIZ_TITLE = "مسابقة قروب العائلة العائلية";
 const QUIZ_SUBTITLE = "من تقديم الأستاذ إبراهيم ال مطرود";
@@ -5439,7 +5439,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
             <button type="button" className={activeAdminSection === "testMode" ? "active" : ""} onClick={() => openAdminSection("testMode")}>وضع الاختبار</button>
           </div>
         </nav>
-        <a className="dashboard-display-button" href={`/?admin=${ADMIN_CODE}&view=display`} target="_blank" rel="noreferrer">فتح صفحة العرض ↗</a>
+        <a className="dashboard-display-button" href="/?view=display" target="_blank" rel="noreferrer">فتح صفحة العرض ↗</a>
         <button className="dashboard-export-button" onClick={exportFullExcel}>استخراج Excel شامل</button>
       </aside>
 
@@ -7373,7 +7373,7 @@ function LastGamePanel({ room, gameHistory = [], embedded = false }) {
   return (
     <div className={embedded ? "control-page embedded-admin-panel" : "control-page"}>
       {!embedded && <div className="admin-toolbar card">
-        <a className="link-button" href={`/?admin=${ADMIN_CODE}&view=control`}>لوحة التحكم</a>
+        <a className="link-button" href="/?view=control">لوحة التحكم</a>
         <button onClick={exportLastGameExcel} disabled={!selectedGame?.players?.length}>استخراج Excel</button>
       </div>}
       {embedded && (
@@ -7559,13 +7559,13 @@ function AdminPanel({ initialView = "control" }) {
       <>
         {alwaysOnAutomations}
         <div className="admin-toolbar card">
-          <a className="link-button" href={`/?admin=${ADMIN_CODE}&view=control`}>
+          <a className="link-button" href="/?view=control">
             لوحة التحكم
           </a>
 
           <a
             className="link-button"
-            href={`/?admin=${ADMIN_CODE}&view=display`}
+            href="/?view=display"
             target="_blank"
             rel="noreferrer"
           >
@@ -8823,17 +8823,29 @@ function AppCredit() {
   return <div className="app-credit">قام ببرمجة المسابقة: علي إبراهيم ال مطرود</div>;
 }
 
+function AdminAccessDisabled() {
+  return (
+    <div className="app player-app" dir="rtl">
+      <div className="card center-card">
+        <h2>لوحة الإدارة معطلة مؤقتًا</h2>
+        <p className="muted">لوحة الإدارة معطلة مؤقتًا لحين تفعيل نظام الدخول الآمن.</p>
+      </div>
+      <AppCredit />
+    </div>
+  );
+}
+
 export default function App() {
   const searchParams = new URLSearchParams(window.location.search);
-  const isAdmin = searchParams.get("admin") === ADMIN_CODE;
   const viewParam = searchParams.get("view");
+  const isDisplayView = viewParam === "display";
+  const isAdminViewRequest =
+    searchParams.has("admin") ||
+    viewParam === "settings" ||
+    viewParam === "control" ||
+    viewParam === "lastgame";
 
-  const adminView =
-    viewParam === "settings" || viewParam === "display" || viewParam === "control" || viewParam === "lastgame"
-      ? viewParam
-      : "control";
-
-  if (isAdmin && adminView === "display") {
+  if (isDisplayView) {
     return (
       <div className="display-app" dir="rtl">
         <AdminPanel initialView="display" />
@@ -8842,9 +8854,27 @@ export default function App() {
     );
   }
 
+  if (isAdminViewRequest) {
+    if (!LOCAL_ADMIN_DEV_BYPASS) {
+      return <AdminAccessDisabled />;
+    }
+
+    const adminView =
+      viewParam === "settings" || viewParam === "lastgame"
+        ? viewParam
+        : "control";
+
+    return (
+      <div className="app" dir="rtl">
+        <AdminPanel initialView={adminView} />
+        <AppCredit />
+      </div>
+    );
+  }
+
   return (
-    <div className={isAdmin ? "app" : "app player-app"} dir="rtl">
-      {isAdmin ? <AdminPanel initialView={adminView} /> : <PlayerPanel />}
+    <div className="app player-app" dir="rtl">
+      <PlayerPanel />
       <AppCredit />
     </div>
   );
