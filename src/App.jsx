@@ -19,8 +19,6 @@ import {
   runTransaction,
   writeBatch,
 } from "firebase/firestore";
-// [Cloud Functions] — callable client for finalizeQuestion
-import { getFunctions, httpsCallable, connectFunctionsEmulator } from "firebase/functions";
 import "./App.css";
 
 const firebaseConfig = {
@@ -36,17 +34,6 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
-// [Cloud Functions] — initialize and create the callable reference.
-// To test against the local emulator, uncomment connectFunctionsEmulator below
-// and run: firebase emulators:start --only functions
-const firebaseFunctions = getFunctions(app);
-
-if (window.location.hostname === "localhost") {
-  connectFunctionsEmulator(firebaseFunctions, "localhost", 5001);
-}
-
-const callFinalizeQuestion = httpsCallable(firebaseFunctions, "finalizeQuestion");
-
 const ROOM_ID = "family-quiz-001";
 const ADMIN_CODE = "1234";
 
@@ -59,6 +46,7 @@ const REVEAL_OPTIONS_DELAY_MS = 3000;
 const MEDIA_REVEAL_OPTIONS_DELAY_MS = 5000;
 const QUESTION_START_SYNC_BUFFER_MS = 300;
 const RESULTS_PROCESSING_STALE_MS = 9000;
+const RESULTS_LEADERBOARD_LIMIT = 15;
 const DEFAULT_PACKAGE_ID = "default";
 const DEFAULT_PACKAGE_NAME = "المسابقة الحالية";
 const DEFAULT_PRIZE_ITEMS = [
@@ -66,6 +54,7 @@ const DEFAULT_PRIZE_ITEMS = [
   { id: "prize-100-b", title: "100 ريال" },
   { id: "prize-phone", title: "جوال" },
 ];
+const DEFAULT_QUESTION_CATEGORY = "عام";
 
 function getNow() {
   return Date.now();
@@ -109,6 +98,12 @@ function formatAnswerTime(answer) {
   const seconds = Number(answer?.answerTimeSeconds);
   if (Number.isFinite(seconds) && seconds >= 0) return `${seconds.toFixed(seconds < 10 ? 1 : 0)} ث`;
   return "—";
+}
+
+function isValidPlayerAnswerForQuestion(answer, questionId) {
+  if (!answer?.playerId || !questionId || !isSameId(answer.questionId, questionId)) return false;
+  const selectedIndex = Number(answer.selectedIndex);
+  return Number.isInteger(selectedIndex) && selectedIndex >= 0;
 }
 
 function vibrateDevice(pattern) {
@@ -179,6 +174,91 @@ function getQuestionTypeLabel(type) {
   if (type === "image") return "سؤال صورة";
   if (type === "true_false") return "صح أو خطأ";
   return "اختيار من متعدد";
+}
+
+function getAdminStageLabel(stage) {
+  const labels = {
+    home: "الرئيسية",
+    registration: "التسجيل",
+    instructions: "التعليمات",
+    ready: "استعداد",
+    question: "سؤال مباشر",
+    reveal: "كشف الإجابة",
+    results: "النتائج",
+    categoryVote: "تصويت التصنيف",
+    practiceComplete: "انتهاء التجربة",
+    prizeWheel: "سحب الجوائز",
+    finalCountdown: "العد التنازلي",
+    finished: "انتهت المسابقة",
+  };
+  return labels[stage] || stage || "غير محدد";
+}
+
+function getQuestionCategory(question) {
+  return String(question?.category || DEFAULT_QUESTION_CATEGORY).trim() || DEFAULT_QUESTION_CATEGORY;
+}
+
+function isVotingQuestion(question) {
+  return !!question?.voteEnabled && Array.isArray(question?.voteChoices) && question.voteChoices.length === 2;
+}
+
+function getQuestionDisplayText(question) {
+  if (!isVotingQuestion(question)) return question?.text || "";
+  return question.voteChoices.map((choice) => choice.category).filter(Boolean).join(" أو ");
+}
+
+function materializeVoteQuestion(question, category) {
+  if (!isVotingQuestion(question)) return question;
+  const choices = question.voteChoices;
+  const selectedChoice = choices.find((choice) => choice.category === category) || choices[getRandomIndex(choices.length)];
+  return {
+    ...question,
+    ...selectedChoice,
+    id: question.id || question.questionId,
+    questionId: question.id || question.questionId,
+    voteRoundId: question.id || question.questionId,
+    selectedVoteCategory: selectedChoice.category,
+    voteEnabled: false,
+    voteChoices: choices,
+  };
+}
+
+function getSelectedAnswerText(question, answer) {
+  if (!answer) return "—";
+  const answeredQuestion = isVotingQuestion(question) && answer.voteCategory
+    ? materializeVoteQuestion(question, answer.voteCategory)
+    : question;
+  return getOptionText(answeredQuestion?.options?.[answer.selectedIndex]) || "—";
+}
+
+function getCategoryVoteCounts(categoryVote = {}) {
+  const options = Array.isArray(categoryVote.options) ? categoryVote.options : [];
+  const counts = Object.fromEntries(options.map((option) => [option.label, 0]));
+  Object.values(categoryVote.votes || {}).forEach((vote) => {
+    const label = typeof vote === "string" ? vote : vote?.label;
+    if (Object.prototype.hasOwnProperty.call(counts, label)) counts[label] += 1;
+  });
+  return counts;
+}
+
+function getCategoryVoteWinner(categoryVote = {}) {
+  const options = Array.isArray(categoryVote.options) ? categoryVote.options : [];
+  const counts = getCategoryVoteCounts(categoryVote);
+  const ranked = [...options].sort((a, b) => (counts[b.label] || 0) - (counts[a.label] || 0));
+  if (!ranked.length) return null;
+  if (ranked.length > 1 && (counts[ranked[0].label] || 0) === (counts[ranked[1].label] || 0)) return null;
+  return ranked[0].label;
+}
+
+function getCategoryVoteTieLabels(categoryVote = {}) {
+  const options = Array.isArray(categoryVote.options) ? categoryVote.options : [];
+  if (options.length < 2) return [];
+  const counts = getCategoryVoteCounts(categoryVote);
+  const highestCount = Math.max(...options.map((option) => Number(counts[option.label] || 0)));
+  const leadingLabels = options
+    .filter((option) => Number(counts[option.label] || 0) === highestCount)
+    .map((option) => option.label);
+  return leadingLabels.length > 1 ? leadingLabels : [];
 }
 
 function getOptionText(option) {
@@ -769,6 +849,9 @@ async function createOrResetRoom() {
       },
       activePackageId: DEFAULT_PACKAGE_ID,
       activePackageName: DEFAULT_PACKAGE_NAME,
+      categoryVotingEnabled: false,
+      categoryVote: null,
+      usedQuestionIds: {},
       updatedAt: serverTimestamp(),
     },
     { merge: true }
@@ -794,6 +877,63 @@ async function clearAnswersAndMessages() {
 
 async function clearMessagesOnly() {
   await clearCollection(["rooms", ROOM_ID, "messages"]);
+}
+
+async function returnToRegistrationKeepingPlayers() {
+  await setDoc(
+    doc(db, "rooms", ROOM_ID),
+    {
+      title: QUIZ_TITLE,
+      subtitle: QUIZ_SUBTITLE,
+      stage: "registration",
+      currentQuestion: null,
+      currentQuestionIndex: -1,
+      questionSentAt: null,
+      audioStartedAt: null,
+      audioEndedAt: null,
+      mediaStartedAt: null,
+      mediaEndedAt: null,
+      questionIgnored: false,
+      ignoredQuestionIds: {},
+      processedQuestionId: null,
+      resultsCalculated: false,
+      resultsCalculatedQuestionId: null,
+      collectingBonusByPlayer: {},
+      collectingBonusJokerByPlayer: {},
+      collectingBonusPlayerId: null,
+      collectingBonusPoints: 0,
+      rankMovementByPlayer: {},
+      collectingAnswerCorrectByPlayer: {},
+      resultsDisplaySnapshot: null,
+      calculationStatus: null,
+      processingQuestionId: null,
+      processingStartedAtMs: null,
+      resultsError: null,
+      practiceMode: false,
+      healthCheck: { active: false },
+      "prizeWheel.spinning": false,
+      categoryVote: null,
+      testMode: {
+        autoAnswerEnabled: false,
+        slowResultsEnabled: false,
+        slowResultsDelayMs: 15000,
+      },
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true }
+  );
+}
+
+async function setTemporaryRegistrationOpen(isOpen) {
+  await setDoc(
+    doc(db, "rooms", ROOM_ID),
+    {
+      registrationOverrideOpen: !!isOpen,
+      registrationOverrideUpdatedAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true }
+  );
 }
 
 async function hardResetGame() {
@@ -824,6 +964,7 @@ async function showInstructionsPage() {
       rankMovementByPlayer: {},
       healthCheck: { active: false },
       practiceMode: false,
+      registrationOverrideOpen: false,
       updatedAt: serverTimestamp(),
     },
     { merge: true }
@@ -855,7 +996,10 @@ async function resetAndStartRegistration() {
       rankMovementByPlayer: {},
       healthCheck: { active: false },
       practiceMode: false,
+      registrationOverrideOpen: false,
       practiceFinished: false,
+      categoryVote: null,
+      usedQuestionIds: {},
       resultsDisplaySnapshot: null,
       calculationStatus: null,
       testMode: {
@@ -945,12 +1089,78 @@ async function preloadQuestionForReady(question, index, readyUntilMs) {
     rankMovementByPlayer: {},
     nextQuestionReadyUntilMs: readyUntilMs,
     nextQuestionReadyQuestionIndex: index,
+    categoryVote: null,
+    [`usedQuestionIds.${question.id || question.questionId}`]: true,
     stageStartedAtMs,
     readyStartedAtMs: stageStartedAtMs,
     revealStartedAtMs: null,
     resultsStartedAtMs: null,
     updatedAt: serverTimestamp(),
   });
+}
+
+async function startCategoryVote(question, _room = null, questionIndex = 0) {
+  void _room;
+  if (!isVotingQuestion(question)) return false;
+  const options = question.voteChoices.map((choice) => ({ label: choice.category, count: 1 }));
+
+  const startedAtMs = getNow();
+  await setDoc(
+    doc(db, "rooms", ROOM_ID),
+    {
+      stage: "categoryVote",
+      currentQuestion: null,
+      currentQuestionIndex: questionIndex - 1,
+      categoryVote: {
+        id: `category-vote-${startedAtMs}`,
+        options,
+        votes: {},
+        questionId: question.id || question.questionId,
+        questionIndex,
+        startedAtMs,
+      },
+      nextQuestionReadyUntilMs: null,
+      nextQuestionReadyQuestionIndex: null,
+      stageStartedAtMs: startedAtMs,
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true }
+  );
+  return true;
+}
+
+async function submitCategoryVote(player, categoryLabel) {
+  if (!player?.id || !categoryLabel) return;
+  await updateDoc(doc(db, "rooms", ROOM_ID), {
+    [`categoryVote.votes.${player.id}`]: {
+      playerId: player.id,
+      playerName: player.name || "",
+      label: categoryLabel,
+      votedAtMs: getNow(),
+    },
+    updatedAt: serverTimestamp(),
+  });
+}
+
+async function resolveCategoryVote(room, questions, { selectedCategory = null, chooseRandomTie = false } = {}) {
+  const vote = room?.categoryVote;
+  if (!vote || room?.stage !== "categoryVote") return { resolved: false, reason: "invalid" };
+  const winner = getCategoryVoteWinner(vote);
+  const tiedLabels = getCategoryVoteTieLabels(vote);
+  const validLabels = (vote.options || []).map((option) => option.label);
+  const presenterChoice = validLabels.includes(selectedCategory) ? selectedCategory : null;
+  const randomTieChoice = chooseRandomTie && tiedLabels.length
+    ? tiedLabels[getRandomIndex(tiedLabels.length)]
+    : null;
+  const category = winner || presenterChoice || randomTieChoice;
+  if (!category) return { resolved: false, reason: tiedLabels.length ? "tie" : "no-winner", tiedLabels };
+  const questionIndex = Number(vote.questionIndex ?? (room?.currentQuestionIndex ?? -1) + 1);
+  const voteQuestion = questions.find((question) => isSameId(question.id || question.questionId, vote.questionId)) || questions[questionIndex];
+  if (!voteQuestion || !isVotingQuestion(voteQuestion)) return { resolved: false, reason: "missing-question" };
+  const question = materializeVoteQuestion(voteQuestion, category);
+  const readyUntilMs = getNow() + 3000;
+  await preloadQuestionForReady(question, questionIndex, readyUntilMs);
+  return { resolved: true, category };
 }
 
 async function activatePreloadedQuestion(expectedQuestionId = null, expectedQuestionIndex = null) {
@@ -1160,48 +1370,6 @@ async function showResults() {
   );
 }
 
-// [Cloud Functions] Calls the server-side finalizeQuestion function which calculates
-// results and atomically sets stage:"results". Falls back to the local frontend
-// implementation if the Cloud Function is unreachable or returns an error.
-// This prevents the loading flash: when stage="results" arrives, snapshot is already there.
-async function showResultsWithCalc(room) {
-  const questionId = room?.currentQuestion?.questionId || room?.currentQuestion?.id;
-  if (!questionId) { await showResults(); return; }
-  if (isSameId(room?.processedQuestionId, questionId)) {
-    // Already processed (e.g. AutoPreCalculateResults ran first) — just switch stage.
-    await showResults();
-    return;
-  }
-  try {
-    const result = await callFinalizeQuestion({ questionId, nextStage: "results" });
-    if (result?.data?.skipped) {
-      // Server said it was already processed (race condition) — switch stage directly.
-      await showResults();
-    }
-    // Success: the Cloud Function already wrote stage:"results" — nothing else needed.
-  } catch (err) {
-    // [Cloud Functions] Network error or function threw — fall back to local calculation.
-    console.warn("finalizeQuestion cloud call failed, using local fallback:", err);
-    try {
-      const localResult = await calculateResultsForCurrentQuestion(room, { source: "show-results-fallback", nextStage: "results" });
-      if (localResult?.skipped) {
-        const freshSnap = await getDoc(doc(db, "rooms", ROOM_ID));
-        const freshRoom = freshSnap.exists() ? freshSnap.data() : {};
-        if (
-          isSameId(freshRoom?.processedQuestionId, questionId) ||
-          isSameId(freshRoom?.resultsCalculatedQuestionId, questionId) ||
-          isSameId(freshRoom?.processingQuestionId, questionId)
-        ) {
-          await showResults();
-        }
-      }
-    } catch (fallbackErr) {
-      console.error("showResultsWithCalc fallback also failed:", fallbackErr);
-      await showResults();
-    }
-  }
-}
-
 async function beginFinalCountdown(room) {
   const questionId = room?.currentQuestion?.questionId || room?.currentQuestion?.id;
   if (questionId && !isSameId(room?.processedQuestionId, questionId)) {
@@ -1312,7 +1480,7 @@ async function finishGame(players = [], questions = [], allAnswers = [], message
   );
 }
 
-async function claimQuestionProcessing(questionId) {
+async function claimQuestionProcessing(questionId, { publishResultsStage = false } = {}) {
   if (!questionId) return false;
   const roomRef = doc(db, "rooms", ROOM_ID);
 
@@ -1340,6 +1508,12 @@ async function claimQuestionProcessing(questionId) {
       {
         processingQuestionId: questionId,
         processingStartedAtMs: getNow(),
+        ...(publishResultsStage ? {
+          stage: "results",
+          stageStartedAtMs: getNow(),
+          resultsStartedAtMs: getNow(),
+          revealUndoUntilMs: null,
+        } : {}),
         updatedAt: serverTimestamp(),
       },
       { merge: true }
@@ -1350,9 +1524,10 @@ async function claimQuestionProcessing(questionId) {
 }
 
 
-async function calculateResultsForCurrentQuestion(room, { source = "auto", nextStage = "results" } = {}) {
+async function calculateResultsForCurrentQuestion(room, { source = "auto", nextStage = "results", publishResultsStage = false } = {}) {
   const questionId = room?.currentQuestion?.questionId || room?.currentQuestion?.id;
   if (!questionId) return;
+  const calculationStartedAtMs = getNow();
   console.log(`Starting result calculation for question ${questionId}`, { source });
 
   if (
@@ -1364,16 +1539,29 @@ async function calculateResultsForCurrentQuestion(room, { source = "auto", nextS
     return { skipped: true };
   }
 
-  const claimed = await claimQuestionProcessing(questionId);
+  const roomRef = doc(db, "rooms", ROOM_ID);
+  const simulateSlowResults = !!room?.testMode?.slowResultsEnabled;
+  let prefetchedAnswersSnap = null;
+  let prefetchedPlayersSnap = null;
+  let claimed;
+
+  if (simulateSlowResults) {
+    claimed = await claimQuestionProcessing(questionId, { publishResultsStage });
+  } else {
+    [claimed, prefetchedAnswersSnap, prefetchedPlayersSnap] = await Promise.all([
+      claimQuestionProcessing(questionId, { publishResultsStage }),
+      getDocs(query(collection(db, "rooms", ROOM_ID, "answers"), where("questionId", "==", questionId))),
+      getDocs(collection(db, "rooms", ROOM_ID, "players")),
+    ]);
+  }
+
   if (!claimed) {
     console.log("Results already calculated, skipping", { questionId, reason: "busy-or-processed" });
     return { skipped: true };
   }
 
-  const roomRef = doc(db, "rooms", ROOM_ID);
-
   // TestMode: simulate slow calculation to test emergency skip
-  if (room?.testMode?.slowResultsEnabled) {
+  if (simulateSlowResults) {
     const delayMs = Number(room?.testMode?.slowResultsDelayMs || 15000);
     console.warn(`[TestMode] Delaying calculation by ${delayMs}ms`);
     await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -1397,10 +1585,12 @@ async function calculateResultsForCurrentQuestion(room, { source = "auto", nextS
   if (isTestMode) console.time(`[calc] ${questionId}`);
 
   try {
-    const [answersSnap, playersSnap] = await Promise.all([
-      getDocs(query(collection(db, "rooms", ROOM_ID, "answers"), where("questionId", "==", questionId))),
-      getDocs(collection(db, "rooms", ROOM_ID, "players")),
-    ]);
+    const [answersSnap, playersSnap] = prefetchedAnswersSnap && prefetchedPlayersSnap
+      ? [prefetchedAnswersSnap, prefetchedPlayersSnap]
+      : await Promise.all([
+          getDocs(query(collection(db, "rooms", ROOM_ID, "answers"), where("questionId", "==", questionId))),
+          getDocs(collection(db, "rooms", ROOM_ID, "players")),
+        ]);
 
     const safeAnswers = answersSnap.docs.map((item) => ({ id: item.id, ...item.data() }));
     const safePlayers = playersSnap.docs
@@ -1416,14 +1606,16 @@ async function calculateResultsForCurrentQuestion(room, { source = "auto", nextS
     }
 
     const answersToProcess = [...safeAnswers]
-      .filter((answer) => answer && answer.playerId)
+      .filter((answer) => isValidPlayerAnswerForQuestion(answer, questionId))
       .sort((a, b) => Number(a.answeredAt || 0) - Number(b.answeredAt || 0));
     const answerByPlayer = new Map(answersToProcess.map((answer) => [answer.playerId, answer]));
     const bonusByPlayer = {};
     const jokerByPlayer = {};
     const correctByPlayer = {};
+    const answeredByPlayer = {};
 
     answersToProcess.forEach((answer) => {
+      answeredByPlayer[answer.playerId] = true;
       bonusByPlayer[answer.playerId] = Number(answer.points || 0);
       correctByPlayer[answer.playerId] = !!answer.isCorrect;
       if (answer.jokerApplied) {
@@ -1486,21 +1678,6 @@ async function calculateResultsForCurrentQuestion(room, { source = "auto", nextS
       };
     });
 
-    const scoresBatch = writeBatch(db);
-    playerUpdates.forEach(({ player, answer, points, alreadyApplied, nextScore }) => {
-      scoresBatch.update(doc(db, "rooms", ROOM_ID, "players", player.id), {
-        score: nextScore,
-        answeredCount: Number(player.answeredCount || 0) + (!alreadyApplied && answer ? 1 : 0),
-        lastQuestionPoints: points,
-        lastQuestionId: questionId,
-        lastQuestionCorrect: answer ? !!answer.isCorrect : null,
-        lastAnswerAt: answer ? serverTimestamp() : player.lastAnswerAt || null,
-      });
-    });
-    await scoresBatch.commit();
-    if (isTestMode) console.timeLog(`[calc] ${questionId}`, `scores batch (${playerUpdates.length} players)`);
-    console.log("Player scores updated (batch)", { questionId, players: playerUpdates.length });
-
     const sortedAfterRaw = [...playerUpdates]
       .map(({ player, nextScore }) => ({ player, nextScore }))
       .sort((a, b) => Number(b.nextScore || 0) - Number(a.nextScore || 0));
@@ -1509,8 +1686,21 @@ async function calculateResultsForCurrentQuestion(room, { source = "auto", nextS
       rankMovementByPlayer[player.id] = (previousRankByPlayer[player.id] || index + 1) - (index + 1);
     });
 
+    const resultsBatch = writeBatch(db);
+    playerUpdates.forEach(({ player, answer, points, alreadyApplied, nextScore }) => {
+      resultsBatch.update(doc(db, "rooms", ROOM_ID, "players", player.id), {
+        score: nextScore,
+        answeredCount: Number(player.answeredCount || 0) + (!alreadyApplied && answer ? 1 : 0),
+        lastQuestionPoints: points,
+        lastQuestionId: questionId,
+        lastQuestionCorrect: answer ? !!answer.isCorrect : null,
+        lastRankMovement: Number(rankMovementByPlayer[player.id] || 0),
+        lastAnswerAt: answer ? serverTimestamp() : player.lastAnswerAt || null,
+      });
+    });
+
     // Stable snapshot for ResultsDisplay — before/after for two-phase animation
-    const leaderboardBeforeSnapshot = sortedBefore.map((player) => ({
+    const leaderboardBeforeSnapshot = sortedBefore.slice(0, RESULTS_LEADERBOARD_LIMIT).map((player) => ({
       id: player.id,
       name: player.name || "",
       emoji: player.emoji || "",
@@ -1522,7 +1712,7 @@ async function calculateResultsForCurrentQuestion(room, { source = "auto", nextS
       lastQuestionPoints: Number(player.lastQuestionPoints || 0),
       lastQuestionCorrect: player.lastQuestionCorrect ?? null,
     }));
-    const leaderboardAfterSnapshot = sortedAfterRaw.map(({ player, nextScore }) => ({
+    const leaderboardAfterSnapshot = sortedAfterRaw.slice(0, RESULTS_LEADERBOARD_LIMIT).map(({ player, nextScore }) => ({
       id: player.id,
       name: player.name || "",
       emoji: player.emoji || "",
@@ -1535,7 +1725,25 @@ async function calculateResultsForCurrentQuestion(room, { source = "auto", nextS
       lastQuestionCorrect: correctByPlayer[player.id] ?? null,
     }));
 
-    await setDoc(
+    // Emergency skip appears only after 3 seconds. If this calculation has taken
+    // unusually long, verify that the presenter did not skip it or move onward
+    // before committing any player-score or room updates.
+    if (getNow() - calculationStartedAtMs >= 2500) {
+      const latestRoomSnap = await getDoc(roomRef);
+      const latestRoom = latestRoomSnap.exists() ? latestRoomSnap.data() : {};
+      const latestQuestionId = latestRoom?.currentQuestion?.questionId || latestRoom?.currentQuestion?.id;
+      const wasEmergencySkipped =
+        !!latestRoom?.skippedQuestionIds?.[questionId] ||
+        (latestRoom?.calculationStatus === "skipped" && isSameId(latestRoom?.processedQuestionId, questionId));
+      const presenterMovedOn = !isSameId(latestQuestionId, questionId);
+
+      if (wasEmergencySkipped || presenterMovedOn) {
+        console.warn("Late result calculation cancelled", { questionId, wasEmergencySkipped, presenterMovedOn });
+        return { skipped: true, cancelled: true };
+      }
+    }
+
+    resultsBatch.set(
       roomRef,
       {
         processedQuestionId: questionId,
@@ -1552,6 +1760,7 @@ async function calculateResultsForCurrentQuestion(room, { source = "auto", nextS
             bonusByPlayer,
             jokerByPlayer,
             correctByPlayer,
+            answeredByPlayer,
             rankMovementByPlayer,
             calculatedAtMs: getNow(),
           },
@@ -1569,6 +1778,7 @@ async function calculateResultsForCurrentQuestion(room, { source = "auto", nextS
           leaderboardAfter: leaderboardAfterSnapshot,
           bonusByPlayer,
           correctByPlayer,
+          answeredByPlayer,
           rankMovementByPlayer,
           calculatedAtMs: getNow(),
         },
@@ -1581,6 +1791,9 @@ async function calculateResultsForCurrentQuestion(room, { source = "auto", nextS
       },
       { merge: true }
     );
+    await resultsBatch.commit();
+    if (isTestMode) console.timeLog(`[calc] ${questionId}`, `atomic results batch (${playerUpdates.length} players)`);
+    console.log("Player scores and result snapshot updated atomically", { questionId, players: playerUpdates.length });
     if (isTestMode) console.timeEnd(`[calc] ${questionId}`);
     console.log("Question marked as calculated", { questionId });
     return { skipped: false };
@@ -1602,6 +1815,20 @@ async function calculateResultsForCurrentQuestion(room, { source = "auto", nextS
   }
 }
 
+async function showResultsFast(room) {
+  const questionId = room?.currentQuestion?.questionId || room?.currentQuestion?.id;
+  if (!questionId || isSameId(room?.processedQuestionId, questionId)) {
+    await showResults();
+    return;
+  }
+
+  await calculateResultsForCurrentQuestion(room, {
+    source: "show-results",
+    nextStage: null,
+    publishResultsStage: true,
+  });
+}
+
 // Called by admin when display page is not open and scores are stuck.
 // Reads the current answers and players directly from Firestore and processes them.
 async function forceProcessResults(room) {
@@ -1610,9 +1837,22 @@ async function forceProcessResults(room) {
 
 // Emergency bypass: marks the current question as processed WITHOUT touching any player scores.
 // Used when score calculation is stuck and the admin needs to unblock the competition.
-async function skipQuestionCalculation(room, answersCount = 0) {
+async function skipQuestionCalculation(room, answersCount = 0, { source = "admin-control" } = {}) {
   const questionId = room?.currentQuestion?.questionId || room?.currentQuestion?.id;
   if (!questionId) return;
+  const skippedAtMs = getNow();
+  const skipReport = {
+    questionId,
+    questionNumber: Number(room?.currentQuestionIndex ?? -1) + 1,
+    questionText: getQuestionDisplayText(room?.currentQuestion) || "سؤال بلا عنوان",
+    answersCount: Number(answersCount || 0),
+    skippedAtMs,
+    source,
+    scoreChange: 0,
+    standingsChanged: false,
+    answersPreserved: true,
+    nextQuestionUnlocked: true,
+  };
 
   await setDoc(
     doc(db, "rooms", ROOM_ID),
@@ -1625,6 +1865,15 @@ async function skipQuestionCalculation(room, answersCount = 0) {
       processingStartedAtMs: null,
       resultsError: null,
       calculationStatus: "skipped",
+      collectingBonusByPlayer: {},
+      collectingBonusJokerByPlayer: {},
+      collectingBonusPlayerId: null,
+      collectingBonusPoints: 0,
+      rankMovementByPlayer: {},
+      collectingAnswerCorrectByPlayer: {},
+      resultsAnimationPhase: "done",
+      resultsDisplaySnapshot: null,
+      lastSkipReport: skipReport,
       [`skippedQuestionIds.${questionId}`]: true,
       questionResultsById: {
         [questionId]: {
@@ -1633,13 +1882,19 @@ async function skipQuestionCalculation(room, answersCount = 0) {
           calculationMode: "skipped",
           answersCount,
           correctCount: null,
-          calculatedAtMs: getNow(),
+          skippedAtMs,
+          calculatedAtMs: skippedAtMs,
+          scoreChange: 0,
+          standingsChanged: false,
+          answersPreserved: true,
+          nextQuestionUnlocked: true,
         },
       },
       updatedAt: serverTimestamp(),
     },
     { merge: true }
   );
+  return skipReport;
 }
 
 /* TestMode helpers */
@@ -1654,14 +1909,17 @@ async function updateTestMode(updates) {
 
 async function createFakePlayers(count = 5) {
   const batch = writeBatch(db);
-  const names = ["اختبار١", "اختبار٢", "اختبار٣", "اختبار٤", "اختبار٥",
-                  "اختبار٦", "اختبار٧", "اختبار٨", "اختبار٩", "اختبار١٠"];
-  for (let i = 0; i < Math.min(count, 10); i++) {
+  const emojis = ["🙂", "😎", "⭐", "🎯", "⚡", "🏆", "🔥", "💡", "🎲", "🚀"];
+  for (let i = 0; i < Math.max(1, Math.min(count, 60)); i++) {
     const fakeId = `fake_${Date.now()}_${i}`;
     const playerRef = doc(db, "rooms", ROOM_ID, "players", fakeId);
+    const number = i + 1;
     batch.set(playerRef, {
       id: fakeId,
-      name: names[i] || `اختبار${i + 1}`,
+      name: `اختبار ${number}`,
+      fullName: `متسابق وهمي ${number}`,
+      phone: `050000${String(number).padStart(4, "0")}`,
+      emoji: emojis[i % emojis.length],
       score: 0,
       isFake: true,
       source: "testMode",
@@ -1669,6 +1927,19 @@ async function createFakePlayers(count = 5) {
     });
   }
   await batch.commit();
+}
+
+async function deleteFakeAnswersForQuestion(questionId) {
+  if (!questionId) return 0;
+  const answersSnap = await getDocs(
+    query(collection(db, "rooms", ROOM_ID, "answers"), where("questionId", "==", questionId))
+  );
+  const fakeAnswers = answersSnap.docs.filter((item) => item.data()?.isFake || item.data()?.playerIsFake);
+  if (fakeAnswers.length === 0) return 0;
+  const batch = writeBatch(db);
+  fakeAnswers.forEach((item) => batch.delete(item.ref));
+  await batch.commit();
+  return fakeAnswers.length;
 }
 
 async function deleteFakePlayers(players) {
@@ -1911,36 +2182,6 @@ function AutoEndQuestionOnTimer({ room }) {
       endedRef.current = null;
     }
   }, [room?.stage]);
-
-  return null;
-}
-
-// Pre-calculates results during "reveal" stage so that when admin clicks
-// "إظهار النتائج", snapshot is already written and stage change is instant.
-// Waits for revealUndoUntilMs to expire before calculating (undo safety).
-// Mount ONLY in admin/display (alwaysOnAutomations) — never in player views.
-function AutoPreCalculateResults({ room }) {
-  const now = useNow(500);
-  const doneRef = useRef(null);
-
-  useEffect(() => {
-    if (room?.stage !== "reveal") { doneRef.current = null; return; }
-    const questionId = room?.currentQuestion?.questionId || room?.currentQuestion?.id;
-    if (!questionId) return;
-    if (isSameId(room?.processedQuestionId, questionId)) return; // already done
-    if (doneRef.current === questionId) return; // already triggered
-
-    // Wait until undo window closes (revealUndoUntilMs) before calculating.
-    // This prevents calculating scores if admin uses "تراجع" to reopen the question.
-    const undoUntil = Number(room?.revealUndoUntilMs || 0);
-    if (undoUntil > 0 && now < undoUntil + 200) return;
-
-    doneRef.current = questionId;
-    // nextStage: null → writes processedQuestionId + snapshot WITHOUT changing stage.
-    // Stage will be changed by showResultsWithCalc() when admin clicks the button.
-    calculateResultsForCurrentQuestion(room, { source: "pre-reveal", nextStage: null })
-      .catch((err) => console.error("AutoPreCalculateResults failed:", err));
-  }, [room, now]);
 
   return null;
 }
@@ -2193,21 +2434,28 @@ function Leaderboard({
   showRankMovement = true,
   resultLabel = "",
   answerCorrectByPlayer = {},
+  answeredPlayerIds = null,
   freezeLayout = false,
 }) {
   const visiblePlayers = players;
+  const hasAnsweredPlayerFilter = answeredPlayerIds && typeof answeredPlayerIds === "object";
 
   function renderFlashBadges(player) {
     const hasBonusEntry = Object.prototype.hasOwnProperty.call(bonusPointsByPlayer || {}, player.id);
+    const hasAnswerResultEntry = Object.prototype.hasOwnProperty.call(answerCorrectByPlayer || {}, player.id);
+    const hasAnsweredCurrentQuestion =
+      hasAnsweredPlayerFilter
+        ? Object.prototype.hasOwnProperty.call(answeredPlayerIds, player.id)
+        : hasAnswerResultEntry;
     const isSameQuestion =
       currentQuestionId &&
       player.lastQuestionId != null &&
       String(player.lastQuestionId) === String(currentQuestionId);
     const savedLastQuestionPoints =
-      isSameQuestion
+      isSameQuestion && hasAnsweredCurrentQuestion
         ? Number(player.lastQuestionPoints || 0)
         : 0;
-    const delta = hasBonusEntry
+    const delta = hasBonusEntry && hasAnsweredCurrentQuestion
       ? Number(bonusPointsByPlayer?.[player.id] || 0)
       : savedLastQuestionPoints;
     const movement = showRankMovement ? Number(rankMovementByPlayer?.[player.id] || 0) : 0;
@@ -2254,16 +2502,21 @@ function Leaderboard({
                 player.jokerQuestionId === currentQuestionId;
               const hasCurrentAnswerResult =
                 !!currentQuestionId &&
-                player.lastQuestionId === currentQuestionId &&
+                String(player.lastQuestionId) === String(currentQuestionId) &&
                 typeof player.lastQuestionCorrect === "boolean";
+              const hasAnsweredCurrentQuestionForTone = hasAnsweredPlayerFilter
+                ? Object.prototype.hasOwnProperty.call(answeredPlayerIds, player.id)
+                : hasCurrentAnswerResult;
               const currentAnswerCorrect =
-                typeof answerCorrectByPlayer?.[player.id] === "boolean"
+                hasAnsweredCurrentQuestionForTone && typeof answerCorrectByPlayer?.[player.id] === "boolean"
                   ? answerCorrectByPlayer[player.id]
                   : hasCurrentAnswerResult
                     ? player.lastQuestionCorrect
                     : null;
               const scoreToneClass =
-                currentAnswerCorrect === true
+                currentQuestionId && !hasAnsweredCurrentQuestionForTone
+                  ? " score-no-answer"
+                  : currentAnswerCorrect === true
                   ? " score-correct"
                   : currentAnswerCorrect === false
                     ? " score-wrong"
@@ -2610,7 +2863,7 @@ function LiveAnswerStats({ question, answers, showCorrect = false }) {
 
 
 
-function InstructionsPage({ isAdmin = false, room = null, players = [], onOpenRegistration = null }) {
+function InstructionsPage({ isAdmin = false, room = null }) {
   const showInstructionVideoSlot = isAdmin && !!room?.displayVideoSlotEnabled;
 
   return (
@@ -2631,66 +2884,53 @@ function InstructionsPage({ isAdmin = false, room = null, players = [], onOpenRe
           </div>
         </div>
 
-        <div className="instructions-board" aria-label="طريقة المسابقة">
-          <div className="instruction-mini-card speed">
-            <span>⚡</span>
-            <strong>السؤال يوصلك على جوالك</strong>
-            <p>يرسله المقدم، وكلما جاوبت أسرع أخذت نقاطًا أكثر.</p>
-            <div className="score-rule-visual" aria-label="تأثير الإجابة على النقاط">
-              <div className="score-rule-pill up">
-                <b>↑</b>
-                <span>الصحيح يرفع نقاطك</span>
-              </div>
-              <div className="score-rule-pill safe">
-                <b>0</b>
-                <span>الخطأ لا ينقصك</span>
-              </div>
+        <div className="instructions-board instructions-board-v2" aria-label="طريقة المسابقة">
+          <section className="instruction-vote-card">
+            <div className="instruction-card-icon">🗳️</div>
+            <div className="instruction-card-copy">
+              <small>بعض الجولات تبدأ بتصويت</small>
+              <strong>اختر التصنيف الذي تريد سؤاله</strong>
+              <p>يظهر تصنيفان على جوالك. صوّت مرة واحدة، والتصنيف الأعلى تصويتًا يحدد السؤال الذي سيظهر للجميع.</p>
             </div>
+            <div className="instruction-vote-example" aria-label="مثال على تصويت التصنيفات">
+              <span>تاريخ</span>
+              <b>أو</b>
+              <span>رياضة</span>
+            </div>
+          </section>
+
+          <div className="instruction-flow-grid">
+            <section className="instruction-flow-card question-flow">
+              <span className="instruction-step-number">1</span>
+              <div><strong>انتظر ظهور السؤال</strong><p>بعد التصويت أو مباشرة في الجولات العادية، يصل السؤال إلى جوالك.</p></div>
+            </section>
+            <section className="instruction-flow-card answer-flow">
+              <span className="instruction-step-number">2</span>
+              <div><strong>جاوب بسرعة ودقة</strong><p>الإجابة الصحيحة الأسرع تحصل على نقاط أكثر، والخطأ العادي لا ينقص نقاطك.</p></div>
+            </section>
+            <section className="instruction-flow-card result-flow">
+              <span className="instruction-step-number">3</span>
+              <div><strong>تابع نتيجتك</strong><p>بعد كل سؤال تظهر نقاطك وترتيبك مباشرة.</p></div>
+            </section>
           </div>
 
-          <div className="instruction-joker-card">
+          <section className="instruction-joker-card instruction-joker-card-v2">
             <div className="joker-card-head">
               <span>{"\u{1F0CF}"}</span>
-              <div>
-                <strong>لك جوكر واحد طول المسابقة</strong>
-                <p>استخدمه في الوقت المناسب.</p>
-              </div>
+              <div><strong>لك جوكر واحد طوال المسابقة</strong><p>فعّله في الجولة التي تثق بإجابتها.</p></div>
             </div>
             <div className="joker-focus-card" aria-label="شرح الجوكر">
-              <div className="joker-use-note">
-                <span>لو استخدمته</span>
-              </div>
               <div className="joker-multiplier-pair">
-                <div className="joker-multiplier-option before">
-                  <small>قبل ما تشوف السؤال</small>
-                  <b>x3</b>
-                </div>
-                <div className="joker-multiplier-option after">
-                  <small>بعد ما تشوف السؤال</small>
-                  <b>x2</b>
-                </div>
+                <div className="joker-multiplier-option before"><small>قبل ظهور السؤال</small><b>x3</b></div>
+                <div className="joker-multiplier-option after"><small>بعد ظهور السؤال</small><b>x2</b></div>
               </div>
-              <div className="joker-result-note">
-                <span className="negative">↘ الخطأ يخصم قيمة السؤال</span>
-              </div>
+              <div className="joker-result-note"><span className="negative">إذا أخطأت بالجوكر تُخصم قيمة السؤال</span></div>
             </div>
-          </div>
-
-          <div className="instruction-mini-card results">
-            <span>🏆</span>
-            <strong>النتائج بعد كل جواب</strong>
-            <p>تعرف نقاطك وترتيبك مباشرة.</p>
-          </div>
+          </section>
         </div>
       </div>
 
-      {isAdmin ? (
-        <div className="instructions-admin-actions">
-          <button type="button" className="secondary-action" onClick={launchInstructionsClarityPoll}>تصويت</button>
-          {onOpenRegistration && <button type="button" onClick={onOpenRegistration}>فتح التسجيل للمتسابقين</button>}
-          <HealthCheckResultsPanel room={room} players={players} />
-        </div>
-      ) : (
+      {isAdmin ? null : (
         <div className="instructions-waiting">بانتظار المقدم للخطوة التالية</div>
       )}
     </div>
@@ -2714,6 +2954,54 @@ function AnsweredCountBadge({ answersCount, playersCount }) {
       <span>الإجابات</span>
       <strong><AnimatedNumber value={answersCount} duration={650} /></strong>
       <small>من {playersCount}</small>
+    </div>
+  );
+}
+
+function CategoryVoteScreen({ room, players = [], player = null, onVote = null, displayMode = false }) {
+  const vote = room?.categoryVote || {};
+  const options = Array.isArray(vote.options) ? vote.options : [];
+  const counts = getCategoryVoteCounts(vote);
+  const playerVote = player?.id ? vote.votes?.[player.id]?.label : null;
+  const totalVotes = Object.keys(vote.votes || {}).length;
+  const winner = getCategoryVoteWinner(vote);
+  const playersCount = Math.max(players.length, totalVotes, 1);
+
+  return (
+    <div className={displayMode ? "display-panel category-vote-screen display-category-vote" : "category-vote-screen card"}>
+      <div className="category-vote-head">
+        <span>تصويت التصنيف</span>
+        <h2>اختاروا تصنيف السؤال القادم</h2>
+        <p>{displayMode ? "التصنيف الأعلى تصويتًا سيحدد السؤال القادم." : "صوّت مرة واحدة، ثم انتظر نتيجة التصويت على الشاشة."}</p>
+      </div>
+
+      <div className="category-vote-options">
+        {options.map((option) => {
+          const count = counts[option.label] || 0;
+          const percent = Math.round((count / playersCount) * 100);
+          const selected = playerVote === option.label;
+          const leading = winner === option.label;
+          return (
+            <button
+              type="button"
+              className={`category-vote-option${selected ? " selected" : ""}${leading ? " leading" : ""}`}
+              key={option.label}
+              onClick={() => onVote?.(option.label)}
+              disabled={!onVote || !!playerVote}
+            >
+              <strong>{option.label}</strong>
+              <span>{count} صوت</span>
+              <i style={{ "--vote-ratio": `${percent}%` }} />
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="category-vote-footer">
+        <strong>{totalVotes}</strong>
+        <span>إجمالي الأصوات</span>
+        {playerVote && <b>تم تسجيل صوتك: {playerVote}</b>}
+      </div>
     </div>
   );
 }
@@ -2929,12 +3217,6 @@ function QuestionScreen({
     !currentPlayer?.practiceJokerQuestionId ||
     currentPlayer.practiceJokerQuestionId === room?.currentQuestion?.questionId ||
     practiceQuestionIndex === 2;
-  const realJokerAvailableForThisQuestion =
-    !question?.isPractice &&
-    currentPlayer &&
-    (!currentPlayer.jokerUsed ||
-      (currentPlayer.jokerQuestionId === room?.currentQuestion?.questionId &&
-        selectedIndex === null));
   const canShowQuestionJoker =
     !isAdmin &&
     currentPlayer &&
@@ -2942,7 +3224,7 @@ function QuestionScreen({
     shouldShowPracticeJoker &&
     (question?.isPractice
       ? canUsePracticeJokerInQuestion
-      : realJokerAvailableForThisQuestion);
+      : true);
 
   if (!question) return null;
 
@@ -3166,10 +3448,15 @@ function QuestionScreen({
   );
 }
 
-function ResultsDisplay({ room, messages }) {
+function ResultsDisplay({ room, messages, answers = [] }) {
   const currentQuestionId = room?.currentQuestion?.questionId || room?.currentQuestion?.id || null;
   const questionNumber = (room?.currentQuestionIndex ?? 0) + 1;
   const videoEnabled = !!room?.displayVideoSlotEnabled;
+  const answeredPlayerIds = Object.fromEntries(
+    (answers || [])
+      .filter((answer) => isValidPlayerAnswerForQuestion(answer, currentQuestionId))
+      .map((answer) => [answer.playerId, true])
+  );
 
   const snapshot = room?.resultsDisplaySnapshot;
 
@@ -3266,7 +3553,36 @@ function ResultsDisplay({ room, messages }) {
   const showBonus = phase !== "before";
   const displayPlayers      = showAfter ? snapshot.leaderboardAfter  : snapshot.leaderboardBefore;
   const displayBonus        = showBonus ? (snapshot.bonusByPlayer    || {}) : {};
-  const displayCorrect      = showAfter ? (snapshot.correctByPlayer  || {}) : {};
+  const displayCorrect      = showBonus ? (snapshot.correctByPlayer  || {}) : {};
+  const hasLiveAnsweredIds = Object.keys(answeredPlayerIds).length > 0;
+  const displayAnswered =
+    hasLiveAnsweredIds
+      ? answeredPlayerIds
+      : snapshot.answeredByPlayer && typeof snapshot.answeredByPlayer === "object"
+      ? snapshot.answeredByPlayer
+      : snapshot.correctByPlayer && typeof snapshot.correctByPlayer === "object"
+        ? Object.fromEntries(Object.keys(snapshot.correctByPlayer).map((playerId) => [playerId, true]))
+        : {};
+  const sanitizedDisplayBonus = Object.fromEntries(
+    Object.entries(displayBonus).filter(([playerId]) =>
+      Object.prototype.hasOwnProperty.call(displayAnswered, playerId)
+    )
+  );
+  const sanitizedDisplayCorrect = Object.fromEntries(
+    Object.entries(displayCorrect).filter(([playerId]) =>
+      Object.prototype.hasOwnProperty.call(displayAnswered, playerId)
+    )
+  );
+  const sanitizedDisplayPlayers = displayPlayers.slice(0, RESULTS_LEADERBOARD_LIMIT).map((player) => {
+    const answered = Object.prototype.hasOwnProperty.call(displayAnswered, player.id);
+    if (answered) return player;
+    return {
+      ...player,
+      lastQuestionId: currentQuestionId || player.lastQuestionId,
+      lastQuestionPoints: 0,
+      lastQuestionCorrect: null,
+    };
+  });
   const displayRankMovement = showAfter ? (snapshot.rankMovementByPlayer || {}) : {};
   const freezeLayout        = phase !== "move";
 
@@ -3274,15 +3590,16 @@ function ResultsDisplay({ room, messages }) {
     <div className="results-display-grid">
       <div className="results-main-area">
         <Leaderboard
-          players={displayPlayers}
+          players={sanitizedDisplayPlayers}
           compact
           isCollecting={false}
-          bonusPointsByPlayer={displayBonus}
+          bonusPointsByPlayer={sanitizedDisplayBonus}
           rankMovementByPlayer={displayRankMovement}
           currentQuestionId={currentQuestionId}
           showRankMovement={(room?.currentQuestionIndex ?? 0) > 0}
-          resultLabel={`نتائج السؤال ${questionNumber}`}
-          answerCorrectByPlayer={displayCorrect}
+          resultLabel={`نتائج السؤال ${questionNumber} · أفضل ${RESULTS_LEADERBOARD_LIMIT}`}
+          answerCorrectByPlayer={sanitizedDisplayCorrect}
+          answeredPlayerIds={displayAnswered}
           freezeLayout={freezeLayout}
         />
       </div>
@@ -3291,6 +3608,95 @@ function ResultsDisplay({ room, messages }) {
       </div>
     </div>
   );
+}
+
+function buildPreviewResultsSnapshot({ questionList = [], questionIndex = -1, players = [], allAnswers = [] }) {
+  const question = questionList[questionIndex];
+  const questionId = question?.questionId || question?.id || null;
+  if (!questionId || questionIndex < 0) return null;
+
+  const questionIdsUntilCurrent = new Set(
+    questionList
+      .slice(0, questionIndex + 1)
+      .map((item) => item?.questionId || item?.id)
+      .filter(Boolean)
+      .map(String)
+  );
+  const questionIdsBeforeCurrent = new Set(
+    questionList
+      .slice(0, questionIndex)
+      .map((item) => item?.questionId || item?.id)
+      .filter(Boolean)
+      .map(String)
+  );
+
+  const validAnswers = (allAnswers || []).filter((answer) => answer?.playerId && answer?.questionId);
+  const currentAnswers = validAnswers.filter((answer) => isValidPlayerAnswerForQuestion(answer, questionId));
+  const answersBefore = validAnswers.filter((answer) => questionIdsBeforeCurrent.has(String(answer.questionId)));
+  const answersUntilCurrent = validAnswers.filter((answer) => questionIdsUntilCurrent.has(String(answer.questionId)));
+
+  const scoreByPlayerBefore = {};
+  const scoreByPlayerAfter = {};
+  answersBefore.forEach((answer) => {
+    scoreByPlayerBefore[answer.playerId] = Number(scoreByPlayerBefore[answer.playerId] || 0) + Number(answer.points || 0);
+  });
+  answersUntilCurrent.forEach((answer) => {
+    scoreByPlayerAfter[answer.playerId] = Number(scoreByPlayerAfter[answer.playerId] || 0) + Number(answer.points || 0);
+  });
+
+  const bonusByPlayer = {};
+  const correctByPlayer = {};
+  const answeredByPlayer = {};
+  currentAnswers.forEach((answer) => {
+    answeredByPlayer[answer.playerId] = true;
+    bonusByPlayer[answer.playerId] = Number(answer.points || 0);
+    correctByPlayer[answer.playerId] = !!answer.isCorrect;
+  });
+
+  const snapshotPlayer = (player, score, currentAnswer = null) => ({
+    id: player.id,
+    name: player.name || "",
+    emoji: player.emoji || "",
+    score: Number(score || 0),
+    jokerUsed: player.jokerUsed || false,
+    jokerQuestionId: player.jokerQuestionId || null,
+    jokerMultiplier: player.jokerMultiplier || null,
+    lastQuestionId: currentAnswer ? questionId : null,
+    lastQuestionPoints: currentAnswer ? Number(currentAnswer.points || 0) : 0,
+    lastQuestionCorrect: currentAnswer ? !!currentAnswer.isCorrect : null,
+  });
+
+  const sortedBefore = [...players]
+    .filter((player) => !isVisitorRecord(player))
+    .map((player) => snapshotPlayer(player, scoreByPlayerBefore[player.id] || 0))
+    .sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
+
+  const currentAnswerByPlayer = new Map(currentAnswers.map((answer) => [answer.playerId, answer]));
+  const sortedAfter = [...players]
+    .filter((player) => !isVisitorRecord(player))
+    .map((player) => snapshotPlayer(player, scoreByPlayerAfter[player.id] || 0, currentAnswerByPlayer.get(player.id) || null))
+    .sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
+
+  const beforeRankByPlayer = {};
+  sortedBefore.forEach((player, index) => {
+    beforeRankByPlayer[player.id] = index + 1;
+  });
+
+  const rankMovementByPlayer = {};
+  sortedAfter.forEach((player, index) => {
+    rankMovementByPlayer[player.id] = (beforeRankByPlayer[player.id] || index + 1) - (index + 1);
+  });
+
+  return {
+    questionId,
+    leaderboardBefore: sortedBefore.slice(0, RESULTS_LEADERBOARD_LIMIT),
+    leaderboardAfter: sortedAfter.slice(0, RESULTS_LEADERBOARD_LIMIT),
+    bonusByPlayer,
+    correctByPlayer,
+    answeredByPlayer,
+    rankMovementByPlayer,
+    calculatedAtMs: getNow(),
+  };
 }
 
 function FinalCountdownDisplay({ room }) {
@@ -3584,11 +3990,16 @@ function JokerControl({ player, stage, room = null, compact = false, locked = fa
 
 /* Settings */
 
+function createEmptyVoteChoice() {
+  return { category: "", text: "", type: "multiple_choice", options: ["", ""], correctIndex: 0 };
+}
+
 function QuestionSettings({ questions, room = null, questionPackages = [], allQuestions = [], embedded = false }) {
   const [editingId, setEditingId] = useState(null);
   const [showForm, setShowForm] = useState(false);
   const [type, setType] = useState("multiple_choice");
   const [text, setText] = useState("");
+  const [category, setCategory] = useState(DEFAULT_QUESTION_CATEGORY);
   const [mediaUrl, setMediaUrl] = useState("");
   const [imageUrl, setImageUrl] = useState("");
   const [optionImageUrls, setOptionImageUrls] = useState(["", ""]);
@@ -3600,6 +4011,8 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
   const [seconds, setSeconds] = useState(20);
   const [answerRevealDelaySeconds, setAnswerRevealDelaySeconds] = useState(3);
   const [isPractice, setIsPractice] = useState(false);
+  const [voteEnabled, setVoteEnabled] = useState(false);
+  const [voteChoices, setVoteChoices] = useState([createEmptyVoteChoice(), createEmptyVoteChoice()]);
   const [saving, setSaving] = useState(false);
   const [bulkField, setBulkField] = useState("maxPoints");
   const [bulkValue, setBulkValue] = useState("");
@@ -3635,6 +4048,9 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
   ];
   const mainQuestionRows = questions.filter((question) => !question.isPractice);
   const practiceQuestionRows = questions.filter((question) => question.isPractice);
+  // Kept only so older category-group markup remains unreachable while old saved data migrates safely.
+  const categoryVotingEnabled = false;
+  const categoryGroups = [];
   const activePackageItem = availableQuestionPackages.find((item) => item.id === activePackageId) || {
     id: activePackageId,
     name: activePackageName,
@@ -3645,6 +4061,7 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
     setShowForm(false);
     setType("multiple_choice");
     setText("");
+    setCategory(DEFAULT_QUESTION_CATEGORY);
     setMediaUrl("");
     setImageUrl("");
     setOptionImageUrls(["", ""]);
@@ -3656,6 +4073,8 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
     setSeconds(20);
     setAnswerRevealDelaySeconds(3);
     setIsPractice(false);
+    setVoteEnabled(false);
+    setVoteChoices([createEmptyVoteChoice(), createEmptyVoteChoice()]);
   }
 
   function startCreate(practice = false) {
@@ -3669,6 +4088,7 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
     setShowForm(true);
     setType(question.type || "multiple_choice");
     setText(question.text || "");
+    setCategory(getQuestionCategory(question));
     setMediaUrl(getQuestionMediaUrl(question));
     setImageUrl(getQuestionImageUrl(question));
     setOptions(question.options?.length ? question.options.map(getOptionText) : ["", ""]);
@@ -3680,6 +4100,38 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
     setSeconds(Number(question.seconds || 20));
     setAnswerRevealDelaySeconds(Number(question.answerRevealDelaySeconds ?? question.revealDelaySeconds ?? 3));
     setIsPractice(!!question.isPractice);
+    setVoteEnabled(isVotingQuestion(question));
+    setVoteChoices(isVotingQuestion(question)
+      ? question.voteChoices.map((choice) => ({
+          category: choice.category || "",
+          text: choice.text || "",
+          type: "multiple_choice",
+          options: choice.options?.length ? choice.options.map(getOptionText) : ["", ""],
+          correctIndex: Number(choice.correctIndex || 0),
+        }))
+      : [createEmptyVoteChoice(), createEmptyVoteChoice()]);
+  }
+
+  function updateVoteChoice(choiceIndex, updates) {
+    setVoteChoices((current) => current.map((choice, index) => index === choiceIndex ? { ...choice, ...updates } : choice));
+  }
+
+  function updateVoteChoiceOption(choiceIndex, optionIndex, value) {
+    const nextOptions = [...voteChoices[choiceIndex].options];
+    nextOptions[optionIndex] = value;
+    updateVoteChoice(choiceIndex, { options: nextOptions });
+  }
+
+  function addVoteChoiceOption(choiceIndex) {
+    updateVoteChoice(choiceIndex, { options: [...voteChoices[choiceIndex].options, ""] });
+  }
+
+  function removeVoteChoiceOption(choiceIndex, optionIndex) {
+    const choice = voteChoices[choiceIndex];
+    if (choice.options.length <= 2) return;
+    const nextOptions = choice.options.filter((_, index) => index !== optionIndex);
+    const nextCorrectIndex = choice.correctIndex === optionIndex ? 0 : choice.correctIndex > optionIndex ? choice.correctIndex - 1 : choice.correctIndex;
+    updateVoteChoice(choiceIndex, { options: nextOptions, correctIndex: nextCorrectIndex });
   }
 
   function updateOption(index, value) {
@@ -3749,27 +4201,53 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
 
   async function saveQuestion() {
     const cleanText = text.trim();
+    const cleanCategory = category.trim() || DEFAULT_QUESTION_CATEGORY;
     const cleanMediaUrl = mediaUrl.trim();
     const cleanImageUrl = imageUrl.trim();
     const cleanOptionImageUrls = optionImageUrls.map((url) => url.trim());
     const cleanOptions = options.map((o, index) => ({ text: o.trim(), imageUrl: cleanOptionImageUrls[index] || "" })).filter((item) => item.text || item.imageUrl);
 
-    if (!cleanText || cleanOptions.length < 2) {
+    const cleanVoteChoices = voteChoices.map((choice) => ({
+      category: choice.category.trim(),
+      text: choice.text.trim(),
+      type: "multiple_choice",
+      options: choice.options.map((option) => option.trim()).filter(Boolean),
+      correctIndex: Number(choice.correctIndex),
+    }));
+
+    if (voteEnabled && voteChoices.some((choice, index) =>
+      !cleanVoteChoices[index].category ||
+      !cleanVoteChoices[index].text ||
+      choice.options.length < 2 ||
+      choice.options.some((option) => !option.trim()) ||
+      choice.correctIndex < 0 ||
+      choice.correctIndex >= choice.options.length
+    )) {
+      alert("أكمل التصنيفين، واكتب سؤالًا وخيارين على الأقل وحدد الإجابة الصحيحة لكل تصنيف.");
+      return;
+    }
+
+    if (voteEnabled && cleanVoteChoices[0].category === cleanVoteChoices[1].category) {
+      alert("اكتب اسمين مختلفين للتصنيفين.");
+      return;
+    }
+
+    if (!voteEnabled && (!cleanText || cleanOptions.length < 2)) {
       alert("اكتب السؤال وخيارين على الأقل.");
       return;
     }
 
-    if (type === "image" && !cleanImageUrl && !cleanOptions.some((item) => item.imageUrl)) {
+    if (!voteEnabled && type === "image" && !cleanImageUrl && !cleanOptions.some((item) => item.imageUrl)) {
       alert("ضع صورة للسؤال أو صورة لواحد من الخيارات على الأقل.");
       return;
     }
 
-    if ((type === "audio" || type === "video") && !cleanMediaUrl) {
+    if (!voteEnabled && (type === "audio" || type === "video") && !cleanMediaUrl) {
       alert(type === "video" ? "ضع رابط مقطع الفيديو." : "ضع رابط المقطع الصوتي.");
       return;
     }
 
-    if (correctIndex < 0 || correctIndex >= cleanOptions.length) {
+    if (!voteEnabled && (correctIndex < 0 || correctIndex >= cleanOptions.length)) {
       alert("اختر الإجابة الصحيحة.");
       return;
     }
@@ -3777,20 +4255,23 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
     setSaving(true);
 
     const payload = {
-      type,
-      text: cleanText,
+      type: voteEnabled ? "multiple_choice" : type,
+      text: voteEnabled ? cleanVoteChoices.map((choice) => choice.category).join(" أو ") : cleanText,
+      category: cleanCategory,
       mediaUrl: type === "audio" || type === "video" ? cleanMediaUrl : "",
       audioUrl: type === "audio" ? cleanMediaUrl : "",
       videoUrl: type === "video" ? cleanMediaUrl : "",
       imageUrl: type === "image" ? cleanImageUrl : "",
       optionImageUrls: cleanOptions.map((item) => item.imageUrl || ""),
-      options: cleanOptions.map((item) => item.text || "صورة"),
-      correctIndex: Number(correctIndex),
+      options: voteEnabled ? cleanVoteChoices[0].options : cleanOptions.map((item) => item.text || "صورة"),
+      correctIndex: voteEnabled ? cleanVoteChoices[0].correctIndex : Number(correctIndex),
       maxPoints: Number(maxPoints),
       minPoints: Number(minPoints),
       seconds: Number(seconds),
       answerRevealDelaySeconds: Number(answerRevealDelaySeconds),
       isPractice: !!isPractice,
+      voteEnabled: !!voteEnabled,
+      voteChoices: voteEnabled ? cleanVoteChoices : [],
       packageId: activePackageId,
       packageName: activePackageName,
       updatedAt: serverTimestamp(),
@@ -3956,17 +4437,53 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
         <div className="modal-card question-edit-modal" onClick={(event) => event.stopPropagation()}>
           <h2>{editingId ? "تعديل السؤال" : "إضافة سؤال"}</h2>
 
-          <label>نوع السؤال</label>
-          <select value={type} onChange={(e) => handleTypeChange(e.target.value)}>
-            <option value="multiple_choice">اختيار من متعدد</option>
-            <option value="true_false">صح أو خطأ</option>
-            <option value="audio">سؤال صوتي</option>
-            <option value="video">سؤال فيديو</option>
-            <option value="image">سؤال صورة</option>
-          </select>
+          <div className="question-vote-type-picker">
+            <strong>طريقة تقديم هذه الجولة</strong>
+            <div className="questions-mode-segmented">
+              <button type="button" className={`questions-mode-option${!voteEnabled ? " active" : ""}`} onClick={() => setVoteEnabled(false)}>سؤال عادي</button>
+              <button type="button" className={`questions-mode-option${voteEnabled ? " active" : ""}`} onClick={() => setVoteEnabled(true)}>تصويت بين تصنيفين</button>
+            </div>
+          </div>
 
-          <label>نص السؤال</label>
-          <textarea value={text} onChange={(e) => setText(e.target.value)} placeholder="اكتب السؤال هنا" />
+          {voteEnabled ? (
+            <div className="vote-choices-editor">
+              <p className="muted">اكتب تصنيفين، ثم جهّز سؤال الاختيار من متعدد الذي سيظهر إذا فاز كل تصنيف.</p>
+              {voteChoices.map((choice, choiceIndex) => (
+                <section className="vote-choice-editor" key={choiceIndex}>
+                  <h3>التصنيف {choiceIndex + 1}</h3>
+                  <label>اسم التصنيف</label>
+                  <input value={choice.category} onChange={(event) => updateVoteChoice(choiceIndex, { category: event.target.value })} placeholder={choiceIndex === 0 ? "مثال: تاريخ" : "مثال: رياضة"} />
+                  <label>سؤال هذا التصنيف</label>
+                  <textarea value={choice.text} onChange={(event) => updateVoteChoice(choiceIndex, { text: event.target.value })} placeholder="اكتب السؤال هنا" />
+                  <label>الإجابات</label>
+                  <div className="options-editor">
+                    {choice.options.map((option, optionIndex) => (
+                      <div className="option-editor-row vote-option-row" key={optionIndex}>
+                        <input value={option} onChange={(event) => updateVoteChoiceOption(choiceIndex, optionIndex, event.target.value)} placeholder={`الإجابة ${optionIndex + 1}`} />
+                        <label className="radio-label">
+                          <input type="radio" name={`vote-correct-${choiceIndex}`} checked={choice.correctIndex === optionIndex} onChange={() => updateVoteChoice(choiceIndex, { correctIndex: optionIndex })} />
+                          الصحيحة
+                        </label>
+                        {choice.options.length > 2 && <button type="button" className="danger small-button" onClick={() => removeVoteChoiceOption(choiceIndex, optionIndex)}>حذف</button>}
+                      </div>
+                    ))}
+                  </div>
+                  <button type="button" className="small-button" onClick={() => addVoteChoiceOption(choiceIndex)}>إضافة خيار آخر</button>
+                </section>
+              ))}
+            </div>
+          ) : <>
+            <label>نوع السؤال</label>
+            <select value={type} onChange={(e) => handleTypeChange(e.target.value)}>
+              <option value="multiple_choice">اختيار من متعدد</option>
+              <option value="true_false">صح أو خطأ</option>
+              <option value="audio">سؤال صوتي</option>
+              <option value="video">سؤال فيديو</option>
+              <option value="image">سؤال صورة</option>
+            </select>
+
+            <label>نص السؤال</label>
+            <textarea value={text} onChange={(e) => setText(e.target.value)} placeholder="اكتب السؤال هنا" />
 
           {(type === "audio" || type === "video") && (
             <>
@@ -4011,7 +4528,8 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
             ))}
           </div>
 
-          {type !== "true_false" && <button type="button" className="small-button" onClick={addOption}>إضافة خيار آخر</button>}
+            {type !== "true_false" && <button type="button" className="small-button" onClick={addOption}>إضافة خيار آخر</button>}
+          </>}
 
           <div className="settings-grid">
             <div><label>أعلى نقاط</label><input type="number" value={maxPoints} onChange={(e) => setMaxPoints(e.target.value)} /></div>
@@ -4121,6 +4639,58 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
 
         {questionSectionsOpen.main && (mainQuestionRows.length === 0 ? (
           <p className="muted">لم تضف أي سؤال فعلي بعد.</p>
+        ) : categoryVotingEnabled ? (
+          <div className="category-groups-view">
+            <div className="category-groups-summary">
+              <span><strong>{categoryGroups.length}</strong> تصنيف</span>
+              <span><strong>{mainQuestionRows.length}</strong> سؤال</span>
+            </div>
+            {categoryGroups.map(({ category: cat, questions: catQs }) => (
+              <div key={cat} className="category-group-card">
+                <div className="category-group-header">
+                  <strong className="category-group-name">{cat}</strong>
+                  <span className="category-group-count">{catQs.length} سؤال</span>
+                  {catQs.length < 3 && <span className="category-group-warning">⚠ أسئلة قليلة</span>}
+                  <button type="button" className="small-button" onClick={(e) => { e.stopPropagation(); startCreate(false); setCategory(cat); }}>+ إضافة</button>
+                </div>
+                <div className="category-group-questions">
+                  {catQs.map((q) => (
+                    <Fragment key={q.id}>
+                      <div
+                        className={`category-question-card${expandedQuestionId === q.id ? " expanded" : ""}`}
+                        onClick={() => setExpandedQuestionId(expandedQuestionId === q.id ? null : q.id)}
+                      >
+                        <div className="category-question-card-body">
+                          <strong className="category-question-card-text">{q.text}</strong>
+                          <div className="category-question-card-tags">
+                            <span>{getQuestionTypeLabel(q.type)}</span>
+                            <span>{q.minPoints || 100}–{q.maxPoints || 1000} نقطة</span>
+                            <span>{q.seconds || 20} ث إجابة</span>
+                          </div>
+                        </div>
+                        <div className="question-admin-card-actions">
+                          <button className="icon-action-button" title="تعديل" onClick={(e) => { e.stopPropagation(); startEdit(q); }}>✎</button>
+                          <button className="danger icon-action-button" title="حذف" onClick={(e) => { e.stopPropagation(); deleteQuestion(q.id); }}>×</button>
+                        </div>
+                      </div>
+                      {expandedQuestionId === q.id && (
+                        <div className="question-inline-details category-question-card-details">
+                          <span>نوع السؤال <b>{getQuestionTypeLabel(q.type)}</b></span>
+                          <span>النقاط <b>{q.minPoints || 100} - {q.maxPoints || 1000}</b></span>
+                          <span>وقت الإجابة <b>{q.seconds || 20} ثانية</b></span>
+                          <span>ظهور الخيارات <b>{q.answerRevealDelaySeconds ?? 3} ثانية</b></span>
+                          <span className="question-detail-wide">الإجابة الصحيحة <b>{getOptionText(q.options?.[q.correctIndex]) || "—"}</b></span>
+                          <span className="question-detail-wide">الخيارات <b>{(q.options || []).map(getOptionText).join(" | ")}</b></span>
+                          {getQuestionMediaUrl(q) && <span className="question-detail-wide">رابط الوسائط <b>{getQuestionMediaUrl(q)}</b></span>}
+                          {getQuestionImageUrl(q) && <img className="question-inline-image" src={getQuestionImageUrl(q)} alt="صورة السؤال" />}
+                        </div>
+                      )}
+                    </Fragment>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
         ) : (
           <div className="questions-table-wrap">
             <table className="questions-table">
@@ -4154,8 +4724,8 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
                         <button className="danger icon-action-button" title="حذف" aria-label="حذف السؤال" onClick={(event) => { event.stopPropagation(); deleteQuestion(q.id); }}>×</button>
                       </div>
                     </td>
-                    <td><button type="button" className="question-title-button"><strong>{q.text}</strong>{q.isPractice && <span className="question-practice-chip">سؤال تجريبي</span>}</button></td>
-                    <td>{q.isPractice ? "سؤال تجريبي" : getQuestionTypeLabel(q.type)}</td>
+                    <td><button type="button" className="question-title-button"><strong>{getQuestionDisplayText(q)}</strong>{isVotingQuestion(q) && <span className="question-vote-chip">تصويت</span>}{q.isPractice && <span className="question-practice-chip">سؤال تجريبي</span>}</button></td>
+                    <td>{q.isPractice ? "سؤال تجريبي" : isVotingQuestion(q) ? "تصويت بين تصنيفين" : getQuestionTypeLabel(q.type)}</td>
                     <td>{q.minPoints || 100} - {q.maxPoints || 1000}</td>
                     <td>{q.seconds || 20} ث</td>
                     <td>{q.answerRevealDelaySeconds ?? 3} ث</td>
@@ -4164,12 +4734,20 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
                     <tr className="question-details-row">
                       <td colSpan="7">
                         <div className="question-inline-details">
-                          <span>نوع السؤال <b>{getQuestionTypeLabel(q.type)}</b></span>
+                          <span>نوع السؤال <b>{isVotingQuestion(q) ? "تصويت بين تصنيفين" : getQuestionTypeLabel(q.type)}</b></span>
                           <span>النقاط <b>{q.minPoints || 100} - {q.maxPoints || 1000}</b></span>
                           <span>وقت الإجابة <b>{q.seconds || 20} ثانية</b></span>
                           <span>ظهور الخيارات <b>{q.answerRevealDelaySeconds ?? 3} ثانية</b></span>
-                          <span className="question-detail-wide">الإجابة الصحيحة <b>{getOptionText(q.options?.[q.correctIndex]) || "—"}</b></span>
-                          <span className="question-detail-wide">الخيارات <b>{(q.options || []).map(getOptionText).join(" | ")}</b></span>
+                          {isVotingQuestion(q) ? q.voteChoices.map((choice, choiceIndex) => (
+                            <div className="question-detail-wide vote-question-summary" key={choiceIndex}>
+                              <strong>{choice.category}</strong>
+                              <span>{choice.text}</span>
+                              <small>الإجابة الصحيحة: {getOptionText(choice.options?.[choice.correctIndex]) || "—"}</small>
+                            </div>
+                          )) : <>
+                            <span className="question-detail-wide">الإجابة الصحيحة <b>{getOptionText(q.options?.[q.correctIndex]) || "—"}</b></span>
+                            <span className="question-detail-wide">الخيارات <b>{(q.options || []).map(getOptionText).join(" | ")}</b></span>
+                          </>}
                           {getQuestionMediaUrl(q) && <span className="question-detail-wide">رابط الوسائط <b>{getQuestionMediaUrl(q)}</b></span>}
                           {getQuestionImageUrl(q) && <img className="question-inline-image" src={getQuestionImageUrl(q)} alt="صورة السؤال" />}
                           {(q.options || []).some((option, optionIndex) => getOptionImage(option, q.optionImageUrls || [], optionIndex)) && (
@@ -4204,6 +4782,9 @@ function QuestionSettings({ questions, room = null, questionPackages = [], allQu
           <button type="button" className="section-bulk-question-button practice" onClick={(event) => { event.stopPropagation(); openBulkEditor("practice"); }}>تعديل شامل</button>
         </div>
 
+        {categoryVotingEnabled && (
+          <p className="practice-vote-note">الأسئلة التجريبية تسير بالترتيب دائمًا ولا تشارك في تصويت التصنيف.</p>
+        )}
         {questionSectionsOpen.practice && (practiceQuestionRows.length === 0 ? (
           <p className="muted">لا توجد أسئلة تجريبية. فعّل خيار "سؤال تجريبي" من نموذج إضافة أو تعديل السؤال.</p>
         ) : (
@@ -4313,6 +4894,59 @@ function downloadExcelFile(filename, sheets) {
   URL.revokeObjectURL(url);
 }
 
+function BroadcastQuestionCard({ question, label, variant = "default", compact = false }) {
+  const votingRound = isVotingQuestion(question);
+  const selectedVoteCategory = question?.selectedVoteCategory || null;
+
+  return (
+    <article className={`broadcast-question-card ${variant}${votingRound ? " is-vote" : ""}`}>
+      <header className="broadcast-question-card-head">
+        <span>{label}</span>
+        <div>
+          {question ? <b>{votingRound ? "تصويت" : getQuestionTypeLabel(question.type)}</b> : <b>لا يوجد</b>}
+          {selectedVoteCategory && <em>فاز: {selectedVoteCategory}</em>}
+        </div>
+      </header>
+
+      {!question ? (
+        <p className="broadcast-empty-question">لا توجد جولة في هذا الموضع.</p>
+      ) : votingRound ? (
+        <div className="broadcast-vote-round-preview">
+          <strong>{getQuestionDisplayText(question)}</strong>
+          <div className="broadcast-vote-choice-grid">
+            {question.voteChoices.map((choice, index) => (
+              <div className={`broadcast-vote-choice category-tone-${index % 4}`} key={`${question.id || "vote"}-${index}`}>
+                <span>{choice.category}</span>
+                <b>{choice.text}</b>
+                <small>الصحيحة: {getOptionText(choice.options?.[choice.correctIndex]) || "—"}</small>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <div className="broadcast-standard-question">
+          <strong>{question.text || "سؤال بلا نص"}</strong>
+          <div className="broadcast-question-meta">
+            <span className="broadcast-category-chip">{selectedVoteCategory || getQuestionCategory(question)}</span>
+            <span>{question.seconds || 20} ثانية</span>
+          </div>
+          {!compact && question.options?.length > 0 && (
+            <div className="broadcast-answer-grid">
+              {question.options.map((option, index) => (
+                <div className={index === Number(question.correctIndex || 0) ? "correct" : ""} key={`${question.id || question.questionId || "question"}-${index}`}>
+                  <span>{String.fromCharCode(65 + index)}</span>
+                  <b>{getOptionText(option)}</b>
+                  {index === Number(question.correctIndex || 0) && <em>صحيحة</em>}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </article>
+  );
+}
+
 function AdminControl({ room, players, questions, allQuestions = [], questionPackages = [], allAnswers, messages = [], gameHistory = [], visitors = [] }) {
   const stage = room?.stage || "home";
   const adminNow = useNow(250);
@@ -4328,7 +4962,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
   const [adminAdvancing, setAdminAdvancing] = useState(false);
   const adminAdvancingRef = useRef(false);
   const [isAdminSkipping, setIsAdminSkipping] = useState(false);
-  const [adminSkipNoticeId, setAdminSkipNoticeId] = useState(null);
+  const [showAdminEmergencySkip, setShowAdminEmergencySkip] = useState(false);
   const [testModeWorking, setTestModeWorking] = useState(false);
   const [testModeMsg, setTestModeMsg] = useState(null);
   const [quickControlsOpen, setQuickControlsOpen] = useState(false);
@@ -4342,20 +4976,6 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
     questionStats: false,
     playerStats: false,
   });
-  const adminSectionLabels = {
-    live: "متابعة المسابقة",
-    players: "المتسابقون",
-    analytics: "التقارير والإحصائيات",
-    questionReports: "إحصائيات الأسئلة",
-    playerReports: "إحصائيات المتسابقين",
-    history: "سجل المسابقات",
-    questions: "إعدادات الأسئلة",
-    setup: "تهيئة",
-    displaySettings: "العرض",
-    prizes: "سحب الجوائز",
-    testMode: "وضع الاختبار",
-  };
-
   const mainQuestions = getMainQuestions(questions);
   const practiceQuestions = getPracticeQuestions(questions);
   const competitionQuestions = mainQuestions;
@@ -4366,7 +4986,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
       .filter((answer) => answer.questionId === question.id || answer.questionId === question.questionId)
       .map((answer) => {
         const player = players.find((p) => p.id === answer.playerId);
-        return { question, questionNumber: index + 1, answer, player, selectedText: getOptionText(question.options?.[answer.selectedIndex]) || "—" };
+        return { question, questionNumber: index + 1, answer, player, selectedText: getSelectedAnswerText(question, answer) };
       });
     return { question, questionNumber: index + 1, rows };
   });
@@ -4375,15 +4995,39 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
   const nextAdminQuestion = room?.practiceMode
     ? practiceQuestions[currentQuestionIndex + 1] || (currentQuestionIndex < 0 ? practiceQuestions[0] : null)
     : competitionQuestions[currentQuestionIndex + 1] || (currentQuestionIndex < 0 ? competitionQuestions[0] : null);
-  const activeVisitors = visitors.filter((visitor) => Number(visitor.seenAtMs || 0) > adminNow - 120000);
+  const previousAdminQuestion = currentQuestionIndex > 0
+    ? (room?.practiceMode ? practiceQuestions[currentQuestionIndex - 1] : competitionQuestions[currentQuestionIndex - 1])
+    : null;
   const registeredCount = players.filter((player) => !isVisitorRecord(player)).length;
+  const activeVisitors = visitors.filter((visitor) => Number(visitor.seenAtMs || 0) > adminNow - 120000);
   const openedLinkCount = Math.max(activeVisitors.length, registeredCount);
-  const registrationPercent = openedLinkCount > 0 ? Math.min(100, Math.round((registeredCount / openedLinkCount) * 100)) : 0;
+  const isRegistrationOpenForJoin = stage === "registration" || !!room?.registrationOverrideOpen;
   const adminCurrentQuestionId = room?.currentQuestion?.questionId || room?.currentQuestion?.id || null;
   const adminCurrentProcessed = isSameId(room?.processedQuestionId, adminCurrentQuestionId);
+  const currentSkipReport = isSameId(room?.lastSkipReport?.questionId, adminCurrentQuestionId)
+    ? room.lastSkipReport
+    : null;
   const adminQuestionList = room?.practiceMode ? practiceQuestions : competitionQuestions;
+  const nextAdminQuestionNeedsVote = isVotingQuestion(nextAdminQuestion);
+  const liveQuestionAnswers = allAnswers.filter((answer) => isSameId(answer.questionId, adminCurrentQuestionId));
+  const liveAnsweredPlayerIds = new Set(liveQuestionAnswers.map((answer) => answer.playerId));
+  const liveVoteCounts = getCategoryVoteCounts(room?.categoryVote || {});
+  const liveVoteTotal = Object.values(liveVoteCounts).reduce((total, count) => total + Number(count || 0), 0);
+  const liveVoteTieLabels = stage === "categoryVote" ? getCategoryVoteTieLabels(room?.categoryVote || {}) : [];
+  const activeVoteQuestion = stage === "categoryVote"
+    ? adminQuestionList.find((question) => isSameId(question.id || question.questionId, room?.categoryVote?.questionId)) || nextAdminQuestion
+    : null;
   const adminCurrentIsLastQuestion = currentQuestionIndex >= 0 && currentQuestionIndex >= adminQuestionList.length - 1;
   const adminNextQuestionIsLast = currentQuestionIndex + 1 >= adminQuestionList.length - 1;
+
+  useEffect(() => {
+    if (stage !== "results" || adminCurrentProcessed) {
+      setShowAdminEmergencySkip(false);
+      return undefined;
+    }
+    const timer = setTimeout(() => setShowAdminEmergencySkip(true), 3000);
+    return () => clearTimeout(timer);
+  }, [stage, adminCurrentProcessed, adminCurrentQuestionId]);
   const prizeWheel = room?.prizeWheel || {};
   const prizeWinners = prizeWheel.winners || [];
   const prizeItems = Array.isArray(prizeWheel.prizeItems)
@@ -4391,16 +5035,23 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
     : DEFAULT_PRIZE_ITEMS;
   const activePrizeItemId = prizeWheel.activePrizeItemId || prizeItems[0]?.id || null;
   const eligiblePrizePlayers = getPrizeWheelPlayers(players, { ...prizeWheel, excludePreviousWinners: excludePrizeWinners });
+  const liveStageLabel = getAdminStageLabel(stage);
+  const liveQuestionModeLabel = room?.practiceMode
+    ? "وضع تجريبي"
+    : "تصويت محدد لكل سؤال";
+  const liveQuestionPoolLabel = room?.practiceMode
+    ? `${practiceQuestions.length} أسئلة تجريبية`
+    : `${competitionQuestions.length} أسئلة فعلية`;
+  const currentQuestionCategory = getQuestionCategory(room?.currentQuestion);
+  const nextQuestionCategory = getQuestionCategory(nextAdminQuestion);
+  const currentQuestionType = getQuestionTypeLabel(room?.currentQuestion?.type);
+  const nextQuestionType = getQuestionTypeLabel(nextAdminQuestion?.type);
   const editingPlayerBaseline = editingPlayer
     ? Number(editingPlayer.manualScoreDelta || 0) !== 0 && Number.isFinite(Number(editingPlayer.manualScoreBaseline))
       ? Number(editingPlayer.manualScoreBaseline)
       : Number(editingPlayer.score || 0)
     : 0;
   const editingPlayerHasManualDelta = !!editingPlayer && Number(editingPlayer.manualScoreDelta || 0) !== 0;
-
-  useEffect(() => {
-    setAdminSkipNoticeId(null);
-  }, [adminCurrentQuestionId]);
 
   function openAdminSection(section) {
     if (section === activeAdminSection) return;
@@ -4502,7 +5153,39 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
     });
   }
 
+  async function handleAdminCategoryVoteClose({ selectedCategory = null, chooseRandomTie = false } = {}) {
+    if (adminAdvancingRef.current) return;
+    adminAdvancingRef.current = true;
+    setAdminAdvancing(true);
+    try {
+      const outcome = await resolveCategoryVote(
+        room,
+        room?.practiceMode ? practiceQuestions : competitionQuestions,
+        { selectedCategory, chooseRandomTie }
+      );
+      if (!outcome.resolved && outcome.reason !== "tie") {
+        if (room?.practiceMode) await finishPracticeAndReturnToStart();
+        else await finishGame(players, getMainQuestions(questions), allAnswers || [], messages, room);
+      }
+    } finally {
+      adminAdvancingRef.current = false;
+      setAdminAdvancing(false);
+    }
+  }
+
   async function advanceFromDashboard(question = (room?.practiceMode ? practiceQuestions[currentQuestionIndex + 1] : competitionQuestions[currentQuestionIndex + 1]), questionIndex = currentQuestionIndex + 1) {
+    if (isVotingQuestion(question)) {
+      if (adminAdvancingRef.current) return;
+      adminAdvancingRef.current = true;
+      setAdminAdvancing(true);
+      try {
+        await startCategoryVote(question, room, questionIndex);
+      } finally {
+        adminAdvancingRef.current = false;
+        setAdminAdvancing(false);
+      }
+      return;
+    }
     const nextQuestion = question;
     if (!nextQuestion || adminAdvancingRef.current) return;
     adminAdvancingRef.current = true;
@@ -4532,7 +5215,12 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
   async function handleAdminSkipCalculation() {
     if (isAdminSkipping) return;
     const confirmed = window.confirm(
-      "تجاوز احتساب نتائج هذا السؤال؟\n\nلن تُضاف أي نقاط للاعبين، وسيصبح زر السؤال التالي متاحًا فورًا."
+      "تجاوز هذا السؤال بدون نقاط؟\n\n" +
+      "• لن تُضاف أو تُخصم أي نقاط.\n" +
+      "• لن يتغير ترتيب المتسابقين.\n" +
+      "• ستبقى الإجابات محفوظة في التقرير.\n" +
+      "• سيتاح الانتقال للسؤال التالي فورًا.\n\n" +
+      "استخدم هذا الخيار فقط إذا تعطل الاحتساب."
     );
     if (!confirmed) return;
     setIsAdminSkipping(true);
@@ -4540,8 +5228,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
       (answer) => answer.questionId === adminCurrentQuestionId
     ).length;
     try {
-      await skipQuestionCalculation(room, currentAnswersCount);
-      setAdminSkipNoticeId(adminCurrentQuestionId);
+      await skipQuestionCalculation(room, currentAnswersCount, { source: "admin-control" });
     } catch (error) {
       console.error("Admin skip calculation failed:", error);
     } finally {
@@ -4583,6 +5270,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
       currentQuestion: null,
       currentQuestionIndex: -1,
       processedQuestionId: null,
+      registrationOverrideOpen: false,
       updatedAt: serverTimestamp(),
     }, { merge: true });
   }
@@ -4609,8 +5297,12 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
         practiceJokerLockedAt: null,
       })
     ));
-    await setDoc(doc(db, "rooms", ROOM_ID), { practiceMode: false, practiceFinished: true, currentQuestionIndex: -1, updatedAt: serverTimestamp() }, { merge: true });
-    await advanceFromDashboard(firstQuestion, 0);
+    await setDoc(doc(db, "rooms", ROOM_ID), { practiceMode: false, practiceFinished: true, registrationOverrideOpen: false, currentQuestionIndex: -1, usedQuestionIds: {}, updatedAt: serverTimestamp() }, { merge: true });
+    if (isVotingQuestion(firstQuestion)) {
+      await startCategoryVote(firstQuestion, room, 0);
+    } else {
+      await advanceFromDashboard(firstQuestion, 0);
+    }
   }
 
   function buildAnswerRows(sourceQuestions = competitionQuestions, sourcePlayers = players, sourceAnswers = competitionAnswers) {
@@ -4627,7 +5319,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
             player.name || answer.playerName || "",
             player.fullName || answer.fullName || "",
             player.phone || answer.phone || "",
-            getOptionText(question.options?.[answer.selectedIndex]) || "—",
+            getSelectedAnswerText(question, answer),
             answer.isCorrect ? "صح" : "خطأ",
             answer.basePoints || 0,
             answer.points || 0,
@@ -4702,48 +5394,6 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
     setEditingPlayer(null);
   }
 
-  async function addTestPlayers(count = 30) {
-    const testNames = [
-      "سارة", "علي", "حسن", "فاطمة", "مريم", "مازن", "فاضل", "زينب", "ورد", "سراج",
-      "محمد", "إبراهيم", "نورة", "حوراء", "جعفر", "بتول", "رضا", "ليان", "هاشم", "حسين",
-      "رقيه", "عباس", "دانة", "مصطفى", "جود", "صالح", "زهراء", "أحمد", "نور", "مهدي",
-    ];
-    const emojis = ["😀", "😎", "⭐", "🏆", "⚡", "🔥", "🌟", "🎯", "🚀", "💎", "🎲", "🎁"];
-    const createdAtMs = getNow();
-
-    await Promise.all(
-      Array.from({ length: count }, (_, index) => {
-        const number = index + 1;
-        const id = `test-player-${String(number).padStart(2, "0")}`;
-        return setDoc(doc(db, "rooms", ROOM_ID, "players", id), {
-          name: testNames[index] || `متسابق ${number}`,
-          fullName: `متسابق تجريبي رقم ${number}`,
-          phone: `05${String(50000000 + number).padStart(8, "0")}`,
-          emoji: emojis[index % emojis.length],
-          score: Math.max(0, 3000 - index * 87 + (index % 4) * 23),
-          jokerUsed: index % 5 === 0,
-          pendingJoker: false,
-          jokerQuestionId: index % 5 === 0 ? "test-preview" : null,
-          jokerQuestionNumber: index % 5 === 0 ? 1 : null,
-          answeredCount: 0,
-          lastQuestionPoints: index % 3 === 0 ? 120 + index * 3 : 0,
-          lastQuestionId: null,
-          lastQuestionCorrect: index % 4 !== 0,
-          manualScoreDelta: 0,
-          isTestPlayer: true,
-          createdAtMs,
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        }, { merge: true });
-      })
-    );
-  }
-
-  async function deleteTestPlayers() {
-    const testPlayersSnap = await getDocs(query(collection(db, "rooms", ROOM_ID, "players"), where("isTestPlayer", "==", true)));
-    await Promise.all(testPlayersSnap.docs.map((item) => deleteDoc(item.ref)));
-  }
-
   function toggleQuestion(questionId) { setExpandedQuestions((prev) => ({ ...prev, [questionId]: !prev[questionId] })); }
   function togglePlayerReport(playerId) { setExpandedPlayers((prev) => ({ ...prev, [playerId]: !prev[playerId] })); }
   function toggleLiveSection(section) {
@@ -4797,11 +5447,11 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
       <div className="dashboard-main-header">
         <div>
           <span>لوحة الإدارة</span>
-          <strong>{adminSectionLabels[activeAdminSection]}</strong>
+          <strong>لوحة التحكم</strong>
         </div>
         <div className="dashboard-header-actions">
           {previousAdminSection && <button type="button" className="dashboard-back-button" onClick={goBackAdminSection}>عودة</button>}
-          {activeAdminSection === "live" && (
+          {activeAdminSection === "live" && quickControlsOpen && (
             <div className="dashboard-broadcast-controls">
               <button
                 type="button"
@@ -4809,7 +5459,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
                 onClick={() => setQuickControlsOpen((value) => !value)}
                 aria-expanded={quickControlsOpen}
               >
-                تحكم سريع أثناء البث
+                أزرار احتياطية
               </button>
               {quickControlsOpen && (
                 <div className="quick-control-actions">
@@ -4822,25 +5472,21 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
                   {stage === "question" && <button className="warning-action" onClick={() => extendQuestionTime(room, 10)}>+10 ثوانٍ</button>}
                   {stage === "question" && isMediaQuestion(room?.currentQuestion) && !hasMediaEnded(room, room.currentQuestion) && <button className="warning-action" onClick={() => finishMediaQuestion(room.currentQuestion)}>تجاوز المقطع وإظهار الخيارات</button>}
                   {stage === "question" && <button onClick={() => endQuestionAndReveal(room, { allowUndo: true })}>إنهاء السؤال وإظهار الإجابة</button>}
+                  {stage === "categoryVote" && liveVoteTieLabels.length === 0 && <button onClick={() => handleAdminCategoryVoteClose()} disabled={adminAdvancing}>إغلاق التصويت وتجهيز السؤال</button>}
+                  {stage === "categoryVote" && liveVoteTieLabels.length > 1 && (
+                    <>
+                      <span className="admin-vote-tie-label">التصويت متعادل</span>
+                      <button onClick={() => handleAdminCategoryVoteClose({ chooseRandomTie: true })} disabled={adminAdvancing}>اختيار عشوائي</button>
+                      {liveVoteTieLabels.map((label) => (
+                        <button key={`quick-tie-${label}`} onClick={() => handleAdminCategoryVoteClose({ selectedCategory: label })} disabled={adminAdvancing}>اختيار {label}</button>
+                      ))}
+                    </>
+                  )}
                   {stage === "reveal" && Number(room?.revealUndoUntilMs || 0) > adminNow && getQuestionTimeLeft(room?.currentQuestion, room, adminNow) > 0 && <button className="warning-action" onClick={() => reopenQuestion(room)}>تراجع</button>}
-                  {stage === "reveal" && (!room?.practiceMode && adminCurrentIsLastQuestion ? <button onClick={() => beginFinalCountdown(room)}>إعلان الفائزين</button> : <button onClick={() => showResultsWithCalc(room)}>إظهار النتائج</button>)}
+                  {stage === "reveal" && (!room?.practiceMode && adminCurrentIsLastQuestion ? <button onClick={() => beginFinalCountdown(room)}>إعلان الفائزين</button> : <button onClick={() => showResultsFast(room)}>إظهار النتائج</button>)}
                   {stage === "results" && room?.practiceMode && <button className="secondary-action" onClick={launchInstructionsClarityPoll}>تصويت</button>}
                   {stage === "results" && room?.practiceMode && <button className="warning-action" onClick={finishPracticeAndReturnToStart}>إنهاء التجربة</button>}
-                  {stage === "results" && (room?.practiceMode ? practiceQuestions[currentQuestionIndex + 1] : competitionQuestions[currentQuestionIndex + 1]) && <button onClick={advanceFromDashboard} disabled={adminAdvancing || !adminCurrentProcessed}>{adminAdvancing ? "استعدوا..." : adminCurrentProcessed ? (adminNextQuestionIsLast ? "السؤال الأخير" : "السؤال التالي") : "جاري احتساب النتائج..."}</button>}
-                  {stage === "results" && !adminCurrentProcessed && (
-                    <button
-                      type="button"
-                      className="warning-action admin-skip-calculation-button"
-                      onClick={handleAdminSkipCalculation}
-                      disabled={isAdminSkipping}
-                      title="تجاوز احتساب نتائج هذا السؤال دون إضافة أي نقاط"
-                    >
-                      {isAdminSkipping ? "جاري التجاوز..." : "⚠ تجاوز الحساب"}
-                    </button>
-                  )}
-                  {stage === "results" && adminSkipNoticeId === adminCurrentQuestionId && (
-                    <span className="admin-skip-notice">تم تجاوز هذا السؤال بدون احتساب نقاط.</span>
-                  )}
+                  {stage === "results" && (room?.practiceMode ? practiceQuestions[currentQuestionIndex + 1] : competitionQuestions[currentQuestionIndex + 1]) && <button onClick={advanceFromDashboard} disabled={adminAdvancing || !adminCurrentProcessed}>{!adminCurrentProcessed ? "جاري احتساب النتائج..." : adminAdvancing ? "استعدوا..." : (nextAdminQuestionNeedsVote ? "تصويت السؤال التالي" : (adminNextQuestionIsLast ? "السؤال الأخير" : "السؤال التالي"))}</button>}
                   {stage !== "home" && stage !== "finished" && <button className="secondary-action" onClick={() => launchSystemCheck()}>استفتاء</button>}
                   {stage !== "home" && stage !== "finished" && <button className="danger" onClick={() => { if (window.confirm("هل تريد إنهاء المسابقة الآن؟")) finishGame(players, questions, allAnswers || [], messages, room); }}>إنهاء المسابقة الآن</button>}
                 </div>
@@ -4850,18 +5496,256 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
         </div>
       </div>
 
-      {activeAdminSection === "live" && <div className="dashboard-live-workspace">
-      <div className="live-cockpit-map">
-        <span>1. راقب السؤال الحالي</span>
-        <span>2. حضّر للسؤال القادم</span>
-        <span>3. تأكد من الجاهزية والمتسابقين</span>
-      </div>
+      {activeAdminSection === "live" && <div className="broadcast-console-v2">
+        <div className="broadcast-top-cluster">
+          <section className="broadcast-status-bar" aria-label="حالة البث الآن">
+          <div className="broadcast-status-primary">
+            <span className="broadcast-live-dot" aria-hidden="true" />
+            <small>المرحلة الحالية</small>
+            <strong>{liveStageLabel}</strong>
+          </div>
+          <div>
+            <small>{stage === "categoryVote" ? "الأصوات" : stage === "question" ? "الوقت المتبقي" : "رقم الجولة"}</small>
+            <strong>{stage === "categoryVote" ? `${liveVoteTotal} / ${registeredCount}` : stage === "question" ? `${getQuestionTimeLeft(room?.currentQuestion, room, adminNow)} ث` : currentQuestionIndex >= 0 ? `${currentQuestionIndex + 1} / ${adminQuestionList.length}` : "—"}</strong>
+          </div>
+          <div>
+            <small>المتسابقون</small>
+            <strong>{registeredCount}</strong>
+          </div>
+          <div>
+            <small>التسجيل</small>
+            <strong className={isRegistrationOpenForJoin ? "status-open" : "status-closed"}>{isRegistrationOpenForJoin ? "مفتوح" : "مغلق"}</strong>
+          </div>
+          </section>
+
+          <section className="broadcast-control-panel">
+            <div className="broadcast-section-heading">
+              <div><span>التحكم المباشر</span><h2>الإجراء المطلوب الآن</h2></div>
+              <small>{room?.practiceMode ? "جولة تجريبية" : "المسابقة الفعلية"}</small>
+            </div>
+            <div className="broadcast-primary-actions">
+            {stage === "home" && <button onClick={resetAndStartRegistration}>فتح التسجيل</button>}
+            {stage === "registration" && !room?.practiceFinished && <button onClick={showInstructionsPage} disabled={players.length === 0}>عرض معلومات المسابقة</button>}
+            {stage === "registration" && room?.practiceFinished && <button onClick={startRealCompetition} disabled={adminAdvancing || competitionQuestions.length === 0 || players.length === 0}>{adminAdvancing ? "جاري البدء..." : "ابدأ المسابقة"}</button>}
+            {stage === "instructions" && practiceQuestions.length > 0 && <button className="secondary-action" onClick={startPracticeQuestions} disabled={adminAdvancing || players.length === 0}>بدء التجربة</button>}
+            {stage === "instructions" && <button onClick={startRealCompetition} disabled={adminAdvancing || competitionQuestions.length === 0 || players.length === 0}>{adminAdvancing ? "جاري البدء..." : "ابدأ المسابقة"}</button>}
+            {stage === "practiceComplete" && <button onClick={startRealCompetition} disabled={adminAdvancing || competitionQuestions.length === 0 || players.length === 0}>ابدأ المسابقة الفعلية</button>}
+            {stage === "categoryVote" && liveVoteTieLabels.length === 0 && <button onClick={() => handleAdminCategoryVoteClose()} disabled={adminAdvancing}>{adminAdvancing ? "جاري تجهيز السؤال..." : "إغلاق التصويت وإظهار سؤال الفائز"}</button>}
+            {stage === "categoryVote" && liveVoteTieLabels.length > 1 && (
+              <div className="broadcast-vote-tie-actions">
+                <strong>التصويت متعادل</strong>
+                <button type="button" className="tie-random-button" onClick={() => handleAdminCategoryVoteClose({ chooseRandomTie: true })} disabled={adminAdvancing}>اختيار عشوائي</button>
+                {liveVoteTieLabels.map((label) => (
+                  <button type="button" className="secondary-action" key={`admin-tie-${label}`} onClick={() => handleAdminCategoryVoteClose({ selectedCategory: label })} disabled={adminAdvancing}>اختيار {label}</button>
+                ))}
+              </div>
+            )}
+            {stage === "question" && <button onClick={() => endQuestionAndReveal(room, { allowUndo: true })}>إنهاء الوقت وكشف الإجابة</button>}
+            {stage === "question" && <button className="secondary-action" onClick={() => extendQuestionTime(room, 10)}>+10 ثوانٍ</button>}
+            {stage === "question" && isMediaQuestion(room?.currentQuestion) && !hasMediaEnded(room, room.currentQuestion) && <button className="secondary-action" onClick={() => finishMediaQuestion(room.currentQuestion)}>تجاوز المقطع</button>}
+            {stage === "reveal" && (!room?.practiceMode && adminCurrentIsLastQuestion ? <button onClick={() => beginFinalCountdown(room)}>إعلان الفائزين</button> : <button onClick={() => showResultsFast(room)}>إظهار النتائج</button>)}
+            {stage === "reveal" && Number(room?.revealUndoUntilMs || 0) > adminNow && getQuestionTimeLeft(room?.currentQuestion, room, adminNow) > 0 && <button className="secondary-action" onClick={() => reopenQuestion(room)}>تراجع عن الكشف</button>}
+            {stage === "results" && (room?.practiceMode ? practiceQuestions[currentQuestionIndex + 1] : competitionQuestions[currentQuestionIndex + 1]) && <button onClick={advanceFromDashboard} disabled={adminAdvancing || !adminCurrentProcessed}>{!adminCurrentProcessed ? "جاري احتساب النتائج..." : nextAdminQuestionNeedsVote ? "بدء تصويت الجولة التالية" : adminNextQuestionIsLast ? "عرض السؤال الأخير" : "عرض السؤال التالي"}</button>}
+            {stage === "results" && room?.practiceMode && <button className="secondary-action" onClick={finishPracticeAndReturnToStart}>إنهاء التجربة</button>}
+            {stage === "finished" && <span className="broadcast-finished-label">انتهت المسابقة — راجع النتائج من قسم التقارير.</span>}
+            </div>
+          </section>
+        </div>
+
+        {stage === "results" && !adminCurrentProcessed && showAdminEmergencySkip && (
+          <section className="broadcast-emergency-skip" aria-label="أداة تجاوز احتساب النتائج">
+            <div>
+              <strong>هل احتساب النتائج متعطل؟</strong>
+              <span>استخدم التجاوز فقط بعد التأكد أن إعادة المحاولة لم تنجح.</span>
+            </div>
+            <button type="button" onClick={handleAdminSkipCalculation} disabled={isAdminSkipping}>
+              {isAdminSkipping ? "جاري التجاوز..." : "تجاوز السؤال بدون نقاط"}
+            </button>
+          </section>
+        )}
+
+        {currentSkipReport && (
+          <section className="broadcast-skip-report" role="status" aria-live="polite">
+            <div className="broadcast-skip-report-title">
+              <span>تقرير التجاوز</span>
+              <div>
+                <strong>تم تجاوز السؤال {currentSkipReport.questionNumber || currentQuestionIndex + 1}</strong>
+                <small>{currentSkipReport.questionText}</small>
+              </div>
+            </div>
+            <div className="broadcast-skip-report-facts">
+              <span><b>{currentSkipReport.answersCount || 0}</b> إجابة محفوظة</span>
+              <span><b>0</b> تغيير في النقاط</span>
+              <span><b>ثابت</b> ترتيب المتسابقين</span>
+              <span><b>متاح</b> السؤال التالي</span>
+            </div>
+            <small className="broadcast-skip-report-time">
+              {currentSkipReport.skippedAtMs ? new Date(currentSkipReport.skippedAtMs).toLocaleTimeString("ar-SA", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : ""}
+            </small>
+          </section>
+        )}
+
+        {stage === "categoryVote" && activeVoteQuestion ? (
+          <section className="broadcast-live-vote-panel">
+            <div className="broadcast-section-heading">
+              <div><span>تصويت مباشر</span><h2>{getQuestionDisplayText(activeVoteQuestion)}</h2></div>
+              <small>{liveVoteTotal} صوت</small>
+            </div>
+            <div className="broadcast-live-vote-grid">
+              {activeVoteQuestion.voteChoices.map((choice, index) => {
+                const count = Number(liveVoteCounts[choice.category] || 0);
+                const percent = liveVoteTotal ? Math.round((count / liveVoteTotal) * 100) : 0;
+                return <div className={`broadcast-live-vote-choice category-tone-${index % 4}`} key={`${activeVoteQuestion.id || "live-vote"}-${index}`}>
+                  <div><span>{choice.category}</span><strong>{count}</strong></div>
+                  <i><b style={{ width: `${percent}%` }} /></i>
+                  <p>{choice.text}</p>
+                  <small>الإجابة: {getOptionText(choice.options?.[choice.correctIndex]) || "—"}</small>
+                </div>;
+              })}
+            </div>
+          </section>
+        ) : (
+          <section className={`broadcast-question-focus-grid${room?.currentQuestion ? "" : " single-card"}`}>
+            {room?.currentQuestion && <BroadcastQuestionCard question={room.currentQuestion} label="المعروض الآن" variant="current" />}
+            <BroadcastQuestionCard question={nextAdminQuestion} label="الجولة التالية" variant="next" compact={!isVotingQuestion(nextAdminQuestion)} />
+          </section>
+        )}
+
+        {players.length > 0 && <section className="broadcast-participants-panel">
+          <div className="broadcast-section-heading">
+            <div><span>متابعة سريعة</span><h2>المتسابقون</h2></div>
+            <small>{adminCurrentQuestionId ? `${liveQuestionAnswers.length} أجابوا من ${registeredCount}` : `${registeredCount} مسجلين`}</small>
+          </div>
+          {players.length === 0 ? <p className="broadcast-empty-question">لا يوجد متسابقون حتى الآن.</p> : (
+            <div className="broadcast-participant-grid">
+              {[...players].sort((a, b) => Number(b.score || 0) - Number(a.score || 0)).map((player) => (
+                <div className={`broadcast-participant${adminCurrentQuestionId && liveAnsweredPlayerIds.has(player.id) ? " answered" : ""}`} key={player.id}>
+                  <span>{player.emoji || "👤"}</span>
+                  <div><strong>{player.name}</strong><small>{adminCurrentQuestionId ? (liveAnsweredPlayerIds.has(player.id) ? "أجاب" : "بانتظار الإجابة") : "مسجل"}</small></div>
+                  <b>{player.score || 0}</b>
+                  {player.pendingJoker && <em title="الجوكر مفعل">🃏</em>}
+                </div>
+              ))}
+            </div>
+          )}
+        </section>}
+
+        {stage !== "registration" && stage !== "home" && stage !== "finished" && (
+          <div className="broadcast-secondary-tools">
+            <button type="button" onClick={() => setTemporaryRegistrationOpen(!room?.registrationOverrideOpen)}>{room?.registrationOverrideOpen ? "إغلاق التسجيل المؤقت" : "فتح التسجيل للمتأخرين"}</button>
+            <button type="button" onClick={() => openAdminSection("analytics")}>فتح التقارير التفصيلية</button>
+          </div>
+        )}
+      </div>}
+
+      {activeAdminSection === "live" && liveExpandedSections.legacy && <div className="dashboard-live-workspace">
+      <section className="live-command-strip" aria-label="ملخص متابعة البث">
+        <div className="live-command-card live-command-card-stage">
+          <span>مرحلة البث</span>
+          <strong>{liveStageLabel}</strong>
+          <small>{stage === "question" ? `${getQuestionTimeLeft(room?.currentQuestion, room, adminNow)} ثانية متبقية` : "متابعة مباشرة"}</small>
+        </div>
+        <div className="live-command-card live-command-card-mode">
+          <span>وضع الأسئلة</span>
+          <strong>{liveQuestionModeLabel}</strong>
+          <small>{liveQuestionPoolLabel}</small>
+        </div>
+        <div className="live-command-card live-command-card-current">
+          <span>السؤال الحالي</span>
+          <strong>{room?.currentQuestion ? currentQuestionType : "غير معروض"}</strong>
+          <small>{room?.currentQuestion ? currentQuestionCategory : "لا يوجد تصنيف"}</small>
+        </div>
+        <div className="live-command-card live-command-card-next">
+          <span>الجاهز بعده</span>
+          <strong>{nextAdminQuestion ? nextQuestionType : "لا يوجد"}</strong>
+          <small>{nextAdminQuestion ? nextQuestionCategory : "نهاية القائمة"}</small>
+        </div>
+      </section>
+      <section className="live-registration-mini" aria-label="جاهزية التسجيل">
+        <div className="live-registration-mini-title">
+          <span className={isRegistrationOpenForJoin ? "registration-state open" : "registration-state closed"}>
+            {isRegistrationOpenForJoin ? "التسجيل مفتوح" : "التسجيل مغلق"}
+          </span>
+          <strong>جاهزية التسجيل</strong>
+        </div>
+        <p><b>{openedLinkCount}</b><small>فتحوا الرابط</small></p>
+        <p><b>{registeredCount}</b><small>مسجلين</small></p>
+        {stage !== "registration" && stage !== "home" && stage !== "finished" && !room?.registrationOverrideOpen && (
+          <button
+            type="button"
+            className="reopen-registration-button"
+            onClick={() => {
+              if (window.confirm("فتح التسجيل مؤقتًا للمتأخرين بدون تغيير شاشة المسابقة الحالية؟")) {
+                setTemporaryRegistrationOpen(true);
+              }
+            }}
+          >
+            فتح التسجيل مؤقتًا
+          </button>
+        )}
+        {stage !== "registration" && room?.registrationOverrideOpen && (
+          <button
+            type="button"
+            className="reopen-registration-button close"
+            onClick={() => setTemporaryRegistrationOpen(false)}
+          >
+            إغلاق التسجيل المؤقت
+          </button>
+        )}
+      </section>
       <div className="dashboard-live-top-row">
+        <div className="admin-next-question-card admin-previous-question-main">
+          <span>السؤال السابق</span>
+          <div className="admin-question-meta-row">
+            <small>{previousAdminQuestion ? getQuestionTypeLabel(previousAdminQuestion.type) : "لا يوجد"}</small>
+            <small>{previousAdminQuestion ? getQuestionCategory(previousAdminQuestion) : "قبل البداية"}</small>
+          </div>
+          <strong>{previousAdminQuestion?.text || "لا يوجد سؤال سابق"}</strong>
+          {getQuestionImageUrl(previousAdminQuestion) ? (
+            <button
+              type="button"
+              className="admin-question-media-slot admin-question-media-button"
+              onClick={() => window.open(getQuestionImageUrl(previousAdminQuestion), "_blank", "noopener,noreferrer")}
+            >
+              <img className="admin-next-question-image" src={getQuestionImageUrl(previousAdminQuestion)} alt="صورة السؤال السابق" />
+            </button>
+          ) : (
+            <div className="admin-question-media-slot empty" aria-hidden="true" />
+          )}
+          {previousAdminQuestion?.options?.length > 0 && (
+            <div className="admin-next-question-options">
+              {previousAdminQuestion.options.map((option, index) => {
+                const optionImage = getOptionImage(option, previousAdminQuestion.optionImageUrls || [], index);
+                const isCorrect = index === Number(previousAdminQuestion.correctIndex || 0);
+                return (
+                  <div className={isCorrect ? "admin-next-option correct" : "admin-next-option"} key={`${previousAdminQuestion.id || "previous-top"}-${index}`}>
+                    {optionImage && <img src={optionImage} alt="" />}
+                    <b>{getOptionText(option)}</b>
+                    {isCorrect && <em>الإجابة الصحيحة</em>}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
         <div className="admin-next-question-card admin-current-question-main">
-          <span>1. السؤال الحالي</span>
+          <span>السؤال الحالي</span>
+          <div className="admin-question-meta-row">
+            <small>{room?.currentQuestion ? currentQuestionType : "بانتظار العرض"}</small>
+            <small>{room?.currentQuestion ? currentQuestionCategory : liveStageLabel}</small>
+          </div>
           <strong>{room?.currentQuestion?.text || "لا يوجد سؤال معروض الآن"}</strong>
-          {getQuestionImageUrl(room?.currentQuestion) && (
-            <img className="admin-next-question-image" src={getQuestionImageUrl(room?.currentQuestion)} alt="صورة السؤال الحالي" />
+          {getQuestionImageUrl(room?.currentQuestion) ? (
+            <button
+              type="button"
+              className="admin-question-media-slot admin-question-media-button"
+              onClick={() => window.open(getQuestionImageUrl(room?.currentQuestion), "_blank", "noopener,noreferrer")}
+            >
+              <img className="admin-next-question-image" src={getQuestionImageUrl(room?.currentQuestion)} alt="صورة السؤال الحالي" />
+            </button>
+          ) : (
+            <div className="admin-question-media-slot empty" aria-hidden="true" />
           )}
           {room?.currentQuestion?.options?.length > 0 && (
             <div className="admin-next-question-options">
@@ -4881,10 +5765,22 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
         </div>
 
         <div className="admin-next-question-card admin-next-question-main">
-          <span>2. السؤال القادم</span>
+          <span>السؤال القادم</span>
+          <div className="admin-question-meta-row">
+            <small>{nextAdminQuestion ? nextQuestionType : "لا يوجد"}</small>
+            <small>{nextAdminQuestion ? nextQuestionCategory : "نهاية الجولة"}</small>
+          </div>
           <strong>{nextAdminQuestion?.text || "لا يوجد سؤال تالٍ"}</strong>
-          {getQuestionImageUrl(nextAdminQuestion) && (
-            <img className="admin-next-question-image" src={getQuestionImageUrl(nextAdminQuestion)} alt="صورة السؤال القادم" />
+          {getQuestionImageUrl(nextAdminQuestion) ? (
+            <button
+              type="button"
+              className="admin-question-media-slot admin-question-media-button"
+              onClick={() => window.open(getQuestionImageUrl(nextAdminQuestion), "_blank", "noopener,noreferrer")}
+            >
+              <img className="admin-next-question-image" src={getQuestionImageUrl(nextAdminQuestion)} alt="صورة السؤال القادم" />
+            </button>
+          ) : (
+            <div className="admin-question-media-slot empty" aria-hidden="true" />
           )}
           {nextAdminQuestion?.options?.length > 0 && (
             <div className="admin-next-question-options">
@@ -4903,29 +5799,11 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
           )}
         </div>
 
-        <div className="live-registration-summary-card">
-          <span>3. جاهزية التسجيل</span>
-          <div className="live-registration-stats">
-            <div>
-              <small>فتحوا الرابط</small>
-              <strong>{openedLinkCount}</strong>
-            </div>
-            <div>
-              <small>سجلوا</small>
-              <strong>{registeredCount}</strong>
-            </div>
-          </div>
-          <div className="live-registration-ratio">
-            <span>نسبة التسجيل</span>
-            <strong>{registrationPercent}%</strong>
-            <i style={{ "--ratio": `${registrationPercent}%` }} />
-          </div>
-        </div>
       </div>
       <div className="dashboard-live-grid">
         <section className="question-report-card live-report-card live-question-stats-section">
           <button type="button" className="question-report-header" onClick={() => toggleLiveSection("players")}>
-            <div className="question-report-title"><strong>المتسابقون الآن</strong><span>إدارة سريعة أثناء البث</span></div>
+            <div className="question-report-title"><strong>المتسابقون الآن</strong><span>{registeredCount} مسجلين، {openedLinkCount} فتحوا الرابط</span></div>
             <span className="expand-indicator">{liveExpandedSections.players ? "−" : "+"}</span>
           </button>
           {liveExpandedSections.players && <div className="question-report-body">
@@ -4963,7 +5841,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
       <div className="dashboard-live-overview">
         <section className="question-report-card live-report-card live-question-stats-section">
           <button type="button" className="question-report-header" onClick={() => toggleLiveSection("questionStats")}>
-            <div className="question-report-title"><strong>مراقبة الأسئلة</strong><span>مختصر سريع. التفاصيل في التقارير.</span></div>
+            <div className="question-report-title"><strong>مراقبة الأسئلة</strong><span>أداء كل سؤال حسب الإجابات والتصنيفات.</span></div>
             <span className="expand-indicator">{liveExpandedSections.questionStats ? "−" : "+"}</span>
           </button>
           {liveExpandedSections.questionStats && <div className="question-report-body">
@@ -4985,7 +5863,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
         </section>
         <section className="question-report-card live-report-card live-player-stats-section">
           <button type="button" className="question-report-header" onClick={() => toggleLiveSection("playerStats")}>
-            <div className="question-report-title"><strong>مراقبة المتسابقين</strong><span>مختصر سريع. التفاصيل في التقارير.</span></div>
+            <div className="question-report-title"><strong>مراقبة المتسابقين</strong><span>تتبع الإجابات والنقاط لكل متسابق.</span></div>
             <span className="expand-indicator">{liveExpandedSections.playerStats ? "−" : "+"}</span>
           </button>
           {liveExpandedSections.playerStats && <div className="question-report-body">
@@ -4993,7 +5871,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
               const expanded = !!expandedPlayers[player.id];
               const playerAnswers = competitionQuestions.map((question, index) => {
                 const answer = competitionAnswers.find((item) => item.playerId === player.id && (item.questionId === question.id || item.questionId === question.questionId));
-                return { question, questionNumber: index + 1, answer, selectedText: answer ? getOptionText(question.options?.[answer.selectedIndex]) || "—" : "لم يجب" };
+                return { question, questionNumber: index + 1, answer, selectedText: answer ? getSelectedAnswerText(question, answer) : "لم يجب" };
               });
               const answeredCount = playerAnswers.filter((row) => row.answer).length;
               const correctCount = playerAnswers.filter((row) => row.answer?.isCorrect).length;
@@ -5014,29 +5892,77 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
       </div>}
 
       {activeAdminSection === "setup" && (
-      <div className="card setup-actions-card">
-        <h2>تهيئة المسابقة</h2>
-        <p className="muted">اختر الإجراء المطلوب بعناية. الأسئلة المحفوظة لا تُحذف من أي خيار هنا.</p>
-        <div className="setup-action-list">
-          <div className="setup-action-row">
-            <div><strong>العودة للصفحة الرئيسية</strong><span>يعيد حالة العرض والمتسابقين إلى الانتظار دون حذف الأسماء أو النتائج.</span></div>
-            <button onClick={createOrResetRoom}>تنفيذ</button>
+      <div className="setup-console">
+        <div className="setup-console-head">
+          <div>
+            <span>مركز التشغيل</span>
+            <h2>تهيئة المسابقة</h2>
+            <p>إجراءات جاهزة قبل البث وأثناء التجربة. الأسئلة ونماذج الأسئلة لا تُحذف من هذه الصفحة.</p>
           </div>
-          <div className="setup-action-row">
-            <div><strong>فتح تسجيل جديد</strong><span>يمسح المتسابقين والإجابات والرسائل، ثم يفتح التسجيل لجولة جديدة.</span></div>
-            <button onClick={() => { if (window.confirm("مسح بيانات الجولة الحالية وفتح تسجيل جديد؟")) resetAndStartRegistration(); }}>تنفيذ</button>
+          <div className="setup-status-grid">
+            <span><b>{registeredCount}</b><small>متسابق</small></span>
+            <span><b>{competitionQuestions.length}</b><small>سؤال فعلي</small></span>
+            <span><b>{practiceQuestions.length}</b><small>تجريبي</small></span>
+            <span><b>{stage}</b><small>المرحلة</small></span>
           </div>
-          <div className="setup-action-row">
-            <div><strong>مسح الإجابات والرسائل فقط</strong><span>يبقي أسماء المتسابقين، ويمسح إجابات الجولة والرسائل، ثم يعيد العرض للصفحة الرئيسية.</span></div>
-            <button className="warning-action" onClick={() => { if (window.confirm("مسح الإجابات والرسائل مع إبقاء المتسابقين؟")) clearAnswersAndMessages(); }}>تنفيذ</button>
+        </div>
+
+        <div className="setup-section-card primary">
+          <div className="setup-section-title">
+            <strong>تجهيز البث</strong>
+            <span>أزرار آمنة لا تحذف المتسابقين.</span>
           </div>
-          <div className="setup-action-row">
-            <div><strong>مسح الرسائل فقط</strong><span>يحذف رسائل المتسابقين دون التأثير على الأسماء أو النقاط أو الأسئلة.</span></div>
-            <button className="warning-action" onClick={() => { if (window.confirm("مسح رسائل المتسابقين فقط؟")) clearMessagesOnly(); }}>تنفيذ</button>
+          <div className="setup-action-list">
+            <div className="setup-action-row">
+              <div><strong>فتح التسجيل مع إبقاء المتسابقين</strong><span>يرجع الشاشة إلى صفحة التسجيل وينظف حالة السؤال والنتائج والسحب بدون حذف الأسماء.</span></div>
+              <button onClick={() => { if (window.confirm("العودة للتسجيل مع إبقاء المتسابقين؟")) returnToRegistrationKeepingPlayers(); }}>فتح</button>
+            </div>
+            <div className="setup-action-row">
+              <div><strong>عرض معلومات المسابقة</strong><span>ينقل شاشة العرض والمتسابقين إلى صفحة التعليمات قبل بدء اللعب.</span></div>
+              <button onClick={showInstructionsPage} disabled={players.length === 0}>عرض</button>
+            </div>
+            <div className="setup-action-row">
+              <div><strong>إيقاف وضع الاختبار</strong><span>يوقف الإجابات الوهمية وتأخير النتائج التجريبي إن كان مفعّلًا.</span></div>
+              <button className="secondary-action" onClick={() => setDoc(doc(db, "rooms", ROOM_ID), { testMode: { autoAnswerEnabled: false, slowResultsEnabled: false, slowResultsDelayMs: 15000 }, updatedAt: serverTimestamp() }, { merge: true })}>إيقاف</button>
+            </div>
+            <div className="setup-action-row">
+              <div><strong>إغلاق شاشة السحب</strong><span>يرجع العرض من صفحة سحب الجوائز إلى المرحلة السابقة ويوقف الحركة.</span></div>
+              <button className="secondary-action" onClick={closePrizeWheelStage} disabled={stage !== "prizeWheel"}>إغلاق</button>
+            </div>
           </div>
-          <div className="setup-action-row danger-row">
-            <div><strong>تصفير الجولة بالكامل</strong><span>يمسح المتسابقين والإجابات والرسائل ويعيد المسابقة إلى البداية.</span></div>
-            <button className="danger" onClick={() => { if (window.confirm("تصفير الجولة بالكامل؟")) hardResetGame(); }}>تنفيذ</button>
+        </div>
+
+        <div className="setup-section-card">
+          <div className="setup-section-title">
+            <strong>تنظيف سريع</strong>
+            <span>مفيد بين التجارب أو قبل بداية البث.</span>
+          </div>
+          <div className="setup-action-list">
+            <div className="setup-action-row">
+              <div><strong>مسح الرسائل فقط</strong><span>يحذف رسائل المتسابقين دون التأثير على الأسماء أو النقاط أو الإجابات.</span></div>
+              <button className="warning-action" onClick={() => { if (window.confirm("مسح رسائل المتسابقين فقط؟")) clearMessagesOnly(); }}>مسح</button>
+            </div>
+            <div className="setup-action-row">
+              <div><strong>مسح الإجابات والرسائل</strong><span>يبقي المتسابقين، ويمسح إجابات الجولة والرسائل ويعيد العرض للصفحة الرئيسية.</span></div>
+              <button className="warning-action" onClick={() => { if (window.confirm("مسح الإجابات والرسائل مع إبقاء المتسابقين؟")) clearAnswersAndMessages(); }}>مسح</button>
+            </div>
+          </div>
+        </div>
+
+        <div className="setup-section-card danger-zone">
+          <div className="setup-section-title">
+            <strong>بداية جديدة</strong>
+            <span>هذه الأزرار تحذف بيانات المشاركين أو الجولة الحالية.</span>
+          </div>
+          <div className="setup-action-list">
+            <div className="setup-action-row danger-row">
+              <div><strong>فتح تسجيل جديد بالكامل</strong><span>يمسح المتسابقين والإجابات والرسائل، ثم يفتح التسجيل لجولة جديدة.</span></div>
+              <button className="danger" onClick={() => { if (window.confirm("مسح المتسابقين والإجابات والرسائل وفتح تسجيل جديد؟")) resetAndStartRegistration(); }}>فتح جديد</button>
+            </div>
+            <div className="setup-action-row danger-row">
+              <div><strong>تصفير كل شيء</strong><span>يمسح المتسابقين والإجابات والرسائل ويعيد المسابقة إلى الصفحة الرئيسية.</span></div>
+              <button className="danger" onClick={() => { if (window.confirm("تصفير الجولة بالكامل؟")) hardResetGame(); }}>تصفير</button>
+            </div>
           </div>
         </div>
       </div>
@@ -5192,8 +6118,10 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
       {activeAdminSection === "testMode" && (
       <div className="tm-panel">
         <div className="tm-panel-header">
-          <span className="tm-panel-title">وضع الاختبار</span>
-          <span className="tm-panel-desc muted">أدوات للاختبار — لا تؤثر على اللاعبين الحقيقيين.</span>
+          <div className="tm-title-block">
+            <span className="tm-panel-title">وضع الاختبار</span>
+            <span className="tm-panel-desc muted">أدوات تجربة قبل البث. كل بطاقة توضّح ماذا يفعل زرها.</span>
+          </div>
           <span className="tm-count-badge">{players.filter((p) => p.isFake).length} وهمي</span>
           <span className={`tm-status-badge ${room?.testMode?.autoAnswerEnabled ? "tm-status-on" : "tm-status-off"}`}>
             {room?.testMode?.autoAnswerEnabled ? "تلقائي ✓" : "تلقائي ✗"}
@@ -5203,30 +6131,38 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
           </span>
         </div>
 
-        <div className="tm-grid">
-          {/* اللاعبون الوهميون */}
-          <div className="tm-cell">
-            <span className="tm-cell-label">اللاعبون الوهميون</span>
-            <div className="tm-cell-row">
-              <button type="button" className="tm-btn" disabled={testModeWorking}
-                onClick={async () => { setTestModeWorking(true); try { await createFakePlayers(5); } catch (e) { console.error(e); } finally { setTestModeWorking(false); } }}>
-                + 5 وهميين
-              </button>
-              <button type="button" className="tm-btn" disabled={testModeWorking}
-                onClick={async () => { setTestModeWorking(true); try { await createFakePlayers(50); } catch (e) { console.error(e); } finally { setTestModeWorking(false); } }}>
-                + 50 وهمي
-              </button>
-              <button type="button" className="tm-btn tm-btn-danger" disabled={testModeWorking}
-                onClick={async () => { if (!window.confirm("حذف جميع اللاعبين الوهميين؟")) return; setTestModeWorking(true); try { await deleteFakePlayers(players); } catch (e) { console.error(e); } finally { setTestModeWorking(false); } }}>
-                حذف الوهميين
-              </button>
+        <div className="tm-scenarios">
+          <div className="tm-scenario tm-scenario-primary">
+            <div>
+              <span className="tm-scenario-kicker">ابدأ من هنا</span>
+              <h3>تجربة سريعة</h3>
+              <p>يضيف 5 متسابقين وهميين ويشغّل الإجابات التلقائية بدون تأخير. مناسب للتأكد أن السؤال والنتائج واللوحة تعمل.</p>
             </div>
+            <button type="button" className="tm-btn tm-btn-primary" disabled={testModeWorking}
+              onClick={async () => { setTestModeWorking(true); try { await createFakePlayers(5); await updateTestMode({ autoAnswerEnabled: true, slowResultsEnabled: false, slowResultsDelayMs: 15000 }); } catch (e) { console.error(e); } finally { setTestModeWorking(false); } }}>
+              {testModeWorking ? "جاري..." : "تجهيز سريع"}
+            </button>
           </div>
 
-          {/* الإجابات الوهمية */}
-          <div className="tm-cell">
-            <span className="tm-cell-label">الإجابات الوهمية</span>
-            <div className="tm-cell-row">
+          <div className="tm-scenario">
+            <div>
+              <span className="tm-scenario-kicker">اختبار شكل البث</span>
+              <h3>محاكاة 30 متسابق</h3>
+              <p>يضيف عددًا كبيرًا من الوهميين ويشغّل إجابات تلقائية، حتى ترى شكل لوحة المتصدرين والجداول عند الزحمة.</p>
+            </div>
+            <button type="button" className="tm-btn" disabled={testModeWorking}
+              onClick={async () => { setTestModeWorking(true); try { await createFakePlayers(30); await updateTestMode({ autoAnswerEnabled: true, slowResultsEnabled: false, slowResultsDelayMs: 15000 }); } catch (e) { console.error(e); } finally { setTestModeWorking(false); } }}>
+              محاكاة 30
+            </button>
+          </div>
+
+          <div className="tm-scenario">
+            <div>
+              <span className="tm-scenario-kicker">أثناء السؤال</span>
+              <h3>إجابات السؤال الحالي</h3>
+              <p>يرسل إجابات للوهميين على السؤال المعروض فقط. استخدمه إذا أردت اختبار احتساب النتائج بدون انتظار.</p>
+            </div>
+            <div className="tm-scenario-actions">
               <button type="button" className="tm-btn" disabled={testModeWorking}
                 onClick={async () => {
                   setTestModeWorking(true); setTestModeMsg(null);
@@ -5238,29 +6174,55 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
                     else setTestModeMsg({ type: "success", text: `كُتبت ${result.written} إجابة${result.duplicates > 0 ? ` (${result.duplicates} مكررة)` : ""}` });
                   } catch (e) { setTestModeMsg({ type: "error", text: `خطأ: ${e.message}` }); } finally { setTestModeWorking(false); }
                 }}>
-                {testModeWorking ? "جاري..." : "إجابة للسؤال الحالي"}
+                {testModeWorking ? "جاري..." : "إرسال إجابات"}
               </button>
-              {!room?.testMode?.autoAnswerEnabled ? (
-                <button type="button" className="tm-btn tm-btn-activate"
-                  onClick={async () => { await updateTestMode({ autoAnswerEnabled: true }); }}>
-                  تشغيل التلقائي
-                </button>
-              ) : (
-                <button type="button" className="tm-btn tm-btn-danger"
-                  onClick={async () => { await updateTestMode({ autoAnswerEnabled: false }); }}>
-                  إيقاف التلقائي
-                </button>
-              )}
+              <button type="button" className="tm-btn tm-btn-soft-danger" disabled={testModeWorking || !adminCurrentQuestionId}
+                onClick={async () => {
+                  if (!window.confirm("حذف إجابات الوهميين للسؤال الحالي فقط؟")) return;
+                  setTestModeWorking(true); setTestModeMsg(null);
+                  try {
+                    const deleted = await deleteFakeAnswersForQuestion(adminCurrentQuestionId);
+                    setTestModeMsg({ type: "success", text: `حُذفت ${deleted} إجابة وهمية.` });
+                  } catch (e) {
+                    setTestModeMsg({ type: "error", text: `خطأ: ${e.message}` });
+                  } finally {
+                    setTestModeWorking(false);
+                  }
+                }}>
+                حذف إجابات السؤال
+              </button>
             </div>
             {testModeMsg && (
               <p className={testModeMsg.type === "error" ? "tm-warning" : "tm-success-msg"}>{testModeMsg.text}</p>
             )}
           </div>
 
-          {/* تأخير النتائج */}
-          <div className="tm-cell">
-            <span className="tm-cell-label">تأخير النتائج</span>
-            <div className="tm-cell-row">
+          <div className="tm-scenario">
+            <div>
+              <span className="tm-scenario-kicker">تشغيل تلقائي</span>
+              <h3>إجابة تلقائية مستمرة</h3>
+              <p>عند تشغيله، الوهميون يجاوبون تلقائيًا في كل سؤال جديد. أوقفه قبل التجربة اليدوية.</p>
+            </div>
+            {!room?.testMode?.autoAnswerEnabled ? (
+              <button type="button" className="tm-btn tm-btn-activate"
+                onClick={async () => { await updateTestMode({ autoAnswerEnabled: true }); }}>
+                تشغيل التلقائي
+              </button>
+            ) : (
+              <button type="button" className="tm-btn tm-btn-danger"
+                onClick={async () => { await updateTestMode({ autoAnswerEnabled: false }); }}>
+                إيقاف التلقائي
+              </button>
+            )}
+          </div>
+
+          <div className="tm-scenario tm-scenario-warning">
+            <div>
+              <span className="tm-scenario-kicker">اختبار طارئ فقط</span>
+              <h3>محاكاة بطء النتائج</h3>
+              <p>يجعل شاشة “جاري احتساب النتائج” تتأخر عمدًا. اتركه مطفأ أثناء البث الحقيقي.</p>
+            </div>
+            <div className="tm-scenario-actions">
               <label className="tm-inline-label">
                 <span>ثوانٍ</span>
                 <input type="number" className="tm-number-input" min="5" max="60"
@@ -5281,13 +6243,16 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
             </div>
           </div>
 
-          {/* اختبار سريع */}
-          <div className="tm-cell tm-cell-quick">
-            <span className="tm-cell-label">اختبار سريع</span>
-            <div className="tm-cell-row">
-              <button type="button" className="tm-btn tm-btn-primary" disabled={testModeWorking}
-                onClick={async () => { setTestModeWorking(true); try { await createFakePlayers(5); await updateTestMode({ autoAnswerEnabled: true, slowResultsEnabled: true, slowResultsDelayMs: 15000 }); } catch (e) { console.error(e); } finally { setTestModeWorking(false); } }}>
-                {testModeWorking ? "جاري..." : "إعداد كامل (5 وهميين)"}
+          <div className="tm-scenario tm-scenario-cleanup">
+            <div>
+              <span className="tm-scenario-kicker">تنظيف</span>
+              <h3>إنهاء الاختبار</h3>
+              <p>إيقاف الاختبار فقط يحافظ على الوهميين. إيقاف وتنظيف يحذفهم ويطفئ كل وضع الاختبار.</p>
+            </div>
+            <div className="tm-scenario-actions">
+              <button type="button" className="tm-btn" disabled={testModeWorking}
+                onClick={async () => { await updateTestMode({ autoAnswerEnabled: false, slowResultsEnabled: false, slowResultsDelayMs: 15000 }); }}>
+                إيقاف الاختبار فقط
               </button>
               <button type="button" className="tm-btn tm-btn-danger" disabled={testModeWorking}
                 onClick={async () => { if (!window.confirm("إيقاف وضع الاختبار وحذف الوهميين؟")) return; setTestModeWorking(true); try { await deleteFakePlayers(players); await updateTestMode({ autoAnswerEnabled: false, slowResultsEnabled: false }); } catch (e) { console.error(e); } finally { setTestModeWorking(false); } }}>
@@ -5341,19 +6306,6 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
       <div className="card">
         <div className="report-section-title players-tools-title">
           <h2>المتسابقون المسجلون</h2>
-          <div className="test-player-tools">
-            <span>تجربة الشكل مع جمهور كبير</span>
-            <button type="button" onClick={() => addTestPlayers(30)}>إضافة 30 تجريبي</button>
-            <button
-              type="button"
-              className="warning-action"
-              onClick={() => {
-                if (window.confirm("حذف المتسابقين التجريبيين فقط؟")) deleteTestPlayers();
-              }}
-            >
-              حذف التجريبيين
-            </button>
-          </div>
         </div>
         {players.length === 0 ? <p className="muted">لا يوجد متسابقون حتى الآن.</p> : (
           <div className="admin-table-wrap">
@@ -5389,7 +6341,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
             const expanded = !!expandedPlayers[player.id];
             const playerAnswers = competitionQuestions.map((question, index) => {
               const answer = competitionAnswers.find((item) => item.playerId === player.id && (item.questionId === question.id || item.questionId === question.questionId));
-              return { question, questionNumber: index + 1, answer, selectedText: answer ? getOptionText(question.options?.[answer.selectedIndex]) || "—" : "لم يجب" };
+              return { question, questionNumber: index + 1, answer, selectedText: answer ? getSelectedAnswerText(question, answer) : "لم يجب" };
             });
             const answeredCount = playerAnswers.filter((row) => row.answer).length;
             const correctCount = playerAnswers.filter((row) => row.answer?.isCorrect).length;
@@ -5473,7 +6425,9 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
   const [isShowingResults, setIsShowingResults] = useState(false);
   const [forceRetryError, setForceRetryError] = useState(null);
   const [showFinalQuestionResults, setShowFinalQuestionResults] = useState(false);
+  const [showInstructionsContinue, setShowInstructionsContinue] = useState(false);
   const readyTimerRef = useRef(null);
+  const advanceSafetyTimerRef = useRef(null);
   const displayAdvancingRef = useRef(false);
   const displayNow = useNow(250);
 
@@ -5482,6 +6436,10 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
   const displayVideoSlotEnabled = !!room?.displayVideoSlotEnabled;
   const currentQuestion = room?.currentQuestion || null;
   const currentQuestionIndex = room?.currentQuestionIndex ?? -1;
+  const syncedReadyCountdown = Math.max(0, Math.ceil((Number(room?.nextQuestionReadyUntilMs || 0) - displayNow) / 1000));
+  // Firestore's shared deadline is authoritative, so the countdown stays correct
+  // even when another tab starts the question or background timers are throttled.
+  const visibleReadyCountdown = syncedReadyCountdown > 0 ? syncedReadyCountdown : (readyCountdown ?? 1);
   const displayQuestionList = room?.practiceMode ? getPracticeQuestions(questions) : getMainQuestions(questions);
   const finalQuestionIndex = Math.max(0, displayQuestionList.length - 1);
   const finalQuestionSource = displayQuestionList[finalQuestionIndex] || currentQuestion;
@@ -5505,6 +6463,8 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
       }
     : room;
   const nextQuestion = displayQuestionList?.[currentQuestionIndex + 1];
+  const nextQuestionNeedsVote = isVotingQuestion(nextQuestion);
+  const displayVoteTieLabels = stage === "categoryVote" ? getCategoryVoteTieLabels(room?.categoryVote || {}) : [];
   const isCurrentLastQuestion = currentQuestionIndex >= 0 && currentQuestionIndex >= displayQuestionList.length - 1;
   const nextQuestionIsLast = !!nextQuestion && currentQuestionIndex + 1 >= displayQuestionList.length - 1;
   const displayQuestionIndex = previewStage && previewQuestionIndex !== null ? previewQuestionIndex : currentQuestionIndex;
@@ -5515,6 +6475,15 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
   const displayAnswers = previewStage && displayQuestion
     ? (allAnswers || []).filter((answer) => answer.questionId === displayQuestion.questionId)
     : answers;
+  const previewResultsSnapshot =
+    previewStage === "results" && displayQuestion
+      ? buildPreviewResultsSnapshot({
+          questionList: displayQuestionList,
+          questionIndex: displayQuestionIndex,
+          players,
+          allAnswers,
+        })
+      : null;
   const displayPlayers = previewStage && displayQuestionIndex >= 0
     ? [...players]
         .map((player) => ({
@@ -5538,6 +6507,7 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
         processedQuestionId: displayQuestion.questionId,
         collectingBonusByPlayer: Object.fromEntries(displayAnswers.map((answer) => [answer.playerId, Number(answer.points || 0)])),
         rankMovementByPlayer: {},
+        resultsDisplaySnapshot: previewResultsSnapshot || room?.resultsDisplaySnapshot || null,
       }
     : room;
 
@@ -5545,6 +6515,16 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
   const currentProcessed = isSameId(room?.processedQuestionId, liveQuestionId);
 
   useEffect(() => {
+    if (stage !== "instructions") setShowInstructionsContinue(false);
+  }, [stage]);
+
+  useEffect(() => {
+    const keepLocalReadyTimer = stage === "ready" && displayAdvancingRef.current;
+    if (keepLocalReadyTimer) {
+      setPreviewStage("ready");
+      return;
+    }
+
     setPreviewStage(null);
     setPreviewQuestionIndex(null);
     setReadyCountdown(null);
@@ -5552,6 +6532,12 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
       clearInterval(readyTimerRef.current);
       readyTimerRef.current = null;
     }
+    if (advanceSafetyTimerRef.current) {
+      clearTimeout(advanceSafetyTimerRef.current);
+      advanceSafetyTimerRef.current = null;
+    }
+    displayAdvancingRef.current = false;
+    setIsAdvancingDisplayQuestion(false);
   }, [stage, room?.currentQuestion?.questionId]);
 
   useEffect(() => {
@@ -5573,6 +6559,7 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
   useEffect(() => {
     return () => {
       if (readyTimerRef.current) clearInterval(readyTimerRef.current);
+      if (advanceSafetyTimerRef.current) clearTimeout(advanceSafetyTimerRef.current);
     };
   }, []);
 
@@ -5675,8 +6662,12 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
         });
       });
       await resetBatch.commit();
-      await setDoc(doc(db, "rooms", ROOM_ID), { practiceMode: false, practiceFinished: true, currentQuestionIndex: -1, updatedAt: serverTimestamp() }, { merge: true });
-      await startReadyThenSend(firstQuestion, 0, { force: true });
+      await setDoc(doc(db, "rooms", ROOM_ID), { practiceMode: false, practiceFinished: true, currentQuestionIndex: -1, usedQuestionIds: {}, updatedAt: serverTimestamp() }, { merge: true });
+      if (isVotingQuestion(firstQuestion)) {
+        await startCategoryVote(firstQuestion, room, 0);
+      } else {
+        await startReadyThenSend(firstQuestion, 0, { force: true });
+      }
     } catch (error) {
       console.error("Failed to start competition:", error);
       setStartCompetitionError("حدث خطأ أثناء بدء المسابقة. حاول مرة أخرى.");
@@ -5711,9 +6702,24 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
       clearInterval(readyTimerRef.current);
       readyTimerRef.current = null;
     }
+    if (advanceSafetyTimerRef.current) {
+      clearTimeout(advanceSafetyTimerRef.current);
+      advanceSafetyTimerRef.current = null;
+    }
     displayAdvancingRef.current = true;
     setIsAdvancingDisplayQuestion(true);
     if (readyTimerRef.current) clearInterval(readyTimerRef.current);
+    advanceSafetyTimerRef.current = setTimeout(() => {
+      console.warn("Display advance safety timeout reset local loading state.");
+      if (readyTimerRef.current) {
+        clearInterval(readyTimerRef.current);
+        readyTimerRef.current = null;
+      }
+      setPreviewStage(null);
+      setReadyCountdown(null);
+      displayAdvancingRef.current = false;
+      setIsAdvancingDisplayQuestion(false);
+    }, 7000);
 
     try {
       const readyDelayMs = 3000;
@@ -5740,6 +6746,10 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
             console.warn("Display question activation was ignored because it was stale.");
           }
         } finally {
+          if (advanceSafetyTimerRef.current) {
+            clearTimeout(advanceSafetyTimerRef.current);
+            advanceSafetyTimerRef.current = null;
+          }
           setPreviewStage(null);
           displayAdvancingRef.current = false;
           setIsAdvancingDisplayQuestion(false);
@@ -5748,6 +6758,10 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
       return true;
     } catch (error) {
       console.error("Failed to advance display question", error);
+      if (advanceSafetyTimerRef.current) {
+        clearTimeout(advanceSafetyTimerRef.current);
+        advanceSafetyTimerRef.current = null;
+      }
       setPreviewStage(null);
       setReadyCountdown(null);
       displayAdvancingRef.current = false;
@@ -5784,6 +6798,11 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
   }
 
   async function goNextQuestion() {
+    if (nextQuestionNeedsVote) {
+      await startCategoryVote(nextQuestion, room, currentQuestionIndex + 1);
+      return;
+    }
+
     if (!nextQuestion) {
       if (room?.practiceMode) {
         await finishPracticeToRegistration();
@@ -5794,6 +6813,24 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
     }
 
     await startReadyThenSend(nextQuestion, currentQuestionIndex + 1);
+  }
+
+  async function finishCategoryVoteFromDisplay({ selectedCategory = null, chooseRandomTie = false } = {}) {
+    if (isAdvancingDisplayQuestion) return;
+    setIsAdvancingDisplayQuestion(true);
+    try {
+      const outcome = await resolveCategoryVote(
+        room,
+        room?.practiceMode ? getPracticeQuestions(questions) : getMainQuestions(questions),
+        { selectedCategory, chooseRandomTie }
+      );
+      if (!outcome.resolved && outcome.reason !== "tie") {
+        if (room?.practiceMode) await finishPracticeToRegistration();
+        else await finishGame(players, getMainQuestions(questions), allAnswers || [], messages, room);
+      }
+    } finally {
+      setIsAdvancingDisplayQuestion(false);
+    }
   }
 
   async function handleManualResultCalculation() {
@@ -5814,12 +6851,12 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
   async function handleSkipCalculation() {
     if (isSkippingCalculation) return;
     const confirmed = window.confirm(
-      "تجاوز احتساب نتائج هذا السؤال؟\n\nلن تُضاف أي نقاط للاعبين، وسيصبح زر السؤال التالي متاحًا فورًا."
+      "تجاوز هذا السؤال بدون نقاط؟\n\nلن تتغير النقاط أو المراكز، وستبقى الإجابات محفوظة، وسيصبح السؤال التالي متاحًا."
     );
     if (!confirmed) return;
     setIsSkippingCalculation(true);
     try {
-      await skipQuestionCalculation(room, answers.length);
+      await skipQuestionCalculation(room, answers.length, { source: "presenter-display" });
       setSkipNoticeQuestionId(liveQuestionId);
     } catch (error) {
       console.error("Skip calculation failed:", error);
@@ -5846,7 +6883,11 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
       updatedAt: serverTimestamp(),
     }, { merge: true });
 
-    await startReadyThenSend(firstPractice, 0);
+    if (isVotingQuestion(firstPractice)) {
+      await startCategoryVote(firstPractice, { ...room, practiceMode: true }, 0);
+    } else {
+      await startReadyThenSend(firstPractice, 0);
+    }
   }
 
   function renderDisplayButton() {
@@ -5856,21 +6897,9 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
       mainButton = <button onClick={resetAndStartRegistration}>فتح التسجيل</button>;
     } else if (stage === "instructions") {
       mainButton = (
-        <>
-          <div className="display-instructions-action-row">
-            <button
-              onClick={startCompetition}
-              disabled={getMainQuestions(questions).length === 0 || players.length === 0 || isStartingCompetition}
-            >
-              {isStartingCompetition ? "جاري البدء..." : "ابدأ المسابقة"}
-            </button>
-            <div className="display-practice-actions">
-              <span>تجربة</span>
-              <button type="button" onClick={startPracticeFromDisplay} disabled={players.length === 0 || getPracticeQuestions(questions).length === 0}>بدء الأسئلة التجريبية</button>
-            </div>
-          </div>
-          {startCompetitionError && <p className="display-start-error">{startCompetitionError}</p>}
-        </>
+        <button className="display-main-action" onClick={() => setShowInstructionsContinue(true)}>
+          استمرار
+        </button>
       );
     } else if (stage === "registration" || stage === "practiceComplete") {
       const wantsStart = stage === "practiceComplete" || room?.practiceFinished;
@@ -5885,6 +6914,20 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
           {startCompetitionError && <p className="display-start-error">{startCompetitionError}</p>}
         </>
       );
+    } else if (stage === "categoryVote") {
+      mainButton = displayVoteTieLabels.length > 1 ? (
+        <div className="display-vote-tie-actions">
+          <strong>التصويت متعادل</strong>
+          <button type="button" className="tie-random-button" onClick={() => finishCategoryVoteFromDisplay({ chooseRandomTie: true })} disabled={isAdvancingDisplayQuestion}>اختيار عشوائي</button>
+          {displayVoteTieLabels.map((label) => (
+            <button type="button" className="display-secondary-action" key={`display-tie-${label}`} onClick={() => finishCategoryVoteFromDisplay({ selectedCategory: label })} disabled={isAdvancingDisplayQuestion}>اختيار {label}</button>
+          ))}
+        </div>
+      ) : (
+        <button onClick={finishCategoryVoteFromDisplay} disabled={isAdvancingDisplayQuestion}>
+          {isAdvancingDisplayQuestion ? "جاري تجهيز السؤال..." : "إغلاق التصويت وتجهيز السؤال"}
+        </button>
+      );
     } else if (stage === "question") {
       mainButton = <button onClick={() => endQuestionAndReveal(room, { allowUndo: true })}>إنهاء السؤال الآن وإظهار الإجابة الصحيحة</button>;
     } else if (stage === "reveal") {
@@ -5896,7 +6939,7 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
             onClick={async () => {
               if (isShowingResults) return;
               setIsShowingResults(true);
-              try { await showResultsWithCalc(room); } catch (e) { console.error(e); } finally { setIsShowingResults(false); }
+              try { await showResultsFast(room); } catch (e) { console.error(e); } finally { setIsShowingResults(false); }
             }}
           >
             {isShowingResults ? "جاري تحضير النتائج..." : "إظهار النتائج"}
@@ -5907,7 +6950,7 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
         <>
           <div className="results-primary-actions">
             <button onClick={goNextQuestion} disabled={!currentProcessed || isAdvancingDisplayQuestion}>
-              {isAdvancingDisplayQuestion ? "جاري تجهيز السؤال..." : currentProcessed ? (nextQuestion ? (nextQuestionIsLast ? "السؤال الأخير" : "السؤال التالي") : (room?.practiceMode ? "إنهاء التجربة" : "إنهاء المسابقة")) : "جاري تجميع النتائج..."}
+              {!currentProcessed ? "جاري تجميع النتائج..." : isAdvancingDisplayQuestion ? "جاري تجهيز السؤال..." : (nextQuestionNeedsVote ? "تصويت السؤال التالي" : (nextQuestion ? (nextQuestionIsLast ? "السؤال الأخير" : "السؤال التالي") : (room?.practiceMode ? "إنهاء التجربة" : "إنهاء المسابقة")))}
             </button>
             {!currentProcessed && showForceProcess && (
               <button
@@ -5920,22 +6963,22 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
                 {isManuallyCalculating ? "جاري إعادة المحاولة..." : "إعادة المحاولة"}
               </button>
             )}
-            {!currentProcessed && (
+            {!currentProcessed && showForceProcess && (
               <button
                 type="button"
                 className="skip-calculation-button"
                 onClick={handleSkipCalculation}
                 disabled={isSkippingCalculation}
-                title="تجاوز احتساب نتائج هذا السؤال دون إضافة أي نقاط للاعبين"
+                title="يتجاوز السؤال بدون نقاط ويحفظ الإجابات ويفتح الانتقال للسؤال التالي"
               >
-                {isSkippingCalculation ? "جاري التجاوز..." : "تجاوز اضطراري"}
+                {isSkippingCalculation ? "جاري التجاوز..." : "تجاوز بدون نقاط"}
               </button>
             )}
           </div>
           {forceRetryError && <span className="display-retry-error">{forceRetryError}</span>}
           {skipNoticeQuestionId === liveQuestionId && (
             <div className="skip-calculation-notice">
-              تم تجاوز هذا السؤال بدون احتساب نقاط.
+              تم التجاوز: النقاط والترتيب لم يتغيرا، والإجابات محفوظة.
             </div>
           )}
         </>
@@ -5972,7 +7015,7 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
   }
 
   function renderBottomDisplayActions() {
-    if (stage === "home" || stage === "instructions" || stage === "finished" || stage === "prizeWheel") return null;
+    if (stage === "home" || stage === "finished" || stage === "prizeWheel") return null;
 
     return (
       <div className="display-corner-actions">
@@ -6005,65 +7048,20 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
             تخطي العد
           </button>
         )}
-        {stage === "results" && !currentProcessed && showForceProcess && (
-          <>
-            <button
-              type="button"
-              className="display-corner-button"
-              onClick={handleManualResultCalculation}
-              disabled={isManuallyCalculating}
-              title="يعيد محاولة احتساب السؤال الحالي فقط، ولا يضاعف النقاط إذا كان محسوبًا مسبقًا."
-            >
-              {isManuallyCalculating ? "جاري إعادة المحاولة..." : "↺ إعادة المحاولة"}
-            </button>
-            {forceRetryError && (
-              <span className="display-retry-error">{forceRetryError}</span>
-            )}
-          </>
-        )}
-        {stage === "results" && !currentProcessed && (
+        {stage === "results" && room?.practiceMode && currentProcessed && (
           <button
             type="button"
-            className="display-corner-button skip"
-            onClick={handleSkipCalculation}
-            disabled={isSkippingCalculation}
-            title="تجاوز احتساب نتائج هذا السؤال دون إضافة أي نقاط للاعبين"
+            className="display-corner-button poll"
+            onClick={launchInstructionsClarityPoll}
           >
-            {isSkippingCalculation ? "جاري..." : "⚠ تجاوز"}
+            تصويت
           </button>
         )}
-        {stage === "results" && room?.practiceMode && currentProcessed && (
-          <>
-            <button
-              type="button"
-              className="display-corner-button poll"
-              onClick={launchInstructionsClarityPoll}
-            >
-              تصويت
-            </button>
-            <button
-              type="button"
-              className="display-corner-button finish"
-              onClick={finishPracticeToRegistration}
-            >
-              إنهاء التجربة
-            </button>
-          </>
+        {stage === "instructions" ? (
+          <button type="button" className="display-corner-button poll" onClick={launchInstructionsClarityPoll}>تصويت وضوح المعلومات</button>
+        ) : (
+          <button type="button" className="display-corner-button poll" onClick={launchSystemCheck}>استفتاء</button>
         )}
-        <button
-          type="button"
-          className="display-corner-button poll"
-          onClick={launchSystemCheck}
-        >
-          استفتاء
-        </button>
-        <button
-          type="button"
-          className="display-corner-button finish"
-          onClick={() => { if (window.confirm("هل تريد إنهاء المسابقة الآن؟")) finishGame(players, questions, allAnswers || [], messages, room); }}
-        >
-          إنهاء المسابقة الآن
-        </button>
       </div>
     );
   }
@@ -6073,28 +7071,15 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
       <AutoRevealCorrectAnswer room={room} />
       <AutoEndQuestionOnTimer room={room} />
       <AutoActivateReadyQuestion room={room} />
-      <AutoPreCalculateResults room={room} />
       <AutoLockJokers room={room} players={players} />
       <AutoProcessResults room={room} answers={answers} players={players} />
       <AutoFinishFinalCountdown room={room} players={players} questions={questions} allAnswers={allAnswers} messages={messages} />
-
-      {displayStage !== "home" && displayStage !== "ready" && displayStage !== "prizeWheel" && displayStage !== "finalCountdown" && (
-        <div className="display-history-nav">
-          <button type="button" className="display-nav-button display-next-button" onClick={previewNextStep} disabled={!previewStage}>التالي</button>
-          <button type="button" className="display-nav-button display-back-button" onClick={previewPreviousStep}>السابق</button>
-          {!previewStage && stage === "reveal" && Number(room?.revealUndoUntilMs || 0) > displayNow && getQuestionTimeLeft(currentQuestion, room, displayNow) > 0 && (
-            <button type="button" className="display-nav-button display-undo-button" onClick={() => reopenQuestion(room)}>تراجع</button>
-          )}
-        </div>
-      )}
-
-      <div className="display-control-bar">{renderDisplayButton()}</div>
 
       <div className="display-content-area">
         {displayStage === "ready" && (
           <div className="display-panel ready-countdown-screen">
             <div className="ready-countdown-card">
-              <span className="ready-countdown-number">{readyCountdown || 3}</span>
+              <span className="ready-countdown-number" key={visibleReadyCountdown}>{visibleReadyCountdown}</span>
               <span className="ready-countdown-label">استعدوا للسؤال التالي</span>
             </div>
           </div>
@@ -6162,6 +7147,13 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
           </div>
         )}
 
+        {displayStage === "categoryVote" && (
+          <div className="display-grid-main">
+            <CategoryVoteScreen room={room} players={players} displayMode />
+            <DisplaySidePanel messages={messages} videoEnabled={displayVideoSlotEnabled} />
+          </div>
+        )}
+
         {displayStage === "question" && (
           <div className="display-grid-main">
             <QuestionScreen
@@ -6196,7 +7188,7 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
         )}
 
         {displayStage === "results" && (
-          <ResultsDisplay room={displayRoom} players={displayPlayers} messages={messages} />
+          <ResultsDisplay room={displayRoom} players={displayPlayers} messages={messages} answers={displayAnswers} />
         )}
 
         {displayStage === "prizeWheel" && (
@@ -6209,12 +7201,56 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
 
         {displayStage === "finished" && (
           showFinalQuestionResults
-            ? <ResultsDisplay room={finalQuestionRoom} players={finalQuestionPlayers} messages={messages} />
+            ? <ResultsDisplay room={finalQuestionRoom} players={finalQuestionPlayers} messages={messages} answers={finalQuestionAnswers} />
             : <FinishedDisplay players={players} messages={messages} />
         )}
       </div>
 
-      {renderBottomDisplayActions()}
+      {displayStage !== "home" && displayStage !== "ready" && displayStage !== "prizeWheel" && displayStage !== "finalCountdown" && (
+        <div className="display-history-nav" aria-label="التنقل بين مراحل العرض">
+          <button type="button" className="display-nav-button display-next-button" onClick={previewNextStep} disabled={!previewStage}>التالي</button>
+          <button type="button" className="display-nav-button display-back-button" onClick={previewPreviousStep}>السابق</button>
+          {!previewStage && stage === "reveal" && Number(room?.revealUndoUntilMs || 0) > displayNow && getQuestionTimeLeft(currentQuestion, room, displayNow) > 0 && (
+            <button type="button" className="display-nav-button display-undo-button" onClick={() => reopenQuestion(room)}>تراجع</button>
+          )}
+        </div>
+      )}
+
+      <div className={`display-presenter-bottom-dock stage-${stage}`} aria-label="أدوات تحكم المقدم">
+        <div className="display-control-bar">{renderDisplayButton()}</div>
+        {renderBottomDisplayActions()}
+      </div>
+
+      {stage === "instructions" && showInstructionsContinue && (
+        <div className="modal-backdrop display-continue-backdrop" onClick={() => setShowInstructionsContinue(false)}>
+          <div className="modal-card instructions-continue-modal" role="dialog" aria-modal="true" aria-labelledby="instructions-continue-title" onClick={(event) => event.stopPropagation()}>
+            <span>الخطوة التالية</span>
+            <h2 id="instructions-continue-title">كيف تريد المتابعة؟</h2>
+            <div className="instructions-continue-choices">
+              <button
+                type="button"
+                className="continue-real-competition"
+                onClick={startCompetition}
+                disabled={getMainQuestions(questions).length === 0 || players.length === 0 || isStartingCompetition}
+              >
+                <strong>{isStartingCompetition ? "جاري البدء..." : "بدء المسابقة الفعلية"}</strong>
+                <small>الانتقال مباشرة إلى أسئلة المسابقة والنقاط الرسمية.</small>
+              </button>
+              <button
+                type="button"
+                className="continue-practice-questions"
+                onClick={startPracticeFromDisplay}
+                disabled={players.length === 0 || getPracticeQuestions(questions).length === 0}
+              >
+                <strong>بدء الأسئلة التجريبية</strong>
+                <small>تشغيل تجربة قصيرة قبل بدء المسابقة الفعلية.</small>
+              </button>
+            </div>
+            {startCompetitionError && <p className="display-start-error">{startCompetitionError}</p>}
+            <button type="button" className="instructions-continue-cancel" onClick={() => setShowInstructionsContinue(false)}>إلغاء</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -6511,7 +7547,6 @@ function AdminPanel({ initialView = "control" }) {
       <AutoRevealCorrectAnswer room={room} />
       <AutoEndQuestionOnTimer room={room} />
       <AutoActivateReadyQuestion room={room} />
-      <AutoPreCalculateResults room={room} />
       <AutoLockJokers room={room} players={players} />
       <AutoProcessResults room={room} answers={answers} players={players} />
       <AutoFinishFinalCountdown room={room} players={players} questions={questions} allAnswers={allAnswers} messages={messages} />
@@ -6601,11 +7636,6 @@ function AdminPanel({ initialView = "control" }) {
 
 /* Player */
 
-function getPlayerRankTitle(rank) {
-  if (rank >= 1) return "ترتيبك الحالي";
-  return "متسابق";
-}
-
 function PlayerJoinHero({ subtitle = QUIZ_SUBTITLE }) {
   return (
     <div className="player-join-hero">
@@ -6615,52 +7645,88 @@ function PlayerJoinHero({ subtitle = QUIZ_SUBTITLE }) {
   );
 }
 
-function PlayerPageShell({ player, rank = null, children, showStats = true }) {
+function PlayerPageShell({
+  player,
+  rank = null,
+  rankMovement = null,
+  questionNumber = null,
+  totalQuestions = null,
+  children,
+  showStats = true,
+  variant = "default",
+}) {
   if (!player?.name) return <>{children}</>;
 
   const lastPoints = Number(player.lastQuestionPoints || 0);
   const hasLastPoints = player.lastQuestionId != null || lastPoints !== 0;
+  const movement = Number(rankMovement ?? player.lastRankMovement ?? 0);
+  const hasQuestionProgress = Number(totalQuestions) > 0 && Number(questionNumber) > 0;
+  const shellClassName =
+    variant === "question"
+      ? "player-page player-page-question-mode"
+      : "player-page";
 
   return (
-    <div className="player-page">
+    <div className={shellClassName}>
       <div className="player-page-top">
-        <img className="player-page-logo" src={GROUP_NAME_IMAGE_SRC} alt="قروب العائلة" />
-
-        <div className="player-profile-row">
-          <div className="player-profile-info">
-            <span className="player-profile-label">اسمك</span>
-            <span className="player-profile-title">
-              {rank ? getPlayerRankTitle(rank) : "متسابق"}
-              {rank ? <i className="player-rank-chip">#{rank}</i> : null}
-            </span>
-            <strong className="player-profile-name">{player.name}</strong>
-          </div>
-          <div className="player-avatar" aria-hidden="true">
-            {player.emoji || "👤"}
-          </div>
+        <div className="player-brand-block">
+          <img className="player-page-logo" src={GROUP_NAME_IMAGE_SRC} alt="قروب العائلة" />
         </div>
 
-        {showStats && (
-          <div className="player-stats-pill">
-            <div className="player-stat player-stat-total">
-              <span>مجموع النقاط</span>
-              <strong>
-                <AnimatedNumber value={player.score || 0} />
+        <section className="player-overview" aria-label="ملخص المتسابق">
+          <div className="player-name-block">
+            <span>المتسابق</span>
+            <strong>{player.name}</strong>
+          </div>
+
+          <div className="player-overview-scoreboard">
+            {showStats && (
+              <div className="player-total-score-block">
+                <span>مجموع النقاط</span>
+                <strong><AnimatedNumber value={player.score || 0} /></strong>
                 <small>نقطة</small>
-              </strong>
-            </div>
-            <div className="player-stat player-stat-last">
-              <span>نقاط آخر سؤال</span>
-              <strong
-                className={
-                  lastPoints > 0 ? "positive" : lastPoints < 0 ? "negative" : "neutral"
-                }
-              >
-                {hasLastPoints ? `${lastPoints > 0 ? "+" : ""}${lastPoints}` : "—"}
-              </strong>
+              </div>
+            )}
+
+            <div className="player-standing-block">
+              {rank ? (
+                <div className="player-standing-rank">
+                  <span>الترتيب</span>
+                  <strong>#{rank}</strong>
+                </div>
+              ) : null}
+
+              {rank ? (
+                <div className={`player-standing-movement ${movement > 0 ? "up" : movement < 0 ? "down" : "steady"}`}>
+                  <span>من السؤال السابق</span>
+                  <strong aria-label={movement > 0 ? `صعد ${movement}` : movement < 0 ? `نزل ${Math.abs(movement)}` : "الترتيب ثابت"}>
+                    <b aria-hidden="true">{movement > 0 ? "↑" : movement < 0 ? "↓" : "•"}</b>
+                    {movement !== 0 ? Math.abs(movement) : "ثابت"}
+                  </strong>
+                </div>
+              ) : null}
             </div>
           </div>
-        )}
+
+          {(hasQuestionProgress || showStats) && (
+            <div className="player-round-strip">
+              {hasQuestionProgress && (
+                <div className="player-round-progress">
+                  <span>تقدم المسابقة</span>
+                  <strong>السؤال {questionNumber} <small>من {totalQuestions}</small></strong>
+                </div>
+              )}
+              {showStats && (
+                <div className="player-round-last">
+                  <span>نقاط آخر سؤال</span>
+                  <strong className={lastPoints > 0 ? "positive" : lastPoints < 0 ? "negative" : "neutral"}>
+                    {hasLastPoints ? `${lastPoints > 0 ? "+" : ""}${lastPoints}` : "—"}
+                  </strong>
+                </div>
+              )}
+            </div>
+          )}
+        </section>
       </div>
 
       <div className="player-page-body">{children}</div>
@@ -6740,7 +7806,7 @@ function JoinForm({ onJoined, room }) {
       return;
     }
 
-    if (room?.stage !== "registration") {
+    if (room?.stage !== "registration" && !room?.registrationOverrideOpen) {
       setError("لم يبدأ تسجيل اللاعبين بعد.");
       return;
     }
@@ -6806,7 +7872,7 @@ function JoinForm({ onJoined, room }) {
     }
   }
 
-  if (room?.stage !== "registration") {
+  if (room?.stage !== "registration" && !room?.registrationOverrideOpen) {
     return (
       <div className="player-guest-page">
         <PlayerJoinHero />
@@ -6866,6 +7932,7 @@ function JoinForm({ onJoined, room }) {
 function PlayerChat({ playerId, playerName }) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
+  const [open, setOpen] = useState(false);
 
   async function sendMessage() {
     const cleanText = text.trim();
@@ -6884,23 +7951,43 @@ function PlayerChat({ playerId, playerName }) {
 
     setText("");
     setSending(false);
+    setOpen(false);
   }
 
   return (
-    <div className="player-chat">
-      <label className="player-chat-label" htmlFor="player-chat-input">أرسل رسالة للمقدم</label>
-      <div className="player-chat-input-wrap">
-        <input
-          id="player-chat-input"
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && sendMessage()}
-          placeholder="اكتب رسالتك هنا"
-        />
-        <button type="button" onClick={sendMessage} disabled={!text.trim() || sending}>
-          {sending ? "..." : "إرسال"}
-        </button>
-      </div>
+    <div className={open ? "player-chat open" : "player-chat"}>
+      <button
+        type="button"
+        className="player-chat-toggle"
+        onClick={() => setOpen((current) => !current)}
+        aria-expanded={open}
+        aria-controls="player-chat-panel"
+      >
+        <span aria-hidden="true">💬</span>
+        <b>المقدم</b>
+      </button>
+      {open && (
+        <div className="player-chat-panel" id="player-chat-panel">
+          <div className="player-chat-panel-head">
+            <strong>رسالة للمقدم</strong>
+            <button type="button" onClick={() => setOpen(false)} aria-label="إغلاق المحادثة">×</button>
+          </div>
+          <label className="player-chat-label" htmlFor="player-chat-input">ستظهر الرسالة مباشرة في لوحة المقدم</label>
+          <div className="player-chat-input-wrap">
+            <input
+              id="player-chat-input"
+              autoFocus
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && sendMessage()}
+              placeholder="اكتب رسالتك"
+            />
+            <button type="button" onClick={sendMessage} disabled={!text.trim() || sending}>
+              {sending ? "..." : "إرسال"}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -6983,6 +8070,11 @@ function PlayerWaiting({ room, player, players, setPlayerName, hasNextQuestion =
     text = "استعد لبدء المسابقة الفعلية.";
   }
 
+  if (stage === "reveal") {
+    title = "بانتظار إظهار النتائج";
+    text = "سيعرض المقدم نتيجة السؤال بعد قليل.";
+  }
+
   if (stage === "results") {
     title = "انتظر السؤال التالي";
     text = "يمكنك استخدام الجوكر للسؤال القادم إذا لم تستخدمه بعد.";
@@ -7004,7 +8096,7 @@ function PlayerWaiting({ room, player, players, setPlayerName, hasNextQuestion =
 
   return (
     <PlayerPageShell player={player} rank={rank > 0 ? rank : null}>
-      <div className="player-status-card">
+      <div className="player-status-card player-home-card">
         <div className="player-status-head">
           <div className="player-status-spinner" aria-hidden="true" />
           <div>
@@ -7048,7 +8140,7 @@ function PlayerWaiting({ room, player, players, setPlayerName, hasNextQuestion =
         )}
 
         {showJoker && (
-          <div className="player-joker-slot">
+          <div className="player-joker-slot player-home-joker-slot">
             <JokerControl player={player} stage={stage} room={room} />
           </div>
         )}
@@ -7059,66 +8151,106 @@ function PlayerWaiting({ room, player, players, setPlayerName, hasNextQuestion =
   );
 }
 
-function PlayerResultSummary({ player, lastAnswer, stage, hasNextQuestion = false, currentQuestion = null, currentQuestionIndex = 0, room = null, rank = null }) {
-  const points = lastAnswer?.points || 0;
-  const basePoints = lastAnswer?.basePoints || 0;
+function PlayerResultSummary({ player, lastAnswer, stage, hasNextQuestion = false, currentQuestion = null, currentQuestionIndex = 0, totalQuestions = null, room = null, rank = null, rankMovement = null }) {
+  const points = Number(lastAnswer?.points || 0);
+  const basePoints = Number(lastAnswer?.basePoints || 0);
   const isCorrect = !!lastAnswer?.isCorrect;
   const jokerApplied = !!lastAnswer?.jokerApplied;
   const jokerMultiplier = Number(lastAnswer?.jokerMultiplier || 3);
+  const answerTimeLabel = lastAnswer ? formatAnswerTime(lastAnswer) : "";
   const isResults = stage === "results";
+  const currentQuestionId = currentQuestion?.questionId || currentQuestion?.id || null;
+  const isResultsReady = isResults && isSameId(room?.processedQuestionId, currentQuestionId);
+  const wasQuestionSkipped = isResultsReady && room?.calculationStatus === "skipped";
   const showBetweenQuestionJoker =
     stage === "results" &&
     hasNextQuestion &&
     (!currentQuestion?.isPractice || currentQuestionIndex === 0);
+  const resultPlayer = {
+    ...player,
+    lastQuestionPoints: points,
+    lastQuestionId: lastAnswer?.questionId || player?.lastQuestionId,
+  };
+
+  if (isResults && !isResultsReady) {
+    return (
+      <PlayerPageShell player={player} rank={rank} rankMovement={rankMovement} questionNumber={currentQuestionIndex + 1} totalQuestions={totalQuestions}>
+        <div className="player-status-card">
+          <div className="player-status-head">
+            <div className="player-status-spinner" aria-hidden="true" />
+            <div>
+              <h2>جاري احتساب نتيجتك</h2>
+              <p className="muted">ستظهر النقاط بعد لحظات.</p>
+            </div>
+          </div>
+        </div>
+      </PlayerPageShell>
+    );
+  }
+
+  if (wasQuestionSkipped) {
+    return (
+      <PlayerPageShell player={player} rank={rank} rankMovement={rankMovement} questionNumber={currentQuestionIndex + 1} totalQuestions={totalQuestions}>
+        <div className="player-result-card">
+          <div className="player-result-icon">↷</div>
+          <h2>تم تجاوز هذا السؤال</h2>
+          <p className="muted">لم تُضف أو تُخصم أي نقاط، وترتيبك لم يتغير.</p>
+        </div>
+      </PlayerPageShell>
+    );
+  }
 
   return (
-    <PlayerPageShell player={player} rank={rank}>
-      <div className={`player-result-card ${isCorrect ? "correct" : "wrong"}`}>
-        <div className="player-result-icon">{isCorrect ? "✅" : "❌"}</div>
-        <h2>{isCorrect ? "إجابتك صحيحة" : "إجابتك خاطئة"}</h2>
+    <PlayerPageShell player={resultPlayer} rank={rank} rankMovement={rankMovement} questionNumber={currentQuestionIndex + 1} totalQuestions={totalQuestions}>
+      <div className={`player-result-card ${lastAnswer ? (isCorrect ? "correct" : "wrong") : ""}`}>
+        {lastAnswer ? (
+          <>
+            <div className="player-result-icon">{isCorrect ? "✅" : "❌"}</div>
+            <h2>{isCorrect ? "إجابتك صحيحة" : "إجابتك خاطئة"}</h2>
 
-        {isResults ? (
-          <div
-            className={
-              points < 0
-                ? "player-points-animation negative"
-                : "player-points-animation"
-            }
-          >
-            <span className="points-question-label">نقاط هذا السؤال</span>
-            <strong className="points-question-value">
-              {jokerApplied ? "\u{1F0CF} " : ""}
-              {points > 0 ? "+" : ""}
-              <AnimatedNumber value={points} /> نقطة
-            </strong>
-            {jokerApplied && isCorrect && (
-              <small className="points-question-sub">
-                <span>النقاط الأصلية</span>
-                <b>{basePoints}</b>
-                <i>{getJokerTimingLabel(jokerMultiplier)}</i>
-              </small>
+            {isResults ? (
+              <div className="player-result-score-strip">
+                <div className={`player-result-mini-stat last${points < 0 ? " negative" : ""}`}>
+                  <span>نقاط هذا السؤال</span>
+                  <strong>
+                    {points > 0 ? "+" : ""}{points}
+                    {jokerApplied && <span className="player-result-joker-badge">🃏</span>}
+                  </strong>
+                  {jokerApplied && isCorrect && basePoints > 0 && (
+                    <small className="player-result-joker-detail">{basePoints} × {getJokerTimingLabel(jokerMultiplier)}</small>
+                  )}
+                  {jokerApplied && !isCorrect && (
+                    <small className="player-result-joker-detail">الجوكر: خصم النقاط</small>
+                  )}
+                </div>
+                {answerTimeLabel && answerTimeLabel !== "—" && (
+                  <div className="player-result-mini-stat total">
+                    <span>وقت إجابتك</span>
+                    <strong className="player-result-time-val">{answerTimeLabel}</strong>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <p className="muted">سيتم حساب نقاطك عند إظهار النتائج.</p>
             )}
-            {jokerApplied && !isCorrect && (
-              <small className="points-question-sub">
-                <span>الجوكر</span>
-                <b>خصم</b>
-                <i>قيمة السؤال</i>
-              </small>
-            )}
-          </div>
+          </>
         ) : (
-          <p className="muted">سيتم حساب نقاطك عند إظهار النتائج.</p>
-        )}
-
-        {showBetweenQuestionJoker && (
-          <div className="player-joker-slot between-question-joker-wrap">
-            {currentQuestion?.isPractice && currentQuestionIndex === 0 && (
-              <PracticeJokerHint room={room} player={player} inline />
-            )}
-            <JokerControl player={player} stage={stage} room={{ ...(room || {}), practiceMode: !!currentQuestion?.isPractice }} />
-          </div>
+          <>
+            <div className="player-result-icon">⏳</div>
+            <h2>لم تجب على هذا السؤال</h2>
+            {isResults && <p className="muted">لا نقاط لهذا السؤال.</p>}
+          </>
         )}
       </div>
+
+      {showBetweenQuestionJoker && (
+        <div className="player-joker-slot player-home-joker-slot between-question-joker-wrap">
+          {currentQuestion?.isPractice && currentQuestionIndex === 0 && (
+            <PracticeJokerHint room={room} player={player} inline />
+          )}
+          <JokerControl player={player} stage={stage} room={{ ...(room || {}), practiceMode: !!currentQuestion?.isPractice }} />
+        </div>
+      )}
 
       <PlayerChat playerId={player.id} playerName={player.name} />
     </PlayerPageShell>
@@ -7301,10 +8433,22 @@ function PlayerPanel() {
   const currentQuestion = room?.currentQuestion;
   const stage = room?.stage || "home";
   const currentQuestionIndex = room?.currentQuestionIndex ?? -1;
-  const hasNextQuestion = !!questions[currentQuestionIndex + 1];
-  const lastAnswer = answers.find((answer) => answer.playerId === playerId);
+  const activeQuestionList = room?.practiceMode
+    ? getPracticeQuestions(questions)
+    : getMainQuestions(questions);
+  const totalQuestions = activeQuestionList.length;
+  const hasNextQuestion = !!activeQuestionList[currentQuestionIndex + 1];
+  const currentQuestionId = currentQuestion?.questionId || currentQuestion?.id || null;
+  const lastAnswer = answers.find((answer) =>
+    answer.playerId === playerId &&
+    currentQuestionId &&
+    String(answer.questionId) === String(currentQuestionId)
+  );
   const localAnswerLock = readLocalAnswerLock(playerId, currentQuestion?.questionId);
   const playerRank = players.findIndex((item) => item.id === playerId) + 1;
+  const playerRankMovement = Number(
+    room?.rankMovementByPlayer?.[playerId] ?? player?.lastRankMovement ?? 0
+  );
   const lastAnswerId = lastAnswer?.id;
   const lastAnswerIsCorrect = lastAnswer?.isCorrect;
   const playerNow = useNow(250);
@@ -7461,12 +8605,18 @@ function PlayerPanel() {
       jokerMultiplier: jokerApplied ? jokerMultiplier : null,
       jokerTiming,
       isPractice: !!currentQuestion.isPractice,
+      voteCategory: currentQuestion.selectedVoteCategory || null,
       points,
       answeredAt,
       answerStartAtMs,
       answerTimeSeconds,
       createdAt: serverTimestamp(),
     });
+  }
+
+  async function handleCategoryVote(categoryLabel) {
+    if (!player) return;
+    await submitCategoryVote(player, categoryLabel);
   }
 
   if (stage === "home") {
@@ -7524,7 +8674,7 @@ function PlayerPanel() {
 
   if (!playerId || !player) {
     return (
-      stage === "registration" ? (
+      (stage === "registration" || room?.registrationOverrideOpen) ? (
         <>
           <PlayerHealthCheck room={room} player={null} />
           <JoinForm
@@ -7584,6 +8734,18 @@ function PlayerPanel() {
     );
   }
 
+  if (stage === "categoryVote") {
+    return (
+      <>
+        <PlayerHealthCheck room={room} player={player} />
+        <PlayerPageShell player={player} rank={playerRank || null}>
+          <CategoryVoteScreen room={room} players={players} player={player} onVote={handleCategoryVote} />
+          <PlayerChat playerId={playerId} playerName={player?.name || playerName} />
+        </PlayerPageShell>
+      </>
+    );
+  }
+
   if (readySeconds > 0 || isWaitingForReadyQuestion) {
     return (
       <>
@@ -7593,7 +8755,7 @@ function PlayerPanel() {
     );
   }
 
-  if ((stage === "reveal" || stage === "results") && currentQuestion) {
+  if (stage === "results" && currentQuestion) {
     return (
       <>
         <PlayerHealthCheck room={room} player={player} />
@@ -7606,6 +8768,8 @@ function PlayerPanel() {
         currentQuestionIndex={currentQuestionIndex}
         room={room}
         rank={playerRank || null}
+        rankMovement={playerRankMovement}
+        totalQuestions={totalQuestions}
       />
       </>
     );
@@ -7630,7 +8794,14 @@ function PlayerPanel() {
   return (
     <>
       <PlayerHealthCheck room={room} player={player} />
-      <PlayerPageShell player={player} rank={playerRank || null}>
+      <PlayerPageShell
+        player={player}
+        rank={playerRank || null}
+        rankMovement={playerRankMovement}
+        questionNumber={currentQuestionIndex + 1}
+        totalQuestions={totalQuestions}
+        variant="question"
+      >
         <QuestionScreen
           question={currentQuestion}
           room={room}
@@ -7673,18 +8844,6 @@ export default function App() {
 
   return (
     <div className={isAdmin ? "app" : "app player-app"} dir="rtl">
-      {isAdmin && (
-        <header className="app-header">
-          <div>
-            <h1><QuizTitleMark compact /></h1>
-            <p>{QUIZ_SUBTITLE}</p>
-          </div>
-          <span className="admin-badge">
-            {adminView === "settings" ? "صفحة الإعداد" : "لوحة التحكم"}
-          </span>
-        </header>
-      )}
-
       {isAdmin ? <AdminPanel initialView={adminView} /> : <PlayerPanel />}
       <AppCredit />
     </div>

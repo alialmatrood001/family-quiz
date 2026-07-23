@@ -17,6 +17,12 @@ function isSameId(a, b) {
   return String(a).trim() === String(b).trim();
 }
 
+function isValidPlayerAnswerForQuestion(answer, questionId) {
+  if (!answer?.playerId || !questionId || !isSameId(answer.questionId, questionId)) return false;
+  const selectedIndex = Number(answer.selectedIndex);
+  return Number.isInteger(selectedIndex) && selectedIndex >= 0;
+}
+
 function isVisitorRecord(item) {
   return !!item?.isVisitorOnly || String(item?.id || "").startsWith("visitor-");
 }
@@ -151,16 +157,18 @@ exports.finalizeQuestion = onCall(async (request) => {
     // ── Step 4: Build per-player answer maps ────────────────────────────────
     // Sort by answeredAt so ordering is deterministic (matches frontend).
     const answersToProcess = [...safeAnswers]
-      .filter((a) => a && a.playerId)
+      .filter((a) => isValidPlayerAnswerForQuestion(a, questionId))
       .sort((a, b) => Number(a.answeredAt || 0) - Number(b.answeredAt || 0));
 
     const answerByPlayer = new Map(answersToProcess.map((a) => [a.playerId, a]));
     const bonusByPlayer = {};   // { playerId: points }  — already joker-adjusted
     const jokerByPlayer = {};   // { playerId: "x2"|"x3" }  — display only
     const correctByPlayer = {}; // { playerId: bool }
+    const answeredByPlayer = {}; // { playerId: true } for players who actually submitted
 
     answersToProcess.forEach((answer) => {
       // answer.points already has joker multiplier applied by the frontend when saved.
+      answeredByPlayer[answer.playerId] = true;
       bonusByPlayer[answer.playerId] = Number(answer.points || 0);
       correctByPlayer[answer.playerId] = !!answer.isCorrect;
       if (answer.jokerApplied) {
@@ -263,6 +271,7 @@ exports.finalizeQuestion = onCall(async (request) => {
           bonusByPlayer,
           jokerByPlayer,
           correctByPlayer,
+          answeredByPlayer,
           rankMovementByPlayer,
           calculatedAtMs: Date.now(),
         },
@@ -280,6 +289,7 @@ exports.finalizeQuestion = onCall(async (request) => {
         leaderboardAfter: leaderboardAfterSnapshot,
         bonusByPlayer,
         correctByPlayer,
+        answeredByPlayer,
         rankMovementByPlayer,
         calculatedAtMs: Date.now(),
       },
