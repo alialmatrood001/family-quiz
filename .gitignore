@@ -11,6 +11,11 @@ node_modules
 dist
 dist-ssr
 *.local
+emulator-data/
+firebase-debug.log
+firestore-debug.log
+database-debug.log
+ui-debug.log
 
 # Editor directories and files
 .vscode/*

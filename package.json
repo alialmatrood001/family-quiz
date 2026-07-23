@@ -7,7 +7,12 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "emulators": "firebase emulators:start --only auth,functions,firestore,database",
+    "emulators:export": "firebase emulators:export ./emulator-data",
+    "emulators:import": "firebase emulators:start --only auth,functions,firestore,database --import=./emulator-data",
+    "emulators:check": "node scripts/check-emulator-connection.mjs",
+    "emulators:exec:check": "firebase emulators:exec --only auth,functions,firestore,database \"npm run emulators:check\""
   },
   "dependencies": {
     "firebase": "^12.13.0",
