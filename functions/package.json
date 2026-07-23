@@ -6,7 +6,11 @@
     "shell": "firebase functions:shell",
     "start": "npm run shell",
     "deploy": "firebase deploy --only functions",
-    "logs": "firebase functions:log"
+    "logs": "firebase functions:log",
+    "test:baseline": "node --test --test-concurrency=1 tests/integration/baseline-50.test.mjs tests/integration/idempotency.test.mjs tests/integration/edge-cases.test.mjs",
+    "test:baseline:50": "node --test --test-concurrency=1 tests/integration/baseline-50.test.mjs",
+    "test:baseline:edge": "node --test --test-concurrency=1 tests/integration/edge-cases.test.mjs",
+    "test:baseline:performance": "node --test --test-concurrency=1 tests/integration/performance.test.mjs"
   },
   "engines": {
     "node": "24"
