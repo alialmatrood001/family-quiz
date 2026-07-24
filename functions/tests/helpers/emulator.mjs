@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { initializeApp, getApps } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { getFirestore, Timestamp } from "firebase-admin/firestore";
@@ -53,6 +54,26 @@ const app = getApps()[0] || initializeApp({ projectId: DEMO_PROJECT_ID });
 export const db = getFirestore(app);
 const auth = getAuth(app);
 const tokenCache = new Map();
+
+export async function createEmulatorIdentity({ admin = false, label = "client" } = {}) {
+  assertEmulatorSafety();
+  const suffix = randomUUID();
+  const email = `${label}-${suffix}@example.test`;
+  const password = `${randomUUID()}-Aa1!`;
+  const user = await auth.createUser({ email, password, displayName: `Emulator ${label}` });
+  await auth.setCustomUserClaims(user.uid, admin ? { admin: true } : {});
+  return { uid: user.uid, email, password };
+}
+
+export async function setEmulatorAdminClaim(uid, admin) {
+  assertEmulatorSafety();
+  await auth.setCustomUserClaims(uid, admin ? { admin: true } : {});
+}
+
+export async function deleteEmulatorIdentity(uid) {
+  if (!uid) return;
+  await auth.deleteUser(uid).catch(() => {});
+}
 
 export function roomRef(roomId) {
   return db.doc(`rooms/${roomId}`);
@@ -134,27 +155,15 @@ export async function readState(roomId) {
 
 async function authToken(role) {
   if (tokenCache.has(role)) return tokenCache.get(role);
-  const email = `operation4-${role}@example.test`;
-  const emulatorPassphrase = "LocalEmulatorOnly-42!";
-  let user;
-  try {
-    user = await auth.getUserByEmail(email);
-  } catch {
-    user = await auth.createUser({
-      email,
-      password: emulatorPassphrase,
-      displayName: `Operation 4 ${role}`,
-    });
-  }
-  await auth.setCustomUserClaims(user.uid, role === "admin" ? { admin: true } : {});
+  const identity = await createEmulatorIdentity({ admin: role === "admin", label: `operation4-${role}` });
   const response = await fetch(
     "http://127.0.0.1:9099/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=demo-key",
     {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        email,
-        password: emulatorPassphrase,
+        email: identity.email,
+        password: identity.password,
         returnSecureToken: true,
       }),
     }

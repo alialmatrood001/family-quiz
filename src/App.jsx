@@ -1,8 +1,6 @@
 ﻿import { Fragment, useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { initializeApp } from "firebase/app";
 import {
-  getFirestore,
   doc,
   setDoc,
   updateDoc,
@@ -19,23 +17,12 @@ import {
   runTransaction,
   writeBatch,
 } from "firebase/firestore";
+import { db } from "./firebase.js";
+import { adminAuth } from "./admin-auth.js";
+import { useQuestionFinalization } from "./use-question-finalization.js";
 import "./App.css";
 
-const firebaseConfig = {
-  apiKey: "AIzaSyAMLo_Y6QnuyHfB-_XfFFcHmnun-sO4Mvc",
-  authDomain: "family-quiz-b7960.firebaseapp.com",
-  projectId: "family-quiz-b7960",
-  storageBucket: "family-quiz-b7960.firebasestorage.app",
-  messagingSenderId: "1002819143902",
-  appId: "1:1002819143902:web:bc2b9becf69945d7485a4f",
-  measurementId: "G-X2T4CPDNM0",
-};
-
-const app = initializeApp(firebaseConfig);
-const db = getFirestore(app);
-
 const ROOM_ID = "family-quiz-001";
-const LOCAL_ADMIN_DEV_BYPASS = import.meta.env.DEV === true;
 
 const QUIZ_TITLE = "مسابقة قروب العائلة العائلية";
 const QUIZ_SUBTITLE = "من تقديم الأستاذ إبراهيم ال مطرود";
@@ -45,7 +32,6 @@ const GROUP_NAME_IMAGE_SRC = "/Group_name.png";
 const REVEAL_OPTIONS_DELAY_MS = 3000;
 const MEDIA_REVEAL_OPTIONS_DELAY_MS = 5000;
 const QUESTION_START_SYNC_BUFFER_MS = 300;
-const RESULTS_PROCESSING_STALE_MS = 9000;
 const RESULTS_LEADERBOARD_LIMIT = 15;
 const DEFAULT_PACKAGE_ID = "default";
 const DEFAULT_PACKAGE_NAME = "المسابقة الحالية";
@@ -82,12 +68,6 @@ function clamp(value, min, max) {
 
 function isSameId(a, b) {
   return a != null && b != null && String(a) === String(b);
-}
-
-function isResultsProcessingStale(room, questionId) {
-  if (!room?.processingQuestionId || !isSameId(room.processingQuestionId, questionId)) return false;
-  const startedAt = Number(room.processingStartedAtMs || 0);
-  return !startedAt || getNow() - startedAt > RESULTS_PROCESSING_STALE_MS;
 }
 
 function getAnswerStartMs(question = {}) {
@@ -1272,17 +1252,6 @@ async function launchInstructionsClarityPoll() {
   });
 }
 
-async function stopSystemCheck() {
-  await setDoc(
-    doc(db, "rooms", ROOM_ID),
-    {
-      healthCheck: { active: false },
-      updatedAt: serverTimestamp(),
-    },
-    { merge: true }
-  );
-}
-
 async function answerSystemCheck({ playerId, playerName, answerText }) {
   const answeredAtMs = getNow();
   await updateDoc(doc(db, "rooms", ROOM_ID), {
@@ -1349,33 +1318,7 @@ async function reopenQuestion(room) {
   );
 }
 
-async function showResults() {
-  const stageStartedAtMs = getNow();
-  await setDoc(
-    doc(db, "rooms", ROOM_ID),
-    {
-      stage: "results",
-      stageStartedAtMs,
-      resultsStartedAtMs: stageStartedAtMs,
-      revealUndoUntilMs: null,
-      questionIgnored: false,
-      collectingBonusByPlayer: {},
-      collectingBonusJokerByPlayer: {},
-      collectingBonusPlayerId: null,
-      collectingBonusPoints: 0,
-      rankMovementByPlayer: {},
-      updatedAt: serverTimestamp(),
-    },
-    { merge: true }
-  );
-}
-
-async function beginFinalCountdown(room) {
-  const questionId = room?.currentQuestion?.questionId || room?.currentQuestion?.id;
-  if (questionId && !isSameId(room?.processedQuestionId, questionId)) {
-    await calculateResultsForCurrentQuestion(room, { source: "final", nextStage: null });
-  }
-
+async function beginFinalCountdown() {
   const startedAtMs = getNow();
   await setDoc(
     doc(db, "rooms", ROOM_ID),
@@ -1478,423 +1421,6 @@ async function finishGame(players = [], questions = [], allAnswers = [], message
     },
     { merge: true }
   );
-}
-
-async function claimQuestionProcessing(questionId, { publishResultsStage = false } = {}) {
-  if (!questionId) return false;
-  const roomRef = doc(db, "rooms", ROOM_ID);
-
-  return runTransaction(db, async (transaction) => {
-    const roomSnap = await transaction.get(roomRef);
-    const roomData = roomSnap.exists() ? roomSnap.data() : {};
-
-    const alreadyProcessed =
-      isSameId(roomData.processedQuestionId, questionId) ||
-      roomData.currentQuestion?.resultsCalculated === true ||
-      (roomData.resultsCalculated === true && isSameId(roomData.resultsCalculatedQuestionId, questionId));
-    const processingSameQuestion = isSameId(roomData.processingQuestionId, questionId);
-    const processingStartedAt = Number(roomData.processingStartedAtMs || 0);
-    const processingIsFresh =
-      processingSameQuestion &&
-      processingStartedAt &&
-      getNow() - processingStartedAt <= RESULTS_PROCESSING_STALE_MS;
-
-    if (alreadyProcessed || processingIsFresh) {
-      return false;
-    }
-
-    transaction.set(
-      roomRef,
-      {
-        processingQuestionId: questionId,
-        processingStartedAtMs: getNow(),
-        ...(publishResultsStage ? {
-          stage: "results",
-          stageStartedAtMs: getNow(),
-          resultsStartedAtMs: getNow(),
-          revealUndoUntilMs: null,
-        } : {}),
-        updatedAt: serverTimestamp(),
-      },
-      { merge: true }
-    );
-
-    return true;
-  });
-}
-
-
-async function calculateResultsForCurrentQuestion(room, { source = "auto", nextStage = "results", publishResultsStage = false } = {}) {
-  const questionId = room?.currentQuestion?.questionId || room?.currentQuestion?.id;
-  if (!questionId) return;
-  const calculationStartedAtMs = getNow();
-  console.log(`Starting result calculation for question ${questionId}`, { source });
-
-  if (
-    isSameId(room?.processedQuestionId, questionId) ||
-    room?.currentQuestion?.resultsCalculated === true ||
-    (room?.resultsCalculated === true && isSameId(room?.resultsCalculatedQuestionId, questionId))
-  ) {
-    console.log("Results already calculated, skipping", { questionId });
-    return { skipped: true };
-  }
-
-  const roomRef = doc(db, "rooms", ROOM_ID);
-  const simulateSlowResults = !!room?.testMode?.slowResultsEnabled;
-  let prefetchedAnswersSnap = null;
-  let prefetchedPlayersSnap = null;
-  let claimed;
-
-  if (simulateSlowResults) {
-    claimed = await claimQuestionProcessing(questionId, { publishResultsStage });
-  } else {
-    [claimed, prefetchedAnswersSnap, prefetchedPlayersSnap] = await Promise.all([
-      claimQuestionProcessing(questionId, { publishResultsStage }),
-      getDocs(query(collection(db, "rooms", ROOM_ID, "answers"), where("questionId", "==", questionId))),
-      getDocs(collection(db, "rooms", ROOM_ID, "players")),
-    ]);
-  }
-
-  if (!claimed) {
-    console.log("Results already calculated, skipping", { questionId, reason: "busy-or-processed" });
-    return { skipped: true };
-  }
-
-  // TestMode: simulate slow calculation to test emergency skip
-  if (simulateSlowResults) {
-    const delayMs = Number(room?.testMode?.slowResultsDelayMs || 15000);
-    console.warn(`[TestMode] Delaying calculation by ${delayMs}ms`);
-    await new Promise((resolve) => setTimeout(resolve, delayMs));
-    const freshSnap = await getDoc(roomRef);
-    const freshRoom = freshSnap.exists() ? freshSnap.data() : null;
-    if (
-      freshRoom?.calculationStatus === "skipped" ||
-      isSameId(freshRoom?.processedQuestionId, questionId) ||
-      isSameId(freshRoom?.resultsCalculatedQuestionId, questionId)
-    ) {
-      await setDoc(
-        roomRef,
-        { processingQuestionId: null, processingStartedAtMs: null, updatedAt: serverTimestamp() },
-        { merge: true }
-      );
-      return { skipped: true };
-    }
-  }
-
-  const isTestMode = !!room?.testMode;
-  if (isTestMode) console.time(`[calc] ${questionId}`);
-
-  try {
-    const [answersSnap, playersSnap] = prefetchedAnswersSnap && prefetchedPlayersSnap
-      ? [prefetchedAnswersSnap, prefetchedPlayersSnap]
-      : await Promise.all([
-          getDocs(query(collection(db, "rooms", ROOM_ID, "answers"), where("questionId", "==", questionId))),
-          getDocs(collection(db, "rooms", ROOM_ID, "players")),
-        ]);
-
-    const safeAnswers = answersSnap.docs.map((item) => ({ id: item.id, ...item.data() }));
-    const safePlayers = playersSnap.docs
-      .map((item) => ({ id: item.id, ...item.data() }))
-      .filter((player) => !isVisitorRecord(player));
-
-    if (isTestMode) console.timeLog(`[calc] ${questionId}`, `fetch (${safeAnswers.length} answers, ${safePlayers.length} players)`);
-    console.log("Answers loaded", { questionId, answers: safeAnswers.length, players: safePlayers.length });
-
-    if (room?.currentQuestion?.isPractice) {
-      // Practice questions use the same result display flow, but their points are reset
-      // before the real competition starts.
-    }
-
-    const answersToProcess = [...safeAnswers]
-      .filter((answer) => isValidPlayerAnswerForQuestion(answer, questionId))
-      .sort((a, b) => Number(a.answeredAt || 0) - Number(b.answeredAt || 0));
-    const answerByPlayer = new Map(answersToProcess.map((answer) => [answer.playerId, answer]));
-    const bonusByPlayer = {};
-    const jokerByPlayer = {};
-    const correctByPlayer = {};
-    const answeredByPlayer = {};
-
-    answersToProcess.forEach((answer) => {
-      answeredByPlayer[answer.playerId] = true;
-      bonusByPlayer[answer.playerId] = Number(answer.points || 0);
-      correctByPlayer[answer.playerId] = !!answer.isCorrect;
-      if (answer.jokerApplied) {
-        jokerByPlayer[answer.playerId] = getJokerTimingLabel(answer.jokerMultiplier || 3);
-      }
-    });
-
-    const sortedBefore = [...safePlayers].sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
-    const previousRankByPlayer = {};
-    sortedBefore.forEach((player, index) => {
-      previousRankByPlayer[player.id] = index + 1;
-    });
-
-    if (room.questionIgnored) {
-      await setDoc(
-        roomRef,
-        {
-          processedQuestionId: questionId,
-          resultsCalculated: true,
-          resultsCalculatedQuestionId: questionId,
-          "currentQuestion.resultsCalculated": true,
-          "currentQuestion.resultsCalculatedAt": serverTimestamp(),
-          questionResultsById: {
-            [questionId]: {
-              questionId,
-              ignored: true,
-              answersCount: 0,
-              calculatedAtMs: getNow(),
-            },
-          },
-          collectingBonusByPlayer: {},
-          collectingBonusJokerByPlayer: {},
-          collectingBonusPlayerId: null,
-          collectingBonusPoints: 0,
-          rankMovementByPlayer: {},
-          collectingAnswerCorrectByPlayer: {},
-          resultsAnimationPhase: "done",
-          processingQuestionId: null,
-          processingStartedAtMs: null,
-          resultsError: null,
-          updatedAt: serverTimestamp(),
-        },
-        { merge: true }
-      );
-      console.log("Question marked as calculated", { questionId, ignored: true });
-      return { skipped: false };
-    }
-
-    const playerUpdates = safePlayers.map((player) => {
-      const answer = answerByPlayer.get(player.id);
-      const points = Number(answer?.points || 0);
-      const alreadyApplied = isSameId(player.lastQuestionId, questionId);
-      const nextScore = alreadyApplied ? Number(player.score || 0) : Number(player.score || 0) + points;
-      return {
-        player,
-        answer,
-        points,
-        alreadyApplied,
-        nextScore,
-      };
-    });
-
-    const sortedAfterRaw = [...playerUpdates]
-      .map(({ player, nextScore }) => ({ player, nextScore }))
-      .sort((a, b) => Number(b.nextScore || 0) - Number(a.nextScore || 0));
-    const rankMovementByPlayer = {};
-    sortedAfterRaw.forEach(({ player }, index) => {
-      rankMovementByPlayer[player.id] = (previousRankByPlayer[player.id] || index + 1) - (index + 1);
-    });
-
-    const resultsBatch = writeBatch(db);
-    playerUpdates.forEach(({ player, answer, points, alreadyApplied, nextScore }) => {
-      resultsBatch.update(doc(db, "rooms", ROOM_ID, "players", player.id), {
-        score: nextScore,
-        answeredCount: Number(player.answeredCount || 0) + (!alreadyApplied && answer ? 1 : 0),
-        lastQuestionPoints: points,
-        lastQuestionId: questionId,
-        lastQuestionCorrect: answer ? !!answer.isCorrect : null,
-        lastRankMovement: Number(rankMovementByPlayer[player.id] || 0),
-        lastAnswerAt: answer ? serverTimestamp() : player.lastAnswerAt || null,
-      });
-    });
-
-    // Stable snapshot for ResultsDisplay — before/after for two-phase animation
-    const leaderboardBeforeSnapshot = sortedBefore.slice(0, RESULTS_LEADERBOARD_LIMIT).map((player) => ({
-      id: player.id,
-      name: player.name || "",
-      emoji: player.emoji || "",
-      score: Number(player.score || 0),
-      jokerUsed: player.jokerUsed || false,
-      jokerQuestionId: player.jokerQuestionId || null,
-      jokerMultiplier: player.jokerMultiplier || null,
-      lastQuestionId: player.lastQuestionId || null,
-      lastQuestionPoints: Number(player.lastQuestionPoints || 0),
-      lastQuestionCorrect: player.lastQuestionCorrect ?? null,
-    }));
-    const leaderboardAfterSnapshot = sortedAfterRaw.slice(0, RESULTS_LEADERBOARD_LIMIT).map(({ player, nextScore }) => ({
-      id: player.id,
-      name: player.name || "",
-      emoji: player.emoji || "",
-      score: nextScore,
-      jokerUsed: player.jokerUsed || false,
-      jokerQuestionId: player.jokerQuestionId || null,
-      jokerMultiplier: player.jokerMultiplier || null,
-      lastQuestionId: questionId,
-      lastQuestionPoints: Number(bonusByPlayer[player.id] || 0),
-      lastQuestionCorrect: correctByPlayer[player.id] ?? null,
-    }));
-
-    // Emergency skip appears only after 3 seconds. If this calculation has taken
-    // unusually long, verify that the presenter did not skip it or move onward
-    // before committing any player-score or room updates.
-    if (getNow() - calculationStartedAtMs >= 2500) {
-      const latestRoomSnap = await getDoc(roomRef);
-      const latestRoom = latestRoomSnap.exists() ? latestRoomSnap.data() : {};
-      const latestQuestionId = latestRoom?.currentQuestion?.questionId || latestRoom?.currentQuestion?.id;
-      const wasEmergencySkipped =
-        !!latestRoom?.skippedQuestionIds?.[questionId] ||
-        (latestRoom?.calculationStatus === "skipped" && isSameId(latestRoom?.processedQuestionId, questionId));
-      const presenterMovedOn = !isSameId(latestQuestionId, questionId);
-
-      if (wasEmergencySkipped || presenterMovedOn) {
-        console.warn("Late result calculation cancelled", { questionId, wasEmergencySkipped, presenterMovedOn });
-        return { skipped: true, cancelled: true };
-      }
-    }
-
-    resultsBatch.set(
-      roomRef,
-      {
-        processedQuestionId: questionId,
-        resultsCalculated: true,
-        resultsCalculatedQuestionId: questionId,
-        "currentQuestion.resultsCalculated": true,
-        "currentQuestion.resultsCalculatedAt": serverTimestamp(),
-        questionResultsById: {
-          [questionId]: {
-            questionId,
-            answersCount: answersToProcess.length,
-            correctCount: answersToProcess.filter((answer) => answer.isCorrect).length,
-            jokerCount: answersToProcess.filter((answer) => answer.jokerApplied).length,
-            bonusByPlayer,
-            jokerByPlayer,
-            correctByPlayer,
-            answeredByPlayer,
-            rankMovementByPlayer,
-            calculatedAtMs: getNow(),
-          },
-        },
-        collectingBonusByPlayer: bonusByPlayer,
-        collectingBonusJokerByPlayer: jokerByPlayer,
-        collectingBonusPlayerId: null,
-        collectingBonusPoints: 0,
-        rankMovementByPlayer,
-        collectingAnswerCorrectByPlayer: correctByPlayer,
-        resultsAnimationPhase: "done",
-        resultsDisplaySnapshot: {
-          questionId,
-          leaderboardBefore: leaderboardBeforeSnapshot,
-          leaderboardAfter: leaderboardAfterSnapshot,
-          bonusByPlayer,
-          correctByPlayer,
-          answeredByPlayer,
-          rankMovementByPlayer,
-          calculatedAtMs: getNow(),
-        },
-        calculationStatus: "calculated",
-        processingQuestionId: null,
-        processingStartedAtMs: null,
-        resultsError: null,
-        ...(nextStage ? { stage: nextStage } : {}),
-        updatedAt: serverTimestamp(),
-      },
-      { merge: true }
-    );
-    await resultsBatch.commit();
-    if (isTestMode) console.timeLog(`[calc] ${questionId}`, `atomic results batch (${playerUpdates.length} players)`);
-    console.log("Player scores and result snapshot updated atomically", { questionId, players: playerUpdates.length });
-    if (isTestMode) console.timeEnd(`[calc] ${questionId}`);
-    console.log("Question marked as calculated", { questionId });
-    return { skipped: false };
-  } catch (error) {
-    console.error("Calculation failed", error);
-    await setDoc(
-      roomRef,
-      {
-        resultsError: String(error?.message || error),
-        processingQuestionId: null,
-        processingStartedAtMs: null,
-        updatedAt: serverTimestamp(),
-      },
-      { merge: true }
-    );
-    throw error;
-  } finally {
-    console.log("Calculation finished", { questionId });
-  }
-}
-
-async function showResultsFast(room) {
-  const questionId = room?.currentQuestion?.questionId || room?.currentQuestion?.id;
-  if (!questionId || isSameId(room?.processedQuestionId, questionId)) {
-    await showResults();
-    return;
-  }
-
-  await calculateResultsForCurrentQuestion(room, {
-    source: "show-results",
-    nextStage: null,
-    publishResultsStage: true,
-  });
-}
-
-// Called by admin when display page is not open and scores are stuck.
-// Reads the current answers and players directly from Firestore and processes them.
-async function forceProcessResults(room) {
-  return calculateResultsForCurrentQuestion(room, { source: "manual" });
-}
-
-// Emergency bypass: marks the current question as processed WITHOUT touching any player scores.
-// Used when score calculation is stuck and the admin needs to unblock the competition.
-async function skipQuestionCalculation(room, answersCount = 0, { source = "admin-control" } = {}) {
-  const questionId = room?.currentQuestion?.questionId || room?.currentQuestion?.id;
-  if (!questionId) return;
-  const skippedAtMs = getNow();
-  const skipReport = {
-    questionId,
-    questionNumber: Number(room?.currentQuestionIndex ?? -1) + 1,
-    questionText: getQuestionDisplayText(room?.currentQuestion) || "سؤال بلا عنوان",
-    answersCount: Number(answersCount || 0),
-    skippedAtMs,
-    source,
-    scoreChange: 0,
-    standingsChanged: false,
-    answersPreserved: true,
-    nextQuestionUnlocked: true,
-  };
-
-  await setDoc(
-    doc(db, "rooms", ROOM_ID),
-    {
-      processedQuestionId: questionId,
-      resultsCalculated: true,
-      resultsCalculatedQuestionId: questionId,
-      "currentQuestion.resultsCalculated": true,
-      processingQuestionId: null,
-      processingStartedAtMs: null,
-      resultsError: null,
-      calculationStatus: "skipped",
-      collectingBonusByPlayer: {},
-      collectingBonusJokerByPlayer: {},
-      collectingBonusPlayerId: null,
-      collectingBonusPoints: 0,
-      rankMovementByPlayer: {},
-      collectingAnswerCorrectByPlayer: {},
-      resultsAnimationPhase: "done",
-      resultsDisplaySnapshot: null,
-      lastSkipReport: skipReport,
-      [`skippedQuestionIds.${questionId}`]: true,
-      questionResultsById: {
-        [questionId]: {
-          questionId,
-          status: "skipped",
-          calculationMode: "skipped",
-          answersCount,
-          correctCount: null,
-          skippedAtMs,
-          calculatedAtMs: skippedAtMs,
-          scoreChange: 0,
-          standingsChanged: false,
-          answersPreserved: true,
-          nextQuestionUnlocked: true,
-        },
-      },
-      updatedAt: serverTimestamp(),
-    },
-    { merge: true }
-  );
-  return skipReport;
 }
 
 /* TestMode helpers */
@@ -2276,37 +1802,32 @@ function AutoLockJokers({ room, players }) {
   return null;
 }
 
-function AutoProcessResults({ room, answers = [], players = [] }) {
-  const [processingQuestionId, setProcessingQuestionId] = useState(null);
-
+function AutoFinalizeQuestion({ room, finalization }) {
   useEffect(() => {
-    async function processScores() {
-      const questionId = room?.currentQuestion?.questionId || room?.currentQuestion?.id;
+    const questionId = room?.currentQuestion?.questionId || room?.currentQuestion?.id;
+    const serverIsProcessing =
+      room?.finalization?.status === "processing" &&
+      isSameId(room?.finalization?.questionId, questionId);
+    const needsResume =
+      !!questionId &&
+      !isSameId(room?.processedQuestionId, questionId) &&
+      (room?.stage === "results" || serverIsProcessing);
+    if (!needsResume || finalization.status !== "idle") return;
 
-      if (!room || room.stage !== "results" || !questionId) return;
-      if (isSameId(room.processedQuestionId, questionId)) return;
-      if (isSameId(room.processingQuestionId, questionId) && !isResultsProcessingStale(room, questionId)) return;
-      if (processingQuestionId === questionId) return;
-
-      setProcessingQuestionId(questionId);
-
-      try {
-        await calculateResultsForCurrentQuestion(room, { source: "auto" });
-      } catch (error) {
-        console.error("AutoProcessResults failed:", error);
-      } finally {
-        setProcessingQuestionId(null);
+    finalization.requestFinalization().catch((error) => {
+      if (error?.code !== "cancelled" && import.meta.env.DEV) {
+        console.error("Automatic finalization resume failed.", error?.code);
       }
-    }
-
-    processScores();
-  }, [room, processingQuestionId, answers, players]);
-
-  useEffect(() => {
-    if (room?.stage !== "results") {
-      setProcessingQuestionId(null);
-    }
-  }, [room?.stage]);
+    });
+  }, [
+    room?.stage,
+    room?.processedQuestionId,
+    room?.currentQuestion?.questionId,
+    room?.currentQuestion?.id,
+    room?.finalization?.status,
+    room?.finalization?.questionId,
+    finalization,
+  ]);
 
   return null;
 }
@@ -4947,7 +4468,7 @@ function BroadcastQuestionCard({ question, label, variant = "default", compact =
   );
 }
 
-function AdminControl({ room, players, questions, allQuestions = [], questionPackages = [], allAnswers, messages = [], gameHistory = [], visitors = [] }) {
+function AdminControl({ room, players, questions, allQuestions = [], questionPackages = [], allAnswers, messages = [], gameHistory = [], visitors = [], finalization }) {
   const stage = room?.stage || "home";
   const adminNow = useNow(250);
   const currentQuestionIndex = room?.currentQuestionIndex ?? -1;
@@ -4961,8 +4482,6 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
   const [previousAdminSection, setPreviousAdminSection] = useState(null);
   const [adminAdvancing, setAdminAdvancing] = useState(false);
   const adminAdvancingRef = useRef(false);
-  const [isAdminSkipping, setIsAdminSkipping] = useState(false);
-  const [showAdminEmergencySkip, setShowAdminEmergencySkip] = useState(false);
   const [testModeWorking, setTestModeWorking] = useState(false);
   const [testModeMsg, setTestModeMsg] = useState(null);
   const [quickControlsOpen, setQuickControlsOpen] = useState(false);
@@ -5020,14 +4539,6 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
   const adminCurrentIsLastQuestion = currentQuestionIndex >= 0 && currentQuestionIndex >= adminQuestionList.length - 1;
   const adminNextQuestionIsLast = currentQuestionIndex + 1 >= adminQuestionList.length - 1;
 
-  useEffect(() => {
-    if (stage !== "results" || adminCurrentProcessed) {
-      setShowAdminEmergencySkip(false);
-      return undefined;
-    }
-    const timer = setTimeout(() => setShowAdminEmergencySkip(true), 3000);
-    return () => clearTimeout(timer);
-  }, [stage, adminCurrentProcessed, adminCurrentQuestionId]);
   const prizeWheel = room?.prizeWheel || {};
   const prizeWinners = prizeWheel.winners || [];
   const prizeItems = Array.isArray(prizeWheel.prizeItems)
@@ -5212,28 +4723,31 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
     }
   }
 
-  async function handleAdminSkipCalculation() {
-    if (isAdminSkipping) return;
-    const confirmed = window.confirm(
-      "تجاوز هذا السؤال بدون نقاط؟\n\n" +
-      "• لن تُضاف أو تُخصم أي نقاط.\n" +
-      "• لن يتغير ترتيب المتسابقين.\n" +
-      "• ستبقى الإجابات محفوظة في التقرير.\n" +
-      "• سيتاح الانتقال للسؤال التالي فورًا.\n\n" +
-      "استخدم هذا الخيار فقط إذا تعطل الاحتساب."
-    );
-    if (!confirmed) return;
-    setIsAdminSkipping(true);
-    const currentAnswersCount = allAnswers.filter(
-      (answer) => answer.questionId === adminCurrentQuestionId
-    ).length;
+  async function handleFinalizeQuestion({ announceWinners = false } = {}) {
+    if (finalization.isBusy) return;
     try {
-      await skipQuestionCalculation(room, currentAnswersCount, { source: "admin-control" });
+      await finalization.requestFinalization();
+      if (announceWinners) {
+        await beginFinalCountdown();
+      }
     } catch (error) {
-      console.error("Admin skip calculation failed:", error);
-    } finally {
-      setIsAdminSkipping(false);
+      if (error?.code !== "cancelled" && import.meta.env.DEV) {
+        console.error("Admin finalization failed.", error?.code);
+      }
     }
+  }
+
+  async function handleFinishGameNow() {
+    if (!window.confirm("هل تريد إنهاء المسابقة الآن؟")) return;
+    if (adminCurrentQuestionId && !adminCurrentProcessed) {
+      try {
+        await finalization.requestFinalization();
+      } catch (error) {
+        if (import.meta.env.DEV) console.error("Finalization before finishing failed.", error?.code);
+        return;
+      }
+    }
+    await finishGame(players, questions, allAnswers || [], messages, room);
   }
 
   async function startPracticeQuestions() {
@@ -5483,12 +4997,12 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
                     </>
                   )}
                   {stage === "reveal" && Number(room?.revealUndoUntilMs || 0) > adminNow && getQuestionTimeLeft(room?.currentQuestion, room, adminNow) > 0 && <button className="warning-action" onClick={() => reopenQuestion(room)}>تراجع</button>}
-                  {stage === "reveal" && (!room?.practiceMode && adminCurrentIsLastQuestion ? <button onClick={() => beginFinalCountdown(room)}>إعلان الفائزين</button> : <button onClick={() => showResultsFast(room)}>إظهار النتائج</button>)}
+                  {stage === "reveal" && (!room?.practiceMode && adminCurrentIsLastQuestion ? <button onClick={() => handleFinalizeQuestion({ announceWinners: true })} disabled={finalization.isBusy}>{finalization.isBusy ? "جاري اعتماد النتائج..." : "إعلان الفائزين"}</button> : <button onClick={() => handleFinalizeQuestion()} disabled={finalization.isBusy}>{finalization.isBusy ? "جاري اعتماد النتائج..." : "إظهار النتائج"}</button>)}
                   {stage === "results" && room?.practiceMode && <button className="secondary-action" onClick={launchInstructionsClarityPoll}>تصويت</button>}
                   {stage === "results" && room?.practiceMode && <button className="warning-action" onClick={finishPracticeAndReturnToStart}>إنهاء التجربة</button>}
                   {stage === "results" && (room?.practiceMode ? practiceQuestions[currentQuestionIndex + 1] : competitionQuestions[currentQuestionIndex + 1]) && <button onClick={advanceFromDashboard} disabled={adminAdvancing || !adminCurrentProcessed}>{!adminCurrentProcessed ? "جاري احتساب النتائج..." : adminAdvancing ? "استعدوا..." : (nextAdminQuestionNeedsVote ? "تصويت السؤال التالي" : (adminNextQuestionIsLast ? "السؤال الأخير" : "السؤال التالي"))}</button>}
                   {stage !== "home" && stage !== "finished" && <button className="secondary-action" onClick={() => launchSystemCheck()}>استفتاء</button>}
-                  {stage !== "home" && stage !== "finished" && <button className="danger" onClick={() => { if (window.confirm("هل تريد إنهاء المسابقة الآن؟")) finishGame(players, questions, allAnswers || [], messages, room); }}>إنهاء المسابقة الآن</button>}
+                  {stage !== "home" && stage !== "finished" && <button className="danger" onClick={handleFinishGameNow} disabled={finalization.isBusy}>إنهاء المسابقة الآن</button>}
                 </div>
               )}
             </div>
@@ -5543,7 +5057,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
             {stage === "question" && <button onClick={() => endQuestionAndReveal(room, { allowUndo: true })}>إنهاء الوقت وكشف الإجابة</button>}
             {stage === "question" && <button className="secondary-action" onClick={() => extendQuestionTime(room, 10)}>+10 ثوانٍ</button>}
             {stage === "question" && isMediaQuestion(room?.currentQuestion) && !hasMediaEnded(room, room.currentQuestion) && <button className="secondary-action" onClick={() => finishMediaQuestion(room.currentQuestion)}>تجاوز المقطع</button>}
-            {stage === "reveal" && (!room?.practiceMode && adminCurrentIsLastQuestion ? <button onClick={() => beginFinalCountdown(room)}>إعلان الفائزين</button> : <button onClick={() => showResultsFast(room)}>إظهار النتائج</button>)}
+            {stage === "reveal" && (!room?.practiceMode && adminCurrentIsLastQuestion ? <button onClick={() => handleFinalizeQuestion({ announceWinners: true })} disabled={finalization.isBusy}>{finalization.isBusy ? "جاري اعتماد النتائج..." : "إعلان الفائزين"}</button> : <button onClick={() => handleFinalizeQuestion()} disabled={finalization.isBusy}>{finalization.isBusy ? "جاري اعتماد النتائج..." : "إظهار النتائج"}</button>)}
             {stage === "reveal" && Number(room?.revealUndoUntilMs || 0) > adminNow && getQuestionTimeLeft(room?.currentQuestion, room, adminNow) > 0 && <button className="secondary-action" onClick={() => reopenQuestion(room)}>تراجع عن الكشف</button>}
             {stage === "results" && (room?.practiceMode ? practiceQuestions[currentQuestionIndex + 1] : competitionQuestions[currentQuestionIndex + 1]) && <button onClick={advanceFromDashboard} disabled={adminAdvancing || !adminCurrentProcessed}>{!adminCurrentProcessed ? "جاري احتساب النتائج..." : nextAdminQuestionNeedsVote ? "بدء تصويت الجولة التالية" : adminNextQuestionIsLast ? "عرض السؤال الأخير" : "عرض السؤال التالي"}</button>}
             {stage === "results" && room?.practiceMode && <button className="secondary-action" onClick={finishPracticeAndReturnToStart}>إنهاء التجربة</button>}
@@ -5552,15 +5066,23 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
           </section>
         </div>
 
-        {stage === "results" && !adminCurrentProcessed && showAdminEmergencySkip && (
-          <section className="broadcast-emergency-skip" aria-label="أداة تجاوز احتساب النتائج">
+        {(stage === "reveal" || finalization.status !== "idle") && (
+          <section className="broadcast-emergency-skip" aria-live="polite">
             <div>
-              <strong>هل احتساب النتائج متعطل؟</strong>
-              <span>استخدم التجاوز فقط بعد التأكد أن إعادة المحاولة لم تنجح.</span>
+              <strong>
+                {finalization.status === "requesting" && "جاري إرسال طلب إنهاء السؤال..."}
+                {finalization.status === "processing" && "السيرفر يحتسب النتائج الرسمية..."}
+                {finalization.status === "completed" && "تم اعتماد النتيجة الرسمية."}
+                {finalization.status === "error" && "تعذر اعتماد النتيجة."}
+                {finalization.status === "idle" && "النتائج لم تعتمد بعد."}
+              </strong>
+              {finalization.message && <span>{finalization.message}</span>}
             </div>
-            <button type="button" onClick={handleAdminSkipCalculation} disabled={isAdminSkipping}>
-              {isAdminSkipping ? "جاري التجاوز..." : "تجاوز السؤال بدون نقاط"}
-            </button>
+            {finalization.status === "error" && (
+              <button type="button" onClick={() => handleFinalizeQuestion()} disabled={finalization.isBusy}>
+                إعادة المحاولة
+              </button>
+            )}
           </section>
         )}
 
@@ -6385,50 +5907,10 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
   );
 }
 
-function HealthCheckResultsPanel({ room, players = [] }) {
-  const check = room?.healthCheck;
-  if (!check?.active) return null;
-
-  const responses = Object.values(check.responses || {});
-  const okLabel = check.okText || "كل شي تمام";
-  const problemLabel = check.problemText || "في مشكلة";
-  const okCount = responses.filter((item) => item.answerText === okLabel || item.answerText === "كل شي تمام").length;
-  const problemCount = responses.filter((item) => item.answerText === problemLabel || item.answerText === "في مشكلة").length;
-  const totalCount = responses.length;
-  const votersTarget = players.length;
-
-  return (
-    <div className={check.kind === "instructions" ? "admin-health-popover instructions-health-popover" : "admin-health-popover"}>
-      <div className="health-popover-title">
-        <strong>{check.title || "استفتاء"}</strong>
-        <span>قام بالتصويت {totalCount} من {votersTarget}</span>
-      </div>
-      <div className="health-result-row ok"><span>{okLabel}</span><strong>{okCount}</strong></div>
-      <div className="health-result-row problem"><span>{problemLabel}</span><strong>{problemCount}</strong></div>
-      <button type="button" className="health-stop-button" onClick={stopSystemCheck}>إيقاف</button>
-    </div>
-  );
-}
-
-
 function DisplayScreen({ room, players, questions, messages, answers, allAnswers }) {
   const [previewStage, setPreviewStage] = useState(null);
   const [previewQuestionIndex, setPreviewQuestionIndex] = useState(null);
-  const [readyCountdown, setReadyCountdown] = useState(null);
-  const [showForceProcess, setShowForceProcess] = useState(false);
-  const [isManuallyCalculating, setIsManuallyCalculating] = useState(false);
-  const [isAdvancingDisplayQuestion, setIsAdvancingDisplayQuestion] = useState(false);
-  const [isSkippingCalculation, setIsSkippingCalculation] = useState(false);
-  const [skipNoticeQuestionId, setSkipNoticeQuestionId] = useState(null);
-  const [isStartingCompetition, setIsStartingCompetition] = useState(false);
-  const [startCompetitionError, setStartCompetitionError] = useState(null);
-  const [isShowingResults, setIsShowingResults] = useState(false);
-  const [forceRetryError, setForceRetryError] = useState(null);
   const [showFinalQuestionResults, setShowFinalQuestionResults] = useState(false);
-  const [showInstructionsContinue, setShowInstructionsContinue] = useState(false);
-  const readyTimerRef = useRef(null);
-  const advanceSafetyTimerRef = useRef(null);
-  const displayAdvancingRef = useRef(false);
   const displayNow = useNow(250);
 
   const stage = room?.stage || "home";
@@ -6439,7 +5921,7 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
   const syncedReadyCountdown = Math.max(0, Math.ceil((Number(room?.nextQuestionReadyUntilMs || 0) - displayNow) / 1000));
   // Firestore's shared deadline is authoritative, so the countdown stays correct
   // even when another tab starts the question or background timers are throttled.
-  const visibleReadyCountdown = syncedReadyCountdown > 0 ? syncedReadyCountdown : (readyCountdown ?? 1);
+  const visibleReadyCountdown = syncedReadyCountdown > 0 ? syncedReadyCountdown : 1;
   const displayQuestionList = room?.practiceMode ? getPracticeQuestions(questions) : getMainQuestions(questions);
   const finalQuestionIndex = Math.max(0, displayQuestionList.length - 1);
   const finalQuestionSource = displayQuestionList[finalQuestionIndex] || currentQuestion;
@@ -6462,11 +5944,6 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
         rankMovementByPlayer: {},
       }
     : room;
-  const nextQuestion = displayQuestionList?.[currentQuestionIndex + 1];
-  const nextQuestionNeedsVote = isVotingQuestion(nextQuestion);
-  const displayVoteTieLabels = stage === "categoryVote" ? getCategoryVoteTieLabels(room?.categoryVote || {}) : [];
-  const isCurrentLastQuestion = currentQuestionIndex >= 0 && currentQuestionIndex >= displayQuestionList.length - 1;
-  const nextQuestionIsLast = !!nextQuestion && currentQuestionIndex + 1 >= displayQuestionList.length - 1;
   const displayQuestionIndex = previewStage && previewQuestionIndex !== null ? previewQuestionIndex : currentQuestionIndex;
   const displayQuestionSource = previewStage && displayQuestionIndex >= 0 ? displayQuestionList?.[displayQuestionIndex] : currentQuestion;
   const displayQuestion = displayQuestionSource
@@ -6511,61 +5988,16 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
       }
     : room;
 
-  const liveQuestionId = room?.currentQuestion?.questionId || room?.currentQuestion?.id || null;
-  const currentProcessed = isSameId(room?.processedQuestionId, liveQuestionId);
-
   useEffect(() => {
-    if (stage !== "instructions") setShowInstructionsContinue(false);
-  }, [stage]);
-
-  useEffect(() => {
-    const keepLocalReadyTimer = stage === "ready" && displayAdvancingRef.current;
-    if (keepLocalReadyTimer) {
-      setPreviewStage("ready");
-      return;
-    }
-
     setPreviewStage(null);
     setPreviewQuestionIndex(null);
-    setReadyCountdown(null);
-    if (readyTimerRef.current) {
-      clearInterval(readyTimerRef.current);
-      readyTimerRef.current = null;
-    }
-    if (advanceSafetyTimerRef.current) {
-      clearTimeout(advanceSafetyTimerRef.current);
-      advanceSafetyTimerRef.current = null;
-    }
-    displayAdvancingRef.current = false;
-    setIsAdvancingDisplayQuestion(false);
   }, [stage, room?.currentQuestion?.questionId]);
-
-  useEffect(() => {
-    if (stage !== "results" || currentProcessed) {
-      setShowForceProcess(false);
-      return;
-    }
-
-    const timeout = setTimeout(() => setShowForceProcess(true), 3500);
-    return () => clearTimeout(timeout);
-  }, [stage, currentProcessed, room?.currentQuestion?.questionId]);
 
   useEffect(() => {
     if (stage !== "finished") {
       setShowFinalQuestionResults(false);
     }
   }, [stage]);
-
-  useEffect(() => {
-    return () => {
-      if (readyTimerRef.current) clearInterval(readyTimerRef.current);
-      if (advanceSafetyTimerRef.current) clearTimeout(advanceSafetyTimerRef.current);
-    };
-  }, []);
-
-  useEffect(() => {
-    setSkipNoticeQuestionId(null);
-  }, [liveQuestionId]);
 
   if (!room) {
     return (
@@ -6634,447 +6066,8 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
     }
   }
 
-  async function startCompetition() {
-    if (isStartingCompetition) return;
-    const firstQuestion = getMainQuestions(questions)[0];
-    if (!firstQuestion) {
-      alert("أضف سؤالًا فعليًا واحدًا على الأقل قبل بدء المسابقة.");
-      return;
-    }
-    setIsStartingCompetition(true);
-    setStartCompetitionError(null);
-    try {
-      const playersSnap = await getDocs(collection(db, "rooms", ROOM_ID, "players"));
-      const resetBatch = writeBatch(db);
-      playersSnap.docs.forEach((playerDoc) => {
-        resetBatch.update(playerDoc.ref, {
-          score: 0,
-          answeredCount: 0,
-          lastQuestionPoints: 0,
-          lastQuestionId: null,
-          manualScoreDelta: 0,
-          manualScoreBaseline: 0,
-          practicePendingJoker: false,
-          practiceJokerQuestionId: null,
-          practiceJokerTiming: null,
-          practiceJokerMultiplier: null,
-          practiceJokerLockedAt: null,
-        });
-      });
-      await resetBatch.commit();
-      await setDoc(doc(db, "rooms", ROOM_ID), { practiceMode: false, practiceFinished: true, currentQuestionIndex: -1, usedQuestionIds: {}, updatedAt: serverTimestamp() }, { merge: true });
-      if (isVotingQuestion(firstQuestion)) {
-        await startCategoryVote(firstQuestion, room, 0);
-      } else {
-        await startReadyThenSend(firstQuestion, 0, { force: true });
-      }
-    } catch (error) {
-      console.error("Failed to start competition:", error);
-      setStartCompetitionError("حدث خطأ أثناء بدء المسابقة. حاول مرة أخرى.");
-    } finally {
-      setIsStartingCompetition(false);
-    }
-  }
-
-  async function handleSkipReadyCountdown() {
-    const question = room?.currentQuestion;
-    const questionId = question?.questionId || question?.id;
-    if (!questionId) return;
-    if (readyTimerRef.current) {
-      clearInterval(readyTimerRef.current);
-      readyTimerRef.current = null;
-    }
-    setReadyCountdown(null);
-    try {
-      await activatePreloadedQuestion(questionId, room?.currentQuestionIndex ?? 0);
-    } catch (err) {
-      console.error("Skip ready countdown failed:", err);
-    } finally {
-      setPreviewStage(null);
-      displayAdvancingRef.current = false;
-      setIsAdvancingDisplayQuestion(false);
-    }
-  }
-
-  async function startReadyThenSend(question, questionIndex, { force = false } = {}) {
-    if (displayAdvancingRef.current && !force) return false;
-    if (force && readyTimerRef.current) {
-      clearInterval(readyTimerRef.current);
-      readyTimerRef.current = null;
-    }
-    if (advanceSafetyTimerRef.current) {
-      clearTimeout(advanceSafetyTimerRef.current);
-      advanceSafetyTimerRef.current = null;
-    }
-    displayAdvancingRef.current = true;
-    setIsAdvancingDisplayQuestion(true);
-    if (readyTimerRef.current) clearInterval(readyTimerRef.current);
-    advanceSafetyTimerRef.current = setTimeout(() => {
-      console.warn("Display advance safety timeout reset local loading state.");
-      if (readyTimerRef.current) {
-        clearInterval(readyTimerRef.current);
-        readyTimerRef.current = null;
-      }
-      setPreviewStage(null);
-      setReadyCountdown(null);
-      displayAdvancingRef.current = false;
-      setIsAdvancingDisplayQuestion(false);
-    }, 7000);
-
-    try {
-      const readyDelayMs = 3000;
-      const readyUntilMs = getNow() + readyDelayMs;
-      await preloadQuestionForReady(question, questionIndex, readyUntilMs);
-
-      setPreviewStage("ready");
-      setReadyCountdown(3);
-
-      let counter = 3;
-      readyTimerRef.current = setInterval(async () => {
-        counter -= 1;
-        if (counter > 0) {
-          setReadyCountdown(counter);
-          return;
-        }
-
-        clearInterval(readyTimerRef.current);
-        readyTimerRef.current = null;
-        setReadyCountdown(null);
-        try {
-          const activated = await activatePreloadedQuestion(question.id || question.questionId, questionIndex);
-          if (!activated) {
-            console.warn("Display question activation was ignored because it was stale.");
-          }
-        } finally {
-          if (advanceSafetyTimerRef.current) {
-            clearTimeout(advanceSafetyTimerRef.current);
-            advanceSafetyTimerRef.current = null;
-          }
-          setPreviewStage(null);
-          displayAdvancingRef.current = false;
-          setIsAdvancingDisplayQuestion(false);
-        }
-      }, 1000);
-      return true;
-    } catch (error) {
-      console.error("Failed to advance display question", error);
-      if (advanceSafetyTimerRef.current) {
-        clearTimeout(advanceSafetyTimerRef.current);
-        advanceSafetyTimerRef.current = null;
-      }
-      setPreviewStage(null);
-      setReadyCountdown(null);
-      displayAdvancingRef.current = false;
-      setIsAdvancingDisplayQuestion(false);
-      return false;
-    }
-  }
-
-  async function finishPracticeToRegistration() {
-    const playersSnap = await getDocs(collection(db, "rooms", ROOM_ID, "players"));
-    await Promise.all(playersSnap.docs.map((playerDoc) =>
-      updateDoc(playerDoc.ref, {
-        score: 0,
-        answeredCount: 0,
-        lastQuestionPoints: 0,
-        lastQuestionId: null,
-        manualScoreDelta: 0,
-        manualScoreBaseline: 0,
-        practicePendingJoker: false,
-        practiceJokerQuestionId: null,
-        practiceJokerTiming: null,
-        practiceJokerMultiplier: null,
-        practiceJokerLockedAt: null,
-      })
-    ));
-    await setDoc(doc(db, "rooms", ROOM_ID), {
-      stage: "practiceComplete",
-      practiceMode: false,
-      practiceFinished: true,
-      currentQuestion: null,
-      currentQuestionIndex: -1,
-      updatedAt: serverTimestamp(),
-    }, { merge: true });
-  }
-
-  async function goNextQuestion() {
-    if (nextQuestionNeedsVote) {
-      await startCategoryVote(nextQuestion, room, currentQuestionIndex + 1);
-      return;
-    }
-
-    if (!nextQuestion) {
-      if (room?.practiceMode) {
-        await finishPracticeToRegistration();
-        return;
-      }
-      await finishGame(players, getMainQuestions(questions), allAnswers || [], messages, room);
-      return;
-    }
-
-    await startReadyThenSend(nextQuestion, currentQuestionIndex + 1);
-  }
-
-  async function finishCategoryVoteFromDisplay({ selectedCategory = null, chooseRandomTie = false } = {}) {
-    if (isAdvancingDisplayQuestion) return;
-    setIsAdvancingDisplayQuestion(true);
-    try {
-      const outcome = await resolveCategoryVote(
-        room,
-        room?.practiceMode ? getPracticeQuestions(questions) : getMainQuestions(questions),
-        { selectedCategory, chooseRandomTie }
-      );
-      if (!outcome.resolved && outcome.reason !== "tie") {
-        if (room?.practiceMode) await finishPracticeToRegistration();
-        else await finishGame(players, getMainQuestions(questions), allAnswers || [], messages, room);
-      }
-    } finally {
-      setIsAdvancingDisplayQuestion(false);
-    }
-  }
-
-  async function handleManualResultCalculation() {
-    if (isManuallyCalculating) return;
-    if (currentProcessed) return; // already done, noop
-    setIsManuallyCalculating(true);
-    setForceRetryError(null);
-    try {
-      await forceProcessResults(room);
-    } catch (error) {
-      console.error("Manual result calculation failed:", error);
-      setForceRetryError("فشلت إعادة المحاولة، استخدم زر التجاوز الاضطراري إذا استمر التعليق.");
-    } finally {
-      setIsManuallyCalculating(false);
-    }
-  }
-
-  async function handleSkipCalculation() {
-    if (isSkippingCalculation) return;
-    const confirmed = window.confirm(
-      "تجاوز هذا السؤال بدون نقاط؟\n\nلن تتغير النقاط أو المراكز، وستبقى الإجابات محفوظة، وسيصبح السؤال التالي متاحًا."
-    );
-    if (!confirmed) return;
-    setIsSkippingCalculation(true);
-    try {
-      await skipQuestionCalculation(room, answers.length, { source: "presenter-display" });
-      setSkipNoticeQuestionId(liveQuestionId);
-    } catch (error) {
-      console.error("Skip calculation failed:", error);
-    } finally {
-      setIsSkippingCalculation(false);
-    }
-  }
-
-  async function handleAnnounceFinalWinners() {
-    await beginFinalCountdown(room);
-  }
-
-  async function startPracticeFromDisplay() {
-    const firstPractice = getPracticeQuestions(questions)[0];
-    if (!firstPractice) {
-      alert("أضف حتى 3 أسئلة تجريبية من إعدادات الأسئلة أولًا.");
-      return;
-    }
-
-    await setDoc(doc(db, "rooms", ROOM_ID), {
-      practiceMode: true,
-      practiceFinished: false,
-      currentQuestionIndex: -1,
-      updatedAt: serverTimestamp(),
-    }, { merge: true });
-
-    if (isVotingQuestion(firstPractice)) {
-      await startCategoryVote(firstPractice, { ...room, practiceMode: true }, 0);
-    } else {
-      await startReadyThenSend(firstPractice, 0);
-    }
-  }
-
-  function renderDisplayButton() {
-    let mainButton = null;
-
-    if (stage === "home") {
-      mainButton = <button onClick={resetAndStartRegistration}>فتح التسجيل</button>;
-    } else if (stage === "instructions") {
-      mainButton = (
-        <button className="display-main-action" onClick={() => setShowInstructionsContinue(true)}>
-          استمرار
-        </button>
-      );
-    } else if (stage === "registration" || stage === "practiceComplete") {
-      const wantsStart = stage === "practiceComplete" || room?.practiceFinished;
-      mainButton = (
-        <>
-          <button
-            onClick={wantsStart ? startCompetition : showInstructionsPage}
-            disabled={players.length === 0 || (room?.practiceFinished && getMainQuestions(questions).length === 0) || (wantsStart && isStartingCompetition)}
-          >
-            {wantsStart ? (isStartingCompetition ? "جاري البدء..." : "ابدأ المسابقة") : "عرض معلومات المسابقة"}
-          </button>
-          {startCompetitionError && <p className="display-start-error">{startCompetitionError}</p>}
-        </>
-      );
-    } else if (stage === "categoryVote") {
-      mainButton = displayVoteTieLabels.length > 1 ? (
-        <div className="display-vote-tie-actions">
-          <strong>التصويت متعادل</strong>
-          <button type="button" className="tie-random-button" onClick={() => finishCategoryVoteFromDisplay({ chooseRandomTie: true })} disabled={isAdvancingDisplayQuestion}>اختيار عشوائي</button>
-          {displayVoteTieLabels.map((label) => (
-            <button type="button" className="display-secondary-action" key={`display-tie-${label}`} onClick={() => finishCategoryVoteFromDisplay({ selectedCategory: label })} disabled={isAdvancingDisplayQuestion}>اختيار {label}</button>
-          ))}
-        </div>
-      ) : (
-        <button onClick={finishCategoryVoteFromDisplay} disabled={isAdvancingDisplayQuestion}>
-          {isAdvancingDisplayQuestion ? "جاري تجهيز السؤال..." : "إغلاق التصويت وتجهيز السؤال"}
-        </button>
-      );
-    } else if (stage === "question") {
-      mainButton = <button onClick={() => endQuestionAndReveal(room, { allowUndo: true })}>إنهاء السؤال الآن وإظهار الإجابة الصحيحة</button>;
-    } else if (stage === "reveal") {
-      mainButton = !room?.practiceMode && isCurrentLastQuestion
-        ? <button onClick={handleAnnounceFinalWinners}>إعلان الفائزين</button>
-        : (
-          <button
-            disabled={isShowingResults}
-            onClick={async () => {
-              if (isShowingResults) return;
-              setIsShowingResults(true);
-              try { await showResultsFast(room); } catch (e) { console.error(e); } finally { setIsShowingResults(false); }
-            }}
-          >
-            {isShowingResults ? "جاري تحضير النتائج..." : "إظهار النتائج"}
-          </button>
-        );
-    } else if (stage === "results") {
-      mainButton = (
-        <>
-          <div className="results-primary-actions">
-            <button onClick={goNextQuestion} disabled={!currentProcessed || isAdvancingDisplayQuestion}>
-              {!currentProcessed ? "جاري تجميع النتائج..." : isAdvancingDisplayQuestion ? "جاري تجهيز السؤال..." : (nextQuestionNeedsVote ? "تصويت السؤال التالي" : (nextQuestion ? (nextQuestionIsLast ? "السؤال الأخير" : "السؤال التالي") : (room?.practiceMode ? "إنهاء التجربة" : "إنهاء المسابقة")))}
-            </button>
-            {!currentProcessed && showForceProcess && (
-              <button
-                type="button"
-                className="force-process-button"
-                onClick={handleManualResultCalculation}
-                disabled={isManuallyCalculating}
-                title="يعيد محاولة احتساب السؤال الحالي فقط، ولا يضاعف النقاط إذا كان محسوبًا مسبقًا."
-              >
-                {isManuallyCalculating ? "جاري إعادة المحاولة..." : "إعادة المحاولة"}
-              </button>
-            )}
-            {!currentProcessed && showForceProcess && (
-              <button
-                type="button"
-                className="skip-calculation-button"
-                onClick={handleSkipCalculation}
-                disabled={isSkippingCalculation}
-                title="يتجاوز السؤال بدون نقاط ويحفظ الإجابات ويفتح الانتقال للسؤال التالي"
-              >
-                {isSkippingCalculation ? "جاري التجاوز..." : "تجاوز بدون نقاط"}
-              </button>
-            )}
-          </div>
-          {forceRetryError && <span className="display-retry-error">{forceRetryError}</span>}
-          {skipNoticeQuestionId === liveQuestionId && (
-            <div className="skip-calculation-notice">
-              تم التجاوز: النقاط والترتيب لم يتغيرا، والإجابات محفوظة.
-            </div>
-          )}
-        </>
-      );
-    } else if (stage === "finished") {
-      mainButton = showFinalQuestionResults
-        ? <button onClick={() => setShowFinalQuestionResults(false)}>العودة للفائزين</button>
-        : <button onClick={() => setShowFinalQuestionResults(true)} disabled={!finalQuestion}>نتائج السؤال الأخير</button>;
-    } else if (stage === "prizeWheel") {
-      mainButton = <button onClick={async () => {
-        const fallbackStage = room?.prizeWheel?.previousStage || "registration";
-        await updateDoc(doc(db, "rooms", ROOM_ID), {
-          stage: fallbackStage === "prizeWheel" ? "registration" : fallbackStage,
-          "prizeWheel.spinning": false,
-          updatedAt: serverTimestamp(),
-        });
-      }}>إغلاق سحب الجوائز</button>;
-    }
-
-    return (
-      <div className="display-primary-actions">
-        {!previewStage && mainButton}
-        {previewStage && displayStage !== "ready" && (
-          <button
-            type="button"
-            className="display-nav-button display-current-stage-button"
-            onClick={() => { setPreviewStage(null); setPreviewQuestionIndex(null); }}
-          >
-            الرجوع للمرحلة الحالية
-          </button>
-        )}
-      </div>
-    );
-  }
-
-  function renderBottomDisplayActions() {
-    if (stage === "home" || stage === "finished" || stage === "prizeWheel") return null;
-
-    return (
-      <div className="display-corner-actions">
-        <HealthCheckResultsPanel room={room} players={players} />
-        {stage === "question" && (
-          <button
-            type="button"
-            className="display-corner-button extend"
-            onClick={() => extendQuestionTime(room, 10)}
-          >
-            +10 ثوانٍ
-          </button>
-        )}
-        {stage === "question" && isMediaQuestion(currentQuestion) && !hasMediaEnded(room, currentQuestion) && (
-          <button
-            type="button"
-            className="display-corner-button media-skip"
-            onClick={() => finishMediaQuestion(currentQuestion)}
-          >
-            تجاوز المقطع وإظهار الخيارات
-          </button>
-        )}
-        {stage === "ready" && (
-          <button
-            type="button"
-            className="display-corner-button ready-skip"
-            onClick={handleSkipReadyCountdown}
-            title="تخطي العد وبدء السؤال فورًا"
-          >
-            تخطي العد
-          </button>
-        )}
-        {stage === "results" && room?.practiceMode && currentProcessed && (
-          <button
-            type="button"
-            className="display-corner-button poll"
-            onClick={launchInstructionsClarityPoll}
-          >
-            تصويت
-          </button>
-        )}
-        {stage === "instructions" ? (
-          <button type="button" className="display-corner-button poll" onClick={launchInstructionsClarityPoll}>تصويت وضوح المعلومات</button>
-        ) : (
-          <button type="button" className="display-corner-button poll" onClick={launchSystemCheck}>استفتاء</button>
-        )}
-      </div>
-    );
-  }
-
   return (
     <div className="display-frame">
-      <AutoRevealCorrectAnswer room={room} />
-      <AutoEndQuestionOnTimer room={room} />
-      <AutoActivateReadyQuestion room={room} />
-      <AutoLockJokers room={room} players={players} />
-      <AutoProcessResults room={room} answers={answers} players={players} />
-      <AutoFinishFinalCountdown room={room} players={players} questions={questions} allAnswers={allAnswers} messages={messages} />
-
       <div className="display-content-area">
         {displayStage === "ready" && (
           <div className="display-panel ready-countdown-screen">
@@ -7210,45 +6203,6 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
         <div className="display-history-nav" aria-label="التنقل بين مراحل العرض">
           <button type="button" className="display-nav-button display-next-button" onClick={previewNextStep} disabled={!previewStage}>التالي</button>
           <button type="button" className="display-nav-button display-back-button" onClick={previewPreviousStep}>السابق</button>
-          {!previewStage && stage === "reveal" && Number(room?.revealUndoUntilMs || 0) > displayNow && getQuestionTimeLeft(currentQuestion, room, displayNow) > 0 && (
-            <button type="button" className="display-nav-button display-undo-button" onClick={() => reopenQuestion(room)}>تراجع</button>
-          )}
-        </div>
-      )}
-
-      <div className={`display-presenter-bottom-dock stage-${stage}`} aria-label="أدوات تحكم المقدم">
-        <div className="display-control-bar">{renderDisplayButton()}</div>
-        {renderBottomDisplayActions()}
-      </div>
-
-      {stage === "instructions" && showInstructionsContinue && (
-        <div className="modal-backdrop display-continue-backdrop" onClick={() => setShowInstructionsContinue(false)}>
-          <div className="modal-card instructions-continue-modal" role="dialog" aria-modal="true" aria-labelledby="instructions-continue-title" onClick={(event) => event.stopPropagation()}>
-            <span>الخطوة التالية</span>
-            <h2 id="instructions-continue-title">كيف تريد المتابعة؟</h2>
-            <div className="instructions-continue-choices">
-              <button
-                type="button"
-                className="continue-real-competition"
-                onClick={startCompetition}
-                disabled={getMainQuestions(questions).length === 0 || players.length === 0 || isStartingCompetition}
-              >
-                <strong>{isStartingCompetition ? "جاري البدء..." : "بدء المسابقة الفعلية"}</strong>
-                <small>الانتقال مباشرة إلى أسئلة المسابقة والنقاط الرسمية.</small>
-              </button>
-              <button
-                type="button"
-                className="continue-practice-questions"
-                onClick={startPracticeFromDisplay}
-                disabled={players.length === 0 || getPracticeQuestions(questions).length === 0}
-              >
-                <strong>بدء الأسئلة التجريبية</strong>
-                <small>تشغيل تجربة قصيرة قبل بدء المسابقة الفعلية.</small>
-              </button>
-            </div>
-            {startCompetitionError && <p className="display-start-error">{startCompetitionError}</p>}
-            <button type="button" className="instructions-continue-cancel" onClick={() => setShowInstructionsContinue(false)}>إلغاء</button>
-          </div>
         </div>
       )}
     </div>
@@ -7522,7 +6476,7 @@ function LastGamePanel({ room, gameHistory = [], embedded = false }) {
   );
 }
 
-function AdminPanel({ initialView = "control" }) {
+function AdminPanel({ initialView = "control", adminSession }) {
   const room = useRoom();
   const players = usePlayers();
   const questions = useQuestions(room?.activePackageId || DEFAULT_PACKAGE_ID);
@@ -7532,23 +6486,22 @@ function AdminPanel({ initialView = "control" }) {
   const answers = useAnswers(room?.currentQuestion?.questionId);
   const allAnswers = useAllAnswers();
   const visitors = useVisitors();
+  const finalization = useQuestionFinalization({
+    room,
+    canFinalize: adminSession?.isAdmin === true,
+  });
   const gameHistory = [...(room?.gameHistory || [])].sort(
     (a, b) => Number(b.savedAtMs || 0) - Number(a.savedAtMs || 0)
   );
 
-  // FIX: Automation components are mounted here (on the admin/control side) so that
-  // AutoProcessResults runs even when the display page (?view=display) is not open.
-  // Previously these only ran inside DisplayScreen, causing the "stuck on تجميع النتائج"
-  // bug whenever the display tab was closed or not opened.
-  // In display mode they will also be rendered inside DisplayScreen (duplicate mount is
-  // harmless because each instance uses its own processingQuestionId state guard).
+  // Mutating automations live only behind the authenticated Admin route.
   const alwaysOnAutomations = (
     <>
       <AutoRevealCorrectAnswer room={room} />
       <AutoEndQuestionOnTimer room={room} />
       <AutoActivateReadyQuestion room={room} />
       <AutoLockJokers room={room} players={players} />
-      <AutoProcessResults room={room} answers={answers} players={players} />
+      <AutoFinalizeQuestion room={room} finalization={finalization} />
       <AutoFinishFinalCountdown room={room} players={players} questions={questions} allAnswers={allAnswers} messages={messages} />
       <AutoFakeAnswers room={room} players={players} />
     </>
@@ -7629,6 +6582,7 @@ function AdminPanel({ initialView = "control" }) {
         messages={messages}
         gameHistory={gameHistory}
         visitors={visitors}
+        finalization={finalization}
       />
     </>
   );
@@ -8152,15 +7106,28 @@ function PlayerWaiting({ room, player, players, setPlayerName, hasNextQuestion =
 }
 
 function PlayerResultSummary({ player, lastAnswer, stage, hasNextQuestion = false, currentQuestion = null, currentQuestionIndex = 0, totalQuestions = null, room = null, rank = null, rankMovement = null }) {
-  const points = Number(lastAnswer?.points || 0);
-  const basePoints = Number(lastAnswer?.basePoints || 0);
-  const isCorrect = !!lastAnswer?.isCorrect;
-  const jokerApplied = !!lastAnswer?.jokerApplied;
-  const jokerMultiplier = Number(lastAnswer?.jokerMultiplier || 3);
   const answerTimeLabel = lastAnswer ? formatAnswerTime(lastAnswer) : "";
   const isResults = stage === "results";
   const currentQuestionId = currentQuestion?.questionId || currentQuestion?.id || null;
   const isResultsReady = isResults && isSameId(room?.processedQuestionId, currentQuestionId);
+  const officialSnapshot = isSameId(room?.resultsDisplaySnapshot?.questionId, currentQuestionId)
+    ? room.resultsDisplaySnapshot
+    : null;
+  const officialAnswered = !!officialSnapshot?.answeredByPlayer?.[player?.id];
+  const hasAnswer = isResultsReady ? officialAnswered : !!lastAnswer;
+  const points = isResultsReady
+    ? Number(officialSnapshot?.bonusByPlayer?.[player?.id] || 0)
+    : 0;
+  const isCorrect = isResultsReady
+    ? !!officialSnapshot?.correctByPlayer?.[player?.id]
+    : !!lastAnswer?.isCorrect;
+  const jokerApplied = isResultsReady && !!room?.collectingBonusJokerByPlayer?.[player?.id];
+  const jokerMultiplier = Number(
+    isSameId(player?.jokerQuestionId, currentQuestionId) ? player?.jokerMultiplier : 1,
+  ) || 1;
+  const basePoints = jokerApplied && isCorrect && jokerMultiplier > 1
+    ? points / jokerMultiplier
+    : points;
   const wasQuestionSkipped = isResultsReady && room?.calculationStatus === "skipped";
   const showBetweenQuestionJoker =
     stage === "results" &&
@@ -8169,7 +7136,7 @@ function PlayerResultSummary({ player, lastAnswer, stage, hasNextQuestion = fals
   const resultPlayer = {
     ...player,
     lastQuestionPoints: points,
-    lastQuestionId: lastAnswer?.questionId || player?.lastQuestionId,
+    lastQuestionId: currentQuestionId || player?.lastQuestionId,
   };
 
   if (isResults && !isResultsReady) {
@@ -8202,8 +7169,8 @@ function PlayerResultSummary({ player, lastAnswer, stage, hasNextQuestion = fals
 
   return (
     <PlayerPageShell player={resultPlayer} rank={rank} rankMovement={rankMovement} questionNumber={currentQuestionIndex + 1} totalQuestions={totalQuestions}>
-      <div className={`player-result-card ${lastAnswer ? (isCorrect ? "correct" : "wrong") : ""}`}>
-        {lastAnswer ? (
+      <div className={`player-result-card ${hasAnswer ? (isCorrect ? "correct" : "wrong") : ""}`}>
+        {hasAnswer ? (
           <>
             <div className="player-result-icon">{isCorrect ? "✅" : "❌"}</div>
             <h2>{isCorrect ? "إجابتك صحيحة" : "إجابتك خاطئة"}</h2>
@@ -8823,13 +7790,111 @@ function AppCredit() {
   return <div className="app-credit">قام ببرمجة المسابقة: علي إبراهيم ال مطرود</div>;
 }
 
-function AdminAccessDisabled() {
-  return (
-    <div className="app player-app" dir="rtl">
-      <div className="card center-card">
-        <h2>لوحة الإدارة معطلة مؤقتًا</h2>
-        <p className="muted">لوحة الإدارة معطلة مؤقتًا لحين تفعيل نظام الدخول الآمن.</p>
+function AdminAuthGate({ adminView }) {
+  const [session, setSession] = useState({ loading: true, user: null, claims: {}, isAdmin: false });
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [authError, setAuthError] = useState("");
+  const [authWorking, setAuthWorking] = useState(false);
+
+  useEffect(() => adminAuth.subscribe((nextSession) => {
+    setSession({ loading: false, ...nextSession });
+  }), []);
+
+  async function handleLogin(event) {
+    event.preventDefault();
+    if (authWorking) return;
+    setAuthWorking(true);
+    setAuthError("");
+    try {
+      const nextSession = await adminAuth.signIn(email, password);
+      setPassword("");
+      setSession({ loading: false, ...nextSession });
+    } catch (error) {
+      if (import.meta.env.DEV) console.error("Admin sign-in failed.", error?.code);
+      setAuthError("تعذر تسجيل الدخول. تحقق من بيانات الحساب ثم حاول مرة أخرى.");
+      setPassword("");
+    } finally {
+      setAuthWorking(false);
+    }
+  }
+
+  async function handleSignOut() {
+    setAuthWorking(true);
+    try {
+      await adminAuth.signOut();
+    } finally {
+      setAuthWorking(false);
+    }
+  }
+
+  async function handleRefreshClaims() {
+    setAuthWorking(true);
+    setAuthError("");
+    try {
+      const nextSession = await adminAuth.refreshClaims();
+      setSession({ loading: false, ...nextSession });
+    } catch (error) {
+      if (import.meta.env.DEV) console.error("Admin claim refresh failed.", error?.code);
+      setAuthError("تعذر تحديث صلاحية الحساب.");
+    } finally {
+      setAuthWorking(false);
+    }
+  }
+
+  if (session.loading) {
+    return (
+      <div className="app player-app" dir="rtl">
+        <div className="card center-card"><p>جاري التحقق من جلسة الإدارة...</p></div>
+        <AppCredit />
       </div>
+    );
+  }
+
+  if (!session.user) {
+    return (
+      <div className="app player-app" dir="rtl">
+        <form className="card center-card" onSubmit={handleLogin}>
+          <h2>تسجيل دخول الإدارة</h2>
+          <p className="muted">المصادقة الإدارية مطلوبة للوصول إلى أدوات التحكم.</p>
+          <label>
+            البريد الإلكتروني
+            <input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="username" required />
+          </label>
+          <label>
+            كلمة المرور
+            <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" required />
+          </label>
+          <button type="submit" disabled={authWorking}>{authWorking ? "جاري تسجيل الدخول..." : "تسجيل الدخول"}</button>
+          {authError && <p className="display-start-error" role="alert">{authError}</p>}
+        </form>
+        <AppCredit />
+      </div>
+    );
+  }
+
+  if (!session.isAdmin) {
+    return (
+      <div className="app player-app" dir="rtl">
+        <div className="card center-card">
+          <h2>صلاحية الإدارة مطلوبة</h2>
+          <p className="muted">هذا الحساب لا يملك صلاحية الإدارة.</p>
+          <button type="button" onClick={handleRefreshClaims} disabled={authWorking}>تحديث الصلاحية</button>
+          <button type="button" onClick={handleSignOut} disabled={authWorking}>تسجيل الخروج</button>
+          {authError && <p className="display-start-error" role="alert">{authError}</p>}
+        </div>
+        <AppCredit />
+      </div>
+    );
+  }
+
+  return (
+    <div className="app" dir="rtl">
+      <div className="admin-toolbar card">
+        <span className="muted">حساب الإدارة: {session.user.email || session.user.uid}</span>
+        <button type="button" onClick={handleSignOut} disabled={authWorking}>تسجيل الخروج</button>
+      </div>
+      <AdminPanel initialView={adminView} adminSession={session} />
       <AppCredit />
     </div>
   );
@@ -8855,21 +7920,12 @@ export default function App() {
   }
 
   if (isAdminViewRequest) {
-    if (!LOCAL_ADMIN_DEV_BYPASS) {
-      return <AdminAccessDisabled />;
-    }
-
     const adminView =
       viewParam === "settings" || viewParam === "lastgame"
         ? viewParam
         : "control";
 
-    return (
-      <div className="app" dir="rtl">
-        <AdminPanel initialView={adminView} />
-        <AppCredit />
-      </div>
-    );
+    return <AdminAuthGate adminView={adminView} />;
   }
 
   return (
