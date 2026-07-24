@@ -84,6 +84,20 @@ test(
     const playerOne = firstRegistration.playerId;
     const playerTwo = secondRegistration.playerId;
     const playerThree = thirdRegistration.playerId;
+    const [publicPlayer, privatePlayer] = await Promise.all([
+      ref.collection("players").doc(playerOne).get(),
+      ref.collection("playerPrivate").doc(playerOne).get(),
+    ]);
+    assert.equal(publicPlayer.data().authUid, undefined);
+    assert.equal(publicPlayer.data().fullName, undefined);
+    assert.equal(publicPlayer.data().phone, undefined);
+    assert.equal(publicPlayer.data().phoneNormalized, undefined);
+    assert.equal(privatePlayer.data().authUid, firstIdentity.uid);
+    assert.equal(privatePlayer.data().phoneNormalized, "0500000001");
+    const recovered = await callCallable("recoverPlayer", { roomId }, { token: firstToken });
+    assert.equal(recovered.playerId, playerOne);
+    assert.equal(recovered.player.fullName, undefined);
+    assert.equal(recovered.player.phone, undefined);
 
     await assert.rejects(
       callCallable("submitAnswer", {
@@ -295,9 +309,13 @@ test("Firestore rules reject direct sensitive writes", { timeout: 30_000 }, asyn
     activeQuestionId: null,
   });
   await rulesRoom.collection("players").doc("owner").set({
-    authUid: identity.uid,
     name: "Owner",
     score: 0,
+  });
+  await rulesRoom.collection("playerPrivate").doc("owner").set({
+    authUid: identity.uid,
+    fullName: "Private Owner",
+    phoneNormalized: "0500000099",
   });
   await rulesRoom.collection("questionSecrets").doc("q1").set({ correctIndex: 1 });
 
@@ -330,7 +348,10 @@ test("Firestore rules reject direct sensitive writes", { timeout: 30_000 }, asyn
     getDoc(doc(firestore, "rooms", rulesRoomId, "questionSecrets", "q1")),
     (error) => error.code === "permission-denied"
   );
-  await updateDoc(doc(firestore, "rooms", rulesRoomId, "players", "owner"), {
-    name: "Owner Updated",
-  });
+  await assert.rejects(
+    updateDoc(doc(firestore, "rooms", rulesRoomId, "players", "owner"), {
+      name: "Owner Updated",
+    }),
+    (error) => error.code === "permission-denied"
+  );
 });

@@ -36,21 +36,49 @@ test("official secure flow handles 50 players three times and 100 players once",
     acceptingAnswers: false,
     activeQuestionId: null,
   });
-  for (let offset = 0; offset < identities.length; offset += 400) {
-    const batch = ref.firestore.batch();
-    identities.slice(offset, offset + 400).forEach((identity, index) => {
-      const number = offset + index + 1;
-      batch.set(ref.collection("players").doc(`player-${number}`), {
-        authUid: identity.uid,
-        name: `Player ${number}`,
-        score: 0,
-        answeredCount: 0,
-        pendingJoker: number <= 10,
-        jokerUsed: false,
-      });
+  const playerIds = [];
+  const registrationMetrics = [];
+  for (const [start, end] of [[0, 50], [50, 100]]) {
+    const registrationStartedAt = performance.now();
+    for (let offset = start; offset < end; offset += 10) {
+      const registrations = await Promise.all(
+        identities.slice(offset, offset + 10).map((identity, index) => {
+          const number = offset + index + 1;
+          return callCallable(
+            "registerPlayer",
+            {
+              roomId,
+              name: `Player ${number}`,
+              emoji: "⭐",
+              fullName: `Private Player ${number}`,
+              phone: `05${String(number).padStart(8, "0")}`,
+            },
+            { token: tokens[number - 1], timeoutMs: 45_000 }
+          );
+        })
+      );
+      playerIds.push(...registrations.map((registration) => registration.playerId));
+    }
+    registrationMetrics.push({
+      totalPlayers: end,
+      elapsedMs: performance.now() - registrationStartedAt,
     });
-    await batch.commit();
   }
+  assert.equal((await ref.collection("players").get()).size, 100);
+  assert.equal((await ref.collection("playerPrivate").get()).size, 100);
+  registrationMetrics.forEach((metric) =>
+    emitMetric(`operation7.registration.to-${metric.totalPlayers}`, metric.elapsedMs)
+  );
+  const leaderboardStartedAt = performance.now();
+  const leaderboardSnapshot = await ref.collection("players").orderBy("score", "desc").get();
+  const leaderboardReadMs = performance.now() - leaderboardStartedAt;
+  const publicBytes = Buffer.byteLength(JSON.stringify(leaderboardSnapshot.docs[0].data()));
+  const privateBytes = Buffer.byteLength(
+    JSON.stringify((await ref.collection("playerPrivate").doc(playerIds[0]).get()).data())
+  );
+  emitMetric("operation7.leaderboard.100", leaderboardReadMs);
+  emitMetric("operation7.public-document.approx", publicBytes, "bytes");
+  emitMetric("operation7.private-document.approx", privateBytes, "bytes");
 
   const runs = [50, 50, 50, 100];
   const metrics = [];
@@ -85,7 +113,7 @@ test("official secure flow handles 50 players three times and 100 players once",
           {
             roomId,
             questionId,
-            playerId: `player-${index + 1}`,
+            playerId: playerIds[index],
             selectedIndex: index % 4,
           },
           { token: tokens[index], timeoutMs: 45_000 }
@@ -110,5 +138,13 @@ test("official secure flow handles 50 players three times and 100 players once",
     emitMetric(`operation6.finalize.${playerCount}.run${runIndex + 1}`, finalizeMs);
     emitMetric(`operation6.total.${playerCount}.run${runIndex + 1}`, totalMs);
   }
-  console.log(`OPERATION6_PERFORMANCE_SUMMARY ${JSON.stringify(metrics)}`);
+  console.log(
+    `OPERATION7_PERFORMANCE_SUMMARY ${JSON.stringify({
+      registrationMetrics,
+      leaderboardReadMs,
+      publicBytes,
+      privateBytes,
+      flowMetrics: metrics,
+    })}`
+  );
 });

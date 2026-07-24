@@ -63,10 +63,6 @@ service cloud.firestore {
         && ((!attemptsSensitiveWrite && !attemptsProtectedStage) || safeReset);
     }
 
-    function playerOwnsExistingDocument() {
-      return signedIn() && resource.data.authUid == request.auth.uid;
-    }
-
     match /rooms/{roomId} {
       allow read: if true;
       allow create: if safeRoomCreate();
@@ -79,34 +75,29 @@ service cloud.firestore {
 
       match /players/{playerId} {
         allow read: if true;
-        allow create: if signedIn()
-          && request.resource.data.isVisitorOnly == true
-          && request.resource.data.authUid == request.auth.uid
+        allow write: if false;
+      }
+
+      match /playerPrivate/{playerId} {
+        allow read: if isAdmin();
+        allow write: if false;
+      }
+
+      match /playerRegistrationKeys/{keyId} {
+        allow read, write: if false;
+      }
+
+      match /visitors/{visitorId} {
+        allow read: if isAdmin();
+        allow create, update: if signedIn()
+          && visitorId == request.auth.uid
           && request.resource.data.keys().hasOnly([
-            'isVisitorOnly',
-            'authUid',
             'seenAtMs',
             'seenAt',
             'playerId',
             'playerName',
             'registered'
           ]);
-        allow update: if (
-          playerOwnsExistingDocument()
-          && affected().hasOnly([
-            'name',
-            'emoji',
-            'fullName',
-            'phone',
-            'seenAtMs',
-            'seenAt',
-            'playerName',
-            'registered'
-          ])
-        ) || (
-          isAdmin()
-          && affected().hasOnly(['name', 'emoji', 'fullName', 'phone'])
-        );
         allow delete: if isAdmin();
       }
 
@@ -137,8 +128,8 @@ service cloud.firestore {
         allow read: if true;
         allow create: if signedIn()
           && request.resource.data.playerId is string
-          && exists(/databases/$(database)/documents/rooms/$(roomId)/players/$(request.resource.data.playerId))
-          && get(/databases/$(database)/documents/rooms/$(roomId)/players/$(request.resource.data.playerId)).data.authUid == request.auth.uid
+          && exists(/databases/$(database)/documents/rooms/$(roomId)/playerPrivate/$(request.resource.data.playerId))
+          && get(/databases/$(database)/documents/rooms/$(roomId)/playerPrivate/$(request.resource.data.playerId)).data.authUid == request.auth.uid
           && request.resource.data.keys().hasOnly([
             'playerId',
             'playerName',

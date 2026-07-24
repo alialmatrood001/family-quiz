@@ -18,7 +18,7 @@ const password = String(process.env.ADMIN_PASSWORD || "");
 assert.ok(email, "Set ADMIN_EMAIL for the local emulator account.");
 assert.ok(password.length >= 8, "Set ADMIN_PASSWORD to a local value with at least 8 characters.");
 
-const projectId = String(process.env.FIREBASE_PROJECT_ID || "family-quiz-b7960");
+const projectId = String(process.env.FIREBASE_PROJECT_ID || "demo-family-quiz");
 const app = getApps()[0] || initializeApp({ projectId });
 const auth = getAuth(app);
 let user;

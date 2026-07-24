@@ -22,8 +22,10 @@ import { useQuestionFinalization } from "./use-question-finalization.js";
 import {
   activateJokerSecurely,
   cancelJokerSecurely,
+  recoverPlayerSecurely,
   registerPlayerSecurely,
   submitAnswerSecurely,
+  updatePlayerProfileSecurely,
 } from "./quiz-write-client.js";
 import {
   controlQuestionSecurely,
@@ -32,6 +34,7 @@ import {
 } from "./question-control-client.js";
 import {
   adjustPlayerScoreSecurely,
+  getPlayerPrivateDetailsSecurely,
   resetQuizDataSecurely,
   resetPracticeScoresSecurely,
 } from "./admin-player-actions-client.js";
@@ -775,12 +778,16 @@ function useMessages() {
   return messages;
 }
 
-function useVisitors() {
+function useVisitors(enabled = true) {
   const [visitors, setVisitors] = useState([]);
 
   useEffect(() => {
+    if (!enabled) {
+      setVisitors([]);
+      return undefined;
+    }
     const unsub = onSnapshot(
-      collection(db, "rooms", ROOM_ID, "players"),
+      collection(db, "rooms", ROOM_ID, "visitors"),
       (snap) => {
         setVisitors(
           snap.docs
@@ -788,24 +795,14 @@ function useVisitors() {
               id: d.id,
               ...d.data(),
             }))
-            .filter((item) => isVisitorRecord(item))
         );
       }
     );
 
     return () => unsub();
-  }, []);
+  }, [enabled]);
 
   return visitors;
-}
-
-function getOrCreateVisitorId(uid = "") {
-  const storageKey = "familyQuizVisitorId";
-  const existing = localStorage.getItem(storageKey);
-  if (existing) return existing;
-  const id = `visitor-${uid}`;
-  localStorage.setItem(storageKey, id);
-  return id;
 }
 
 function isVisitorRecord(item) {
@@ -1265,8 +1262,6 @@ async function archiveLastGame(players = [], questions = [], allAnswers = [], me
       rank: index + 1,
       id: player.id,
       name: player.name || "",
-      fullName: player.fullName || "",
-      phone: player.phone || "",
       score: player.score || 0,
       jokerUsed: !!player.jokerUsed,
       jokerQuestionNumber: player.jokerQuestionNumber || null,
@@ -1792,7 +1787,6 @@ async function spinPrizeWheelForRoom(room, players, overrides = {}) {
     prizeItemId,
     playerId: selectedWinner.id,
     playerName: selectedWinner.name || "",
-    playerFullName: selectedWinner.fullName || "",
     playerEmoji: selectedWinner.emoji || "",
     prizeTitle,
     gameTitle: QUIZ_TITLE,
@@ -3967,6 +3961,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
   const [editPlayerName, setEditPlayerName] = useState("");
   const [editPlayerScore, setEditPlayerScore] = useState(0);
   const [editScoreReason, setEditScoreReason] = useState("");
+  const [editPlayerPrivate, setEditPlayerPrivate] = useState(null);
   const [activeAdminSection, setActiveAdminSection] = useState("live");
   const [previousAdminSection, setPreviousAdminSection] = useState(null);
   const [adminAdvancing, setAdminAdvancing] = useState(false);
@@ -4280,8 +4275,6 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
             question.text,
             getQuestionTypeLabel(question.type),
             player.name || answer.playerName || "",
-            player.fullName || answer.fullName || "",
-            player.phone || answer.phone || "",
             getSelectedAnswerText(question, answer),
             answer.isCorrect ? "صح" : "خطأ",
             answer.basePoints || 0,
@@ -4295,17 +4288,29 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
 
   function exportFullExcel() {
     downloadExcelFile("family-quiz-full-report.xls", [
-      { name: "المراكز الثلاثة الأولى", headers: ["المركز", "الاسم المستعار", "الاسم الثلاثي", "رقم الجوال", "النقاط"], rows: sortedWinners.map((player, index) => [index + 1, player.name || "", player.fullName || "", player.phone || "", player.score || 0]) },
-      { name: "بيانات المتسابقين", headers: ["الاسم المستعار", "الاسم الثلاثي", "رقم الجوال", "النقاط", "حالة الجوكر", "نقاط آخر سؤال"], rows: players.map((player) => [player.name || "", player.fullName || "", player.phone || "", player.score || 0, player.jokerUsed ? "مستخدم" : player.pendingJoker ? "مفعل" : "متاح", player.lastQuestionPoints ?? 0]) },
-      { name: "تفاصيل الأسئلة", headers: ["رقم السؤال", "السؤال", "النوع", "الاسم المستعار", "الاسم الثلاثي", "رقم الجوال", "الإجابة", "النتيجة", "النقاط الأصلية", "النقاط المحتسبة", "جوكر"], rows: buildAnswerRows() },
+      { name: "المراكز الثلاثة الأولى", headers: ["المركز", "الاسم المستعار", "النقاط"], rows: sortedWinners.map((player, index) => [index + 1, player.name || "", player.score || 0]) },
+      { name: "بيانات المتسابقين", headers: ["الاسم المستعار", "النقاط", "حالة الجوكر", "نقاط آخر سؤال"], rows: players.map((player) => [player.name || "", player.score || 0, player.jokerUsed ? "مستخدم" : player.pendingJoker ? "مفعل" : "متاح", player.lastQuestionPoints ?? 0]) },
+      { name: "تفاصيل الأسئلة", headers: ["رقم السؤال", "السؤال", "النوع", "الاسم المستعار", "الإجابة", "النتيجة", "النقاط الأصلية", "النقاط المحتسبة", "جوكر"], rows: buildAnswerRows() },
     ]);
   }
 
-  function openEditPlayer(player) {
+  async function openEditPlayer(player) {
     setEditingPlayer(player);
     setEditPlayerName(player.name || "");
     setEditPlayerScore(Number(player.score || 0));
     setEditScoreReason("");
+    setEditPlayerPrivate(null);
+    try {
+      const result = await getPlayerPrivateDetailsSecurely({
+        roomId: ROOM_ID,
+        playerId: player.id,
+      });
+      setEditPlayerPrivate(result.details || null);
+    } catch (error) {
+      if (import.meta.env.DEV) {
+        console.error("Admin private detail lookup failed.", error?.code);
+      }
+    }
   }
 
   async function restoreEditedPlayerOriginalScore() {
@@ -4345,7 +4350,9 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
       return;
     }
     if (cleanName !== String(editingPlayer.name || "")) {
-      await updateDoc(doc(db, "rooms", ROOM_ID, "players", editingPlayer.id), {
+      await updatePlayerProfileSecurely({
+        roomId: ROOM_ID,
+        playerId: editingPlayer.id,
         name: cleanName,
       });
     }
@@ -4784,8 +4791,6 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
                   <thead>
                     <tr>
                       <th>المتسابق</th>
-                      <th>الاسم الثلاثي</th>
-                      <th>الجوال</th>
                       <th>النقاط</th>
                       <th>الجوكر</th>
                       <th>تعديل</th>
@@ -4795,8 +4800,6 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
                     {players.map((player) => (
                       <tr key={player.id}>
                         <td><strong>{player.emoji || "👤"} {player.name}</strong></td>
-                        <td>{player.fullName || "—"}</td>
-                        <td style={{ direction: "ltr", textAlign: "right" }}>{player.phone || "—"}</td>
                         <td><strong>{player.score || 0}</strong>{Number(player.manualScoreDelta || 0) !== 0 && <span className={player.manualScoreDelta > 0 ? "manual-delta positive" : "manual-delta negative"}>{player.manualScoreDelta > 0 ? `+${player.manualScoreDelta}` : player.manualScoreDelta}</span>}</td>
                         <td>{player.jokerUsed ? "\u{1F0CF} مستخدم" : player.pendingJoker ? "\u{1F7E2} مفعل" : "متاح"}</td>
                         <td><button type="button" className="icon-action-button" title="تعديل المتسابق" aria-label="تعديل المتسابق" onClick={() => openEditPlayer(player)}>✎</button></td>
@@ -4826,7 +4829,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
                     <div className="question-report-title"><strong>{questionNumber}. {question.text} <span className="report-accuracy-inline" style={{ color: getAccuracyColor(percent) }}>({percent}%)</span></strong></div>
                     <span className="expand-indicator">{expanded ? "−" : "+"}</span>
                   </button>
-                  {expanded && <div className="question-report-body">{rows.length === 0 ? <span className="muted">لا توجد إجابات لهذا السؤال.</span> : <div className="admin-table-wrap"><table className="admin-table live-question-answers-table"><thead><tr><th>المتسابق</th><th>الاسم الثلاثي</th><th>الإجابة</th><th>النتيجة</th><th>النقاط</th><th>الوقت</th><th>جوكر</th></tr></thead><tbody>{rows.map(({ answer, player, selectedText }) => <tr className={answer.isCorrect ? "live-answer-row-correct" : "live-answer-row-wrong"} key={answer.id}><td><strong>{player?.name || answer.playerName}</strong></td><td>{player?.fullName || answer.fullName || "—"}</td><td>{selectedText}</td><td style={{ color: answer.isCorrect ? "#18733a" : "#a51f1f", fontWeight: 900 }}>{answer.isCorrect ? "صح" : "خطأ"}</td><td><strong>{answer.points || 0}</strong></td><td>{formatAnswerTime(answer)}</td><td>{answer.jokerApplied ? "\u{1F0CF}" : "—"}</td></tr>)}</tbody></table></div>}</div>}
+                  {expanded && <div className="question-report-body">{rows.length === 0 ? <span className="muted">لا توجد إجابات لهذا السؤال.</span> : <div className="admin-table-wrap"><table className="admin-table live-question-answers-table"><thead><tr><th>المتسابق</th><th>الإجابة</th><th>النتيجة</th><th>النقاط</th><th>الوقت</th><th>جوكر</th></tr></thead><tbody>{rows.map(({ answer, player, selectedText }) => <tr className={answer.isCorrect ? "live-answer-row-correct" : "live-answer-row-wrong"} key={answer.id}><td><strong>{player?.name || answer.playerName}</strong></td><td>{selectedText}</td><td style={{ color: answer.isCorrect ? "#18733a" : "#a51f1f", fontWeight: 900 }}>{answer.isCorrect ? "صح" : "خطأ"}</td><td><strong>{answer.points || 0}</strong></td><td>{formatAnswerTime(answer)}</td><td>{answer.jokerApplied ? "\u{1F0CF}" : "—"}</td></tr>)}</tbody></table></div>}</div>}
                 </div>
               );
             })}</div>
@@ -4850,7 +4853,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
               return (
                 <div className="player-report-card" key={player.id}>
                   <button type="button" className="player-report-header" onClick={() => togglePlayerReport(player.id)}>
-                    <div className="player-report-title"><strong>{player.emoji || ""} {player.name} {player.fullName && <small className="player-fullname-inline">({player.fullName})</small>} <span className="report-accuracy-inline" style={{ color: getAccuracyColor(percent) }}>({percent}%)</span></strong></div>
+                    <div className="player-report-title"><strong>{player.emoji || ""} {player.name} <span className="report-accuracy-inline" style={{ color: getAccuracyColor(percent) }}>({percent}%)</span></strong></div>
                     <span className="expand-indicator">{expanded ? "−" : "+"}</span>
                   </button>
                   {expanded && <div className="player-report-body"><div className="admin-table-wrap"><table className="admin-table live-player-answers-table"><thead><tr><th>رقم السؤال</th><th>السؤال</th><th>إجابة المتسابق</th><th>النتيجة</th><th>النقاط</th><th>الوقت</th></tr></thead><tbody>{playerAnswers.map(({ question, questionNumber, answer, selectedText }) => <tr className={answer ? (answer.isCorrect ? "live-answer-row-correct" : "live-answer-row-wrong") : ""} key={`${player.id}-${question.id}`}><td>{questionNumber}</td><td>{question.text} {answer?.jokerApplied && <span className="inline-joker-mark" title="استخدم الجوكر">{"\u{1F0CF}"}</span>}</td><td>{selectedText}</td><td style={{ fontWeight: 900, color: answer ? (answer.isCorrect ? "#18733a" : "#a51f1f") : undefined }}>{answer ? (answer.isCorrect ? "صح" : "خطأ") : "—"}</td><td>{answer?.points ?? "—"}</td><td>{answer ? formatAnswerTime(answer) : "—"}</td></tr>)}</tbody></table></div></div>}
@@ -5012,7 +5015,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
                       <option value="">فائز عشوائي</option>
                       {eligiblePrizePlayers.map((player) => (
                         <option value={player.id} key={player.id}>
-                          {player.emoji || ""} {player.name}{player.fullName ? ` (${player.fullName})` : ""}
+                          {player.emoji || ""} {player.name}
                         </option>
                       ))}
                     </select>
@@ -5046,7 +5049,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
                         <div className="prize-winner-row compact" key={winner.spinId || `${winner.playerId}-${winner.awardedAtMs}`}>
                           <div>
                             <strong>{winner.playerEmoji || ""} {winner.playerName}</strong>
-                            <small>{winner.playerFullName || "لا يوجد اسم ثلاثي"}</small>
+                            <small>{winner.prizeTitle || "فائز"}</small>
                           </div>
                           <small>{winner.awardedAtMs ? new Date(winner.awardedAtMs).toLocaleTimeString("ar-SA") : "—"}</small>
                           <button type="button" className="danger icon-action-button" title="حذف من السجل" aria-label="حذف من السجل" onClick={() => deletePrizeWinner(winner.spinId)}>×</button>
@@ -5131,8 +5134,8 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
         </div>
         {players.length === 0 ? <p className="muted">لا يوجد متسابقون حتى الآن.</p> : (
           <div className="admin-table-wrap">
-            <table className="admin-table"><thead><tr><th>الاسم المستعار</th><th>الاسم الثلاثي</th><th>رقم الجوال</th><th>النقاط</th><th>آخر سؤال</th><th>الجوكر</th><th>تحكم</th></tr></thead>
-              <tbody>{players.map((player) => <tr key={player.id}><td><strong>{player.emoji || ""} {player.name}</strong></td><td>{player.fullName || "—"}</td><td style={{ direction: "ltr", textAlign: "right" }}>{player.phone || "—"}</td><td><strong><AnimatedNumber value={player.score || 0} /></strong>{Number(player.manualScoreDelta || 0) !== 0 && <span className={player.manualScoreDelta > 0 ? "manual-delta positive" : "manual-delta negative"}> {player.manualScoreDelta > 0 ? `(+${player.manualScoreDelta})` : `(${player.manualScoreDelta})`}</span>}</td><td><strong>{player.lastQuestionPoints > 0 ? `+${player.lastQuestionPoints}` : player.lastQuestionPoints ?? 0}</strong></td><td>{player.jokerUsed ? "\u{1F0CF} مستخدم" : player.pendingJoker ? "\u{1F7E2} مفعل" : "متاح"}</td><td><button className="icon-action-button" title="تعديل" aria-label="تعديل المتسابق" onClick={() => openEditPlayer(player)}>✎</button></td></tr>)}</tbody></table>
+            <table className="admin-table"><thead><tr><th>الاسم المستعار</th><th>النقاط</th><th>آخر سؤال</th><th>الجوكر</th><th>تحكم</th></tr></thead>
+              <tbody>{players.map((player) => <tr key={player.id}><td><strong>{player.emoji || ""} {player.name}</strong></td><td><strong><AnimatedNumber value={player.score || 0} /></strong>{Number(player.manualScoreDelta || 0) !== 0 && <span className={player.manualScoreDelta > 0 ? "manual-delta positive" : "manual-delta negative"}> {player.manualScoreDelta > 0 ? `(+${player.manualScoreDelta})` : `(${player.manualScoreDelta})`}</span>}</td><td><strong>{player.lastQuestionPoints > 0 ? `+${player.lastQuestionPoints}` : player.lastQuestionPoints ?? 0}</strong></td><td>{player.jokerUsed ? "\u{1F0CF} مستخدم" : player.pendingJoker ? "\u{1F7E2} مفعل" : "متاح"}</td><td><button className="icon-action-button" title="تعديل" aria-label="تعديل المتسابق" onClick={() => openEditPlayer(player)}>✎</button></td></tr>)}</tbody></table>
           </div>
         )}
       </div>
@@ -5149,7 +5152,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
             const correctPercent = rows.length ? Math.round((correctCount / rows.length) * 100) : 0;
             return <div className="question-report-card" key={question.id}>
               <button type="button" className="question-report-header" onClick={() => toggleQuestion(question.id)}><div className="question-report-title"><strong>{questionNumber}. {question.text} <span className="report-accuracy-inline" style={{ color: getAccuracyColor(correctPercent) }}>({correctPercent}%)</span></strong><span>صح {correctCount} — خطأ {wrongCount} — {"\u{1F0CF}"} {jokerCount}</span></div><span className="expand-indicator">{expanded ? "−" : "+"}</span></button>
-              {expanded && <div className="question-report-body">{rows.length === 0 ? <span className="muted">لا توجد إجابات لهذا السؤال.</span> : <div className="admin-table-wrap"><table className="admin-table"><thead><tr><th>المتسابق</th><th>الاسم الثلاثي</th><th>الجوال</th><th>الإجابة</th><th>النتيجة</th><th>النقاط</th><th>جوكر</th></tr></thead><tbody>{rows.map(({ answer, player, selectedText }) => <tr key={answer.id}><td><strong>{player?.name || answer.playerName}</strong></td><td>{player?.fullName || answer.fullName || "—"}</td><td style={{ direction: "ltr", textAlign: "right" }}>{player?.phone || answer.phone || "—"}</td><td>{selectedText}</td><td style={{ color: answer.isCorrect ? "#18733a" : "#a51f1f", fontWeight: 900 }}>{answer.isCorrect ? "صح" : "خطأ"}</td><td><strong>{answer.points || 0}</strong></td><td>{answer.jokerApplied ? "\u{1F0CF}" : "—"}</td></tr>)}</tbody></table></div>}</div>}
+              {expanded && <div className="question-report-body">{rows.length === 0 ? <span className="muted">لا توجد إجابات لهذا السؤال.</span> : <div className="admin-table-wrap"><table className="admin-table"><thead><tr><th>المتسابق</th><th>الإجابة</th><th>النتيجة</th><th>النقاط</th><th>جوكر</th></tr></thead><tbody>{rows.map(({ answer, player, selectedText }) => <tr key={answer.id}><td><strong>{player?.name || answer.playerName}</strong></td><td>{selectedText}</td><td style={{ color: answer.isCorrect ? "#18733a" : "#a51f1f", fontWeight: 900 }}>{answer.isCorrect ? "صح" : "خطأ"}</td><td><strong>{answer.points || 0}</strong></td><td>{answer.jokerApplied ? "\u{1F0CF}" : "—"}</td></tr>)}</tbody></table></div>}</div>}
             </div>;
           })}</div>
         )}
@@ -5185,6 +5188,11 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
             <h2>تعديل بيانات المتسابق</h2>
             <label>الاسم المستعار</label>
             <input value={editPlayerName} onChange={(e) => setEditPlayerName(e.target.value)} placeholder="الاسم المستعار" />
+            <div className="muted">
+              {editPlayerPrivate
+                ? `الاسم الخاص: ${editPlayerPrivate.fullName || "—"} — الجوال: ${editPlayerPrivate.phone || "—"}`
+                : "جارٍ تحميل بيانات التواصل الخاصة عند الطلب…"}
+            </div>
             <label>النقاط الحالية</label>
             <input type="number" value={editPlayerScore} onChange={(e) => setEditPlayerScore(e.target.value)} placeholder="النقاط الحالية" />
             <button type="button" className="secondary-action restore-score-button" onClick={restoreEditedPlayerOriginalScore} disabled={!editingPlayerHasManualDelta}>
@@ -5537,13 +5545,13 @@ function LastGamePanel({ room, gameHistory = [], embedded = false }) {
     downloadExcelFile(`family-quiz-${selectedGame.savedAtMs || "history"}.xls`, [
       {
         name: "المراكز الثلاثة الأولى",
-        headers: ["المركز", "الاسم المستعار", "الاسم الثلاثي", "رقم الجوال", "النقاط"],
-        rows: (selectedGame.players || []).slice(0, 3).map((player) => [player.rank, player.name || "", player.fullName || "", player.phone || "", player.score || 0]),
+        headers: ["المركز", "الاسم المستعار", "النقاط"],
+        rows: (selectedGame.players || []).slice(0, 3).map((player) => [player.rank, player.name || "", player.score || 0]),
       },
       {
         name: "بيانات المتسابقين",
-        headers: ["المركز", "الاسم المستعار", "الاسم الثلاثي", "رقم الجوال", "النقاط"],
-        rows: (selectedGame.players || []).map((player) => [player.rank, player.name || "", player.fullName || "", player.phone || "", player.score || 0]),
+        headers: ["المركز", "الاسم المستعار", "النقاط"],
+        rows: (selectedGame.players || []).map((player) => [player.rank, player.name || "", player.score || 0]),
       },
       {
         name: "تفاصيل الأسئلة",
@@ -5578,10 +5586,9 @@ function LastGamePanel({ room, gameHistory = [], embedded = false }) {
       },
       {
         name: "فائزون سحب الجوائز",
-        headers: ["الفائز", "الاسم الثلاثي", "الجائزة", "المسابقة", "الوقت"],
+        headers: ["الفائز", "الجائزة", "المسابقة", "الوقت"],
         rows: (selectedGame.prizeWinners || []).map((winner) => [
           winner.playerName || "",
-          winner.playerFullName || "",
           winner.prizeTitle || "",
           winner.gameTitle || selectedGame.title || "",
           winner.awardedAtMs ? new Date(winner.awardedAtMs).toLocaleString("ar-SA") : "",
@@ -5685,11 +5692,11 @@ function LastGamePanel({ room, gameHistory = [], embedded = false }) {
 
             {renderArchiveSection("rankings", "ترتيب المتسابقين", <div className="archive-table-wrap">
             <table className="admin-bordered-table archive-table">
-              <thead><tr><th>المركز</th><th>الاسم المستعار</th><th>الاسم الثلاثي</th><th>رقم الجوال</th><th>النقاط</th></tr></thead>
+              <thead><tr><th>المركز</th><th>الاسم المستعار</th><th>النقاط</th></tr></thead>
               <tbody>
                 {selectedPlayers.map((player) => (
                   <tr key={`${player.id}-${player.rank}`}>
-                    <td>{player.rank}</td><td>{player.name}</td><td>{player.fullName || "—"}</td><td>{player.phone || "—"}</td><td>{player.score || 0}</td>
+                    <td>{player.rank}</td><td>{player.name}</td><td>{player.score || 0}</td>
                   </tr>
                 ))}
               </tbody>
@@ -5764,7 +5771,7 @@ function LastGamePanel({ room, gameHistory = [], embedded = false }) {
 
             {renderArchiveSection("messages", "رسائل المتسابقين", selectedMessages.length === 0 ? <p className="muted">لا توجد رسائل محفوظة في هذه المسابقة.</p> : <div className="archive-table-wrap"><table className="admin-bordered-table archive-table"><thead><tr><th>المتسابق</th><th>الرسالة</th><th>الوقت</th></tr></thead><tbody>{selectedMessages.map((message, index) => <tr key={`${message.createdAtMs || 0}-${index}`}><td>{message.playerName || "—"}</td><td>{message.text || "—"}</td><td>{message.createdAtMs ? new Date(message.createdAtMs).toLocaleString("ar-SA") : "—"}</td></tr>)}</tbody></table></div>)}
 
-            {renderArchiveSection("prizeWinners", "فائزون سحب الجوائز", selectedPrizeWinners.length === 0 ? <p className="muted">لا توجد جوائز سحب محفوظة في هذه المسابقة.</p> : <div className="archive-table-wrap"><table className="admin-bordered-table archive-table"><thead><tr><th>الفائز</th><th>الاسم الثلاثي</th><th>الجائزة</th><th>المسابقة</th><th>الوقت</th></tr></thead><tbody>{selectedPrizeWinners.map((winner, index) => <tr key={winner.spinId || `${winner.playerId}-${index}`}><td>{winner.playerEmoji || ""} {winner.playerName || "—"}</td><td>{winner.playerFullName || "—"}</td><td>{winner.prizeTitle || "—"}</td><td>{winner.gameTitle || selectedGame.title || "—"}</td><td>{winner.awardedAtMs ? new Date(winner.awardedAtMs).toLocaleString("ar-SA") : "—"}</td></tr>)}</tbody></table></div>)}
+            {renderArchiveSection("prizeWinners", "فائزون سحب الجوائز", selectedPrizeWinners.length === 0 ? <p className="muted">لا توجد جوائز محفوظة في هذه المسابقة.</p> : <div className="archive-table-wrap"><table className="admin-bordered-table archive-table"><thead><tr><th>الفائز</th><th>الجائزة</th><th>المسابقة</th><th>الوقت</th></tr></thead><tbody>{selectedPrizeWinners.map((winner, index) => <tr key={winner.spinId || `${winner.playerId}-${index}`}><td>{winner.playerEmoji || ""} {winner.playerName || "—"}</td><td>{winner.prizeTitle || "—"}</td><td>{winner.gameTitle || selectedGame.title || "—"}</td><td>{winner.awardedAtMs ? new Date(winner.awardedAtMs).toLocaleString("ar-SA") : "—"}</td></tr>)}</tbody></table></div>)}
           </div>
         )}
       </details>
@@ -5789,7 +5796,7 @@ function AdminPanel({ initialView = "control", adminSession }) {
   const messages = useMessages();
   const answers = useAnswers(room?.currentQuestion?.questionId);
   const allAnswers = useAllAnswers();
-  const visitors = useVisitors();
+  const visitors = useVisitors(canReadQuestionBank);
   const finalization = useQuestionFinalization({
     room,
     canFinalize: adminSession?.isAdmin === true,
@@ -6080,14 +6087,14 @@ function JoinForm({ onJoined, room }) {
       });
 
       localStorage.setItem("familyQuizPlayerId", result.playerId);
-      localStorage.setItem("familyQuizPlayerName", cleanNickname);
-      localStorage.setItem("familyQuizPlayerEmoji", emoji.trim());
-      localStorage.setItem("familyQuizPlayerFullName", cleanFullName);
-      localStorage.setItem("familyQuizPlayerPhone", cleanPhone);
+      localStorage.removeItem("familyQuizPlayerName");
+      localStorage.removeItem("familyQuizPlayerEmoji");
+      localStorage.removeItem("familyQuizPlayerFullName");
+      localStorage.removeItem("familyQuizPlayerPhone");
 
       onJoined(result.playerId, cleanNickname);
     } catch (err) {
-      console.error(err);
+      if (import.meta.env.DEV) console.error("Player registration failed.", err?.code);
       setError(
         err?.code === "already-exists"
           ? "الاسم المستعار أو رقم الجوال مستخدم بالفعل."
@@ -6223,8 +6230,6 @@ function PlayerWaiting({ room, player, players, setPlayerName, hasNextQuestion =
   const [editingInfo, setEditingInfo] = useState(false);
   const [newNickname, setNewNickname] = useState(player?.name || "");
   const [newEmoji, setNewEmoji] = useState(player?.emoji || "");
-  const [newFullName, setNewFullName] = useState(player?.fullName || "");
-  const [newPhone, setNewPhone] = useState(player?.phone || "");
   const [editError, setEditError] = useState("");
 
   const rank = players.findIndex((p) => p.id === player?.id) + 1;
@@ -6232,22 +6237,13 @@ function PlayerWaiting({ room, player, players, setPlayerName, hasNextQuestion =
   useEffect(() => {
     setNewNickname(player?.name || "");
     setNewEmoji(player?.emoji || "");
-    setNewFullName(player?.fullName || "");
-    setNewPhone(player?.phone || "");
-  }, [player?.name, player?.emoji, player?.fullName, player?.phone]);
+  }, [player?.name, player?.emoji]);
 
   async function savePlayerInfo() {
     const cleanNickname = newNickname.trim();
-    const cleanFullName = newFullName.trim();
-    const cleanPhone = normalizePhoneDigits(newPhone);
 
-    if (!cleanNickname || !cleanFullName || !cleanPhone || !player?.id) {
-      setEditError("عبّئ البيانات الثلاثة.");
-      return;
-    }
-
-    if (!isValidSaudiMobile(cleanPhone)) {
-      setEditError("رقم الجوال يجب أن يكون 10 أرقام.");
+    if (!cleanNickname || !player?.id) {
+      setEditError("اكتب الاسم المستعار.");
       return;
     }
 
@@ -6262,17 +6258,13 @@ function PlayerWaiting({ room, player, players, setPlayerName, hasNextQuestion =
       return;
     }
 
-    await updateDoc(doc(db, "rooms", ROOM_ID, "players", player.id), {
+    await updatePlayerProfileSecurely({
+      roomId: ROOM_ID,
+      playerId: player.id,
       name: cleanNickname,
       emoji: newEmoji,
-      fullName: cleanFullName,
-      phone: cleanPhone,
     });
 
-    localStorage.setItem("familyQuizPlayerName", cleanNickname);
-    localStorage.setItem("familyQuizPlayerEmoji", newEmoji);
-    localStorage.setItem("familyQuizPlayerFullName", cleanFullName);
-    localStorage.setItem("familyQuizPlayerPhone", cleanPhone);
     setPlayerName(cleanNickname);
     setEditError("");
     setEditingInfo(false);
@@ -6341,18 +6333,7 @@ function PlayerWaiting({ room, player, players, setPlayerName, hasNextQuestion =
                   placeholder="الاسم المستعار"
                 />
                 <EmojiPicker value={newEmoji} onChange={setNewEmoji} label="تعديل الإيموجي" />
-                <input
-                  value={newFullName}
-                  onChange={(e) => setNewFullName(e.target.value)}
-                  placeholder="الاسم الثلاثي"
-                />
-                <input
-                  value={newPhone}
-                  onChange={(e) => setNewPhone(e.target.value)}
-                  placeholder="رقم الجوال"
-                  inputMode="tel"
-                  style={{ direction: "ltr", textAlign: "right" }}
-                />
+                <p className="muted">بيانات التواصل الخاصة محفوظة منفصلة ولا تُحمّل إلى صفحة اللاعب.</p>
                 {editError && <div className="error-box">{editError}</div>}
                 <button onClick={savePlayerInfo}>حفظ التعديل</button>
                 <button onClick={() => { setEditingInfo(false); setEditError(""); }}>إلغاء</button>
@@ -6658,9 +6639,7 @@ function PlayerPanel() {
     localStorage.getItem("familyQuizPlayerId")
   );
 
-  const [playerName, setPlayerName] = useState(() =>
-    localStorage.getItem("familyQuizPlayerName")
-  );
+  const [playerName, setPlayerName] = useState("");
 
   const [answeredQuestionId, setAnsweredQuestionId] = useState(null);
   const [selectedIndex, setSelectedIndex] = useState(null);
@@ -6700,8 +6679,32 @@ function PlayerPanel() {
     (stage === "instructions" || stage === "registration" || stage === "practiceComplete" || stage === "reveal" || stage === "results");
 
   useEffect(() => {
-    ensureAnonymousPlayerAuth().catch(() => {});
+    let cancelled = false;
+    localStorage.removeItem("familyQuizPlayerName");
+    localStorage.removeItem("familyQuizPlayerEmoji");
+    localStorage.removeItem("familyQuizPlayerFullName");
+    localStorage.removeItem("familyQuizPlayerPhone");
+    ensureAnonymousPlayerAuth()
+      .then(() => recoverPlayerSecurely({ roomId: ROOM_ID }))
+      .then((result) => {
+        if (cancelled || !result?.playerId) return;
+        localStorage.setItem("familyQuizPlayerId", result.playerId);
+        setPlayerId(result.playerId);
+        setPlayerName(result.player?.name || "");
+      })
+      .catch((error) => {
+        if (error?.code !== "not-found" && import.meta.env.DEV) {
+          console.error("Same-device player recovery failed.", error?.code);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
+
+  useEffect(() => {
+    if (player?.name) setPlayerName(player.name);
+  }, [player?.name]);
 
   useEffect(() => {
     const shouldTrackVisitor =
@@ -6713,12 +6716,9 @@ function PlayerPanel() {
     async function markVisitorSeen() {
       try {
         const user = await ensureAnonymousPlayerAuth();
-        const visitorId = getOrCreateVisitorId(user.uid);
         await setDoc(
-          doc(db, "rooms", ROOM_ID, "players", visitorId),
+          doc(db, "rooms", ROOM_ID, "visitors", user.uid),
           {
-            isVisitorOnly: true,
-            authUid: user.uid,
             seenAtMs: Date.now(),
             seenAt: serverTimestamp(),
             playerId: player?.id || null,
@@ -6782,7 +6782,7 @@ function PlayerPanel() {
 
 
   async function submitAnswer(index) {
-    if (!playerId || !playerName || !currentQuestion || !player) return;
+    if (!playerId || !player?.name || !currentQuestion) return;
     if (answeredQuestionId === currentQuestion.questionId) return;
     if (readLocalAnswerLock(playerId, currentQuestion.questionId)) return;
     if (lastAnswer) return;

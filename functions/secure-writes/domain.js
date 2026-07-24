@@ -51,6 +51,49 @@ function requirePlayerOwner(player, auth) {
   return uid;
 }
 
+function normalizePhone(value) {
+  const phoneNormalized = String(value || "").replace(/\D/g, "");
+  if (!/^\d{10}$/.test(phoneNormalized)) {
+    throw new HttpsError("invalid-argument", "Phone must contain exactly 10 digits");
+  }
+  return phoneNormalized;
+}
+
+function normalizeRecoveryName(value) {
+  const fullName = String(value || "").trim().replace(/\s+/g, " ");
+  if (fullName.length < 3 || fullName.length > 100) {
+    throw new HttpsError("invalid-argument", "Full name must contain 3 to 100 characters");
+  }
+  return {
+    fullName,
+    recoveryNameNormalized: fullName.toLocaleLowerCase("ar"),
+  };
+}
+
+function publicPlayerData({ name, emoji, createdAt }) {
+  return {
+    name,
+    displayName: name,
+    emoji,
+    score: 0,
+    rank: null,
+    answeredCount: 0,
+    pendingJoker: false,
+    jokerAvailable: true,
+    jokerState: "available",
+    jokerUsed: false,
+    jokerQuestionId: null,
+    jokerQuestionNumber: null,
+    practicePendingJoker: false,
+    practiceJokerQuestionId: null,
+    practiceJokerTiming: null,
+    practiceJokerMultiplier: null,
+    active: true,
+    joinedAt: createdAt,
+    createdAt,
+  };
+}
+
 function validateSelectedIndex(value) {
   if (!Number.isInteger(value) || value < 0 || value > 99) {
     throw new HttpsError("invalid-argument", "selectedIndex must be a valid integer");
@@ -160,7 +203,10 @@ function publicQuestionData(question, questionId, selectedCategory = null) {
 module.exports = {
   SCORE_DELTA_LIMIT,
   exactInput,
+  normalizePhone,
+  normalizeRecoveryName,
   publicQuestionData,
+  publicPlayerData,
   requireAdmin,
   requireAuthenticated,
   requirePlayerOwner,

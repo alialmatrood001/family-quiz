@@ -22,6 +22,7 @@ exports.finalizeQuestion = onCall(
 
 const secureWrites = createSecureWriteHandlers({ db: getFirestore() });
 exports.registerPlayer = onCall(secureWrites.registerPlayer);
+exports.recoverPlayer = onCall(secureWrites.recoverPlayer);
 exports.submitAnswer = onCall(secureWrites.submitAnswer);
 exports.activateJoker = onCall(secureWrites.activateJoker);
 exports.cancelJoker = onCall(secureWrites.cancelJoker);
@@ -29,5 +30,8 @@ exports.prepareQuestion = onCall(secureWrites.prepareQuestion);
 exports.startQuestion = onCall(secureWrites.startQuestion);
 exports.controlQuestion = onCall(secureWrites.controlQuestion);
 exports.adjustPlayerScore = onCall(secureWrites.adjustPlayerScore);
+exports.getPlayerPrivateDetails = onCall(secureWrites.getPlayerPrivateDetails);
+exports.updatePlayerProfile = onCall(secureWrites.updatePlayerProfile);
+exports.deletePlayer = onCall(secureWrites.deletePlayer);
 exports.resetPracticeScores = onCall(secureWrites.resetPracticeScores);
 exports.resetQuizData = onCall(secureWrites.resetQuizData);

@@ -84,6 +84,9 @@ export async function deleteRoom(roomId) {
   for (const collectionName of [
     "answers",
     "players",
+    "playerPrivate",
+    "playerRegistrationKeys",
+    "visitors",
     "questions",
     "messages",
     "questionResults",
@@ -146,9 +149,10 @@ export async function writeScenario(scenario) {
 
 export async function readState(roomId) {
   const ref = roomRef(roomId);
-  const [roomSnapshot, playersSnapshot, answersSnapshot, resultsSnapshot] = await Promise.all([
+  const [roomSnapshot, playersSnapshot, privateSnapshot, answersSnapshot, resultsSnapshot] = await Promise.all([
     ref.get(),
     ref.collection("players").get(),
+    ref.collection("playerPrivate").get(),
     ref.collection("answers").get(),
     ref.collection("questionResults").get(),
   ]);
@@ -156,6 +160,7 @@ export async function readState(roomId) {
     roomExists: roomSnapshot.exists,
     room: roomSnapshot.exists ? roomSnapshot.data() : null,
     players: playersSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })),
+    playerPrivate: privateSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })),
     answers: answersSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })),
     results: resultsSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })),
   };

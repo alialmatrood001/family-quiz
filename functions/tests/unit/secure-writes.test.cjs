@@ -4,6 +4,9 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
   exactInput,
+  normalizePhone,
+  normalizeRecoveryName,
+  publicPlayerData,
   publicQuestionData,
   requirePlayerOwner,
   validateScoreAdjustment,
@@ -32,6 +35,29 @@ test("player ownership is bound to authenticated UID", () => {
     () => requirePlayerOwner({ authUid: "uid-2" }, { uid: "uid-1" }),
     (error) => error.code === "permission-denied"
   );
+});
+
+test("public player data excludes identity and contact fields", () => {
+  const publicPlayer = publicPlayerData({
+    name: "Display",
+    emoji: "⭐",
+    createdAt: "server-time",
+  });
+  assert.equal(publicPlayer.name, "Display");
+  assert.equal(publicPlayer.displayName, "Display");
+  assert.equal(publicPlayer.authUid, undefined);
+  assert.equal(publicPlayer.fullName, undefined);
+  assert.equal(publicPlayer.phone, undefined);
+  assert.equal(publicPlayer.phoneNormalized, undefined);
+});
+
+test("private registration fields are normalized without weak hashing", () => {
+  assert.equal(normalizePhone("050-000-0001"), "0500000001");
+  assert.deepEqual(normalizeRecoveryName("  Full   Name  "), {
+    fullName: "Full Name",
+    recoveryNameNormalized: "full name",
+  });
+  assert.throws(() => normalizePhone("123"));
 });
 
 test("selectedIndex and manual score adjustment are bounded", () => {

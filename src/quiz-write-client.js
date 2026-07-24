@@ -9,6 +9,14 @@ const callSubmitAnswer = createSingleFlightCallable(
   "submitAnswer",
   "تعذر إرسال الإجابة.",
 );
+const callRecoverPlayer = createSingleFlightCallable(
+  "recoverPlayer",
+  "تعذر استعادة تسجيل المتسابق.",
+);
+const callUpdatePlayerProfile = createSingleFlightCallable(
+  "updatePlayerProfile",
+  "تعذر تحديث بيانات المتسابق.",
+);
 const callActivateJoker = createSingleFlightCallable(
   "activateJoker",
   "تعذر تفعيل الجوكر.",
@@ -25,6 +33,16 @@ async function authenticatedCall(callable, data, key) {
 
 export const registerPlayerSecurely = (data) =>
   authenticatedCall(callRegisterPlayer, data, `register/${data.roomId}`);
+
+export const recoverPlayerSecurely = (data) =>
+  authenticatedCall(callRecoverPlayer, data, `recover/${data.roomId}`);
+
+export const updatePlayerProfileSecurely = (data) =>
+  authenticatedCall(
+    callUpdatePlayerProfile,
+    data,
+    `profile/${data.roomId}/${data.playerId}`,
+  );
 
 export const submitAnswerSecurely = (data) =>
   authenticatedCall(

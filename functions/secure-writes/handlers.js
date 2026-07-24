@@ -5,6 +5,9 @@ const { HttpsError } = require("firebase-functions/v2/https");
 const { Timestamp } = require("firebase-admin/firestore");
 const {
   exactInput,
+  normalizePhone,
+  normalizeRecoveryName,
+  publicPlayerData,
   publicQuestionData,
   requireAdmin,
   requireAuthenticated,
@@ -24,6 +27,13 @@ function timestampFactory(now) {
   return () => Timestamp.fromMillis(now());
 }
 
+function registrationKeyId(type, value) {
+  return crypto
+    .createHash("sha256")
+    .update(`${type}\0${String(value || "").trim().toLocaleLowerCase("ar")}`)
+    .digest("hex");
+}
+
 function createSecureWriteHandlers({
   db,
   now = () => Date.now(),
@@ -37,18 +47,23 @@ function createSecureWriteHandlers({
     const roomId = safeId(data.roomId, "roomId");
     const name = String(data.name || "").trim();
     const emoji = String(data.emoji || "").trim().slice(0, 8);
-    const fullName = String(data.fullName || "").trim();
-    const phone = String(data.phone || "").replace(/\D/g, "");
-    if (name.length < 1 || name.length > 40 || fullName.length < 3 || fullName.length > 100) {
-      throw new HttpsError("invalid-argument", "Player name fields are invalid");
-    }
-    if (!/^\d{10}$/.test(phone)) {
-      throw new HttpsError("invalid-argument", "Phone must contain exactly 10 digits");
+    const { fullName, recoveryNameNormalized } = normalizeRecoveryName(data.fullName);
+    const phoneNormalized = normalizePhone(data.phone);
+    if (name.length < 1 || name.length > 40) {
+      throw new HttpsError("invalid-argument", "Player display name is invalid");
     }
 
     const roomRef = db.doc(`rooms/${roomId}`);
     const playersRef = roomRef.collection("players");
+    const privatePlayersRef = roomRef.collection("playerPrivate");
+    const registrationKeysRef = roomRef.collection("playerRegistrationKeys");
     const playerRef = playersRef.doc();
+    const privatePlayerRef = privatePlayersRef.doc(playerRef.id);
+    const ownerKeyRef = registrationKeysRef.doc(registrationKeyId("uid", uid));
+    const nameKeyRef = registrationKeysRef.doc(registrationKeyId("name", name));
+    const phoneKeyRef = registrationKeysRef.doc(
+      registrationKeyId("phone", phoneNormalized)
+    );
     return db.runTransaction(async (transaction) => {
       const roomSnapshot = await transaction.get(roomRef);
       if (!roomSnapshot.exists) throw new HttpsError("not-found", "Room not found");
@@ -57,38 +72,102 @@ function createSecureWriteHandlers({
         throw new HttpsError("failed-precondition", "Registration is closed");
       }
       const [ownerSnapshot, nameSnapshot, phoneSnapshot] = await Promise.all([
-        transaction.get(playersRef.where("authUid", "==", uid).limit(1)),
-        transaction.get(playersRef.where("name", "==", name).limit(1)),
-        transaction.get(playersRef.where("phone", "==", phone).limit(1)),
+        transaction.get(ownerKeyRef),
+        transaction.get(nameKeyRef),
+        transaction.get(phoneKeyRef),
       ]);
-      if (!ownerSnapshot.empty) {
-        const existing = ownerSnapshot.docs[0];
-        return { success: true, status: "already-registered", playerId: existing.id };
+      if (ownerSnapshot.exists) {
+        const existingPlayerId = ownerSnapshot.data().playerId;
+        const existingPublicSnapshot = await transaction.get(playersRef.doc(existingPlayerId));
+        if (!existingPublicSnapshot.exists) {
+          throw new HttpsError("failed-precondition", "Player registration is incomplete");
+        }
+        const existingPublic = existingPublicSnapshot.data();
+        return {
+          success: true,
+          status: "already-registered",
+          playerId: existingPlayerId,
+          player: {
+            name: existingPublic.name || "",
+            displayName: existingPublic.displayName || existingPublic.name || "",
+            emoji: existingPublic.emoji || "",
+          },
+        };
       }
-      if (!nameSnapshot.empty || !phoneSnapshot.empty) {
+      if (nameSnapshot.exists || phoneSnapshot.exists) {
         throw new HttpsError("already-exists", "Player name or phone is already registered");
       }
-      transaction.create(playerRef, {
-        authUid: uid,
+      const createdAt = serverTimestamp();
+      const publicPlayer = publicPlayerData({
         name,
         emoji,
-        fullName,
-        phone,
-        score: 0,
-        rank: null,
-        answeredCount: 0,
-        pendingJoker: false,
-        jokerUsed: false,
-        jokerQuestionId: null,
-        jokerQuestionNumber: null,
-        practicePendingJoker: false,
-        practiceJokerQuestionId: null,
-        practiceJokerTiming: null,
-        practiceJokerMultiplier: null,
-        joinedAt: serverTimestamp(),
+        createdAt,
       });
-      return { success: true, status: "registered", playerId: playerRef.id };
+      transaction.create(playerRef, publicPlayer);
+      transaction.create(privatePlayerRef, {
+        authUid: uid,
+        fullName,
+        phoneNormalized,
+        recoveryNameNormalized,
+        createdAt,
+        updatedAt: createdAt,
+      });
+      transaction.create(ownerKeyRef, {
+        type: "uid",
+        playerId: playerRef.id,
+        createdAt,
+      });
+      transaction.create(nameKeyRef, {
+        type: "name",
+        playerId: playerRef.id,
+        createdAt,
+      });
+      transaction.create(phoneKeyRef, {
+        type: "phone",
+        playerId: playerRef.id,
+        createdAt,
+      });
+      return {
+        success: true,
+        status: "registered",
+        playerId: playerRef.id,
+        player: { name, displayName: name, emoji },
+      };
     });
+  };
+
+  const recoverPlayer = async (request) => {
+    const uid = requireAuthenticated(request.auth);
+    const data = exactInput(request.data, ["roomId"]);
+    const roomId = safeId(data.roomId, "roomId");
+    const roomRef = db.doc(`rooms/${roomId}`);
+    const privateSnapshot = await roomRef
+      .collection("playerPrivate")
+      .where("authUid", "==", uid)
+      .limit(2)
+      .get();
+    if (privateSnapshot.empty) {
+      throw new HttpsError("not-found", "No player is linked to this authenticated device");
+    }
+    if (privateSnapshot.size !== 1) {
+      throw new HttpsError("failed-precondition", "Multiple players are linked to this identity");
+    }
+    const playerId = privateSnapshot.docs[0].id;
+    const publicSnapshot = await roomRef.collection("players").doc(playerId).get();
+    if (!publicSnapshot.exists) {
+      throw new HttpsError("failed-precondition", "Player registration is incomplete");
+    }
+    const player = publicSnapshot.data();
+    return {
+      success: true,
+      status: "recovered",
+      playerId,
+      player: {
+        name: player.name || "",
+        displayName: player.displayName || player.name || "",
+        emoji: player.emoji || "",
+      },
+    };
   };
 
   const submitAnswer = async (request) => {
@@ -99,17 +178,20 @@ function createSecureWriteHandlers({
     const selectedIndex = validateSelectedIndex(data.selectedIndex);
     const roomRef = db.doc(`rooms/${roomId}`);
     const playerRef = roomRef.collection("players").doc(playerId);
+    const privatePlayerRef = roomRef.collection("playerPrivate").doc(playerId);
     const answerRef = roomRef.collection("answers").doc(`${questionId}_${playerId}`);
 
     return db.runTransaction(async (transaction) => {
-      const [roomSnapshot, playerSnapshot, answerSnapshot] = await Promise.all([
+      const [roomSnapshot, playerSnapshot, privatePlayerSnapshot, answerSnapshot] = await Promise.all([
         transaction.get(roomRef),
         transaction.get(playerRef),
+        transaction.get(privatePlayerRef),
         transaction.get(answerRef),
       ]);
       if (!roomSnapshot.exists) throw new HttpsError("not-found", "Room not found");
       if (!playerSnapshot.exists) throw new HttpsError("not-found", "Player not found");
-      requirePlayerOwner(playerSnapshot.data(), request.auth);
+      if (!privatePlayerSnapshot.exists) throw new HttpsError("not-found", "Player identity not found");
+      requirePlayerOwner(privatePlayerSnapshot.data(), request.auth);
       if (answerSnapshot.exists) {
         throw new HttpsError("already-exists", "An official answer already exists");
       }
@@ -156,16 +238,19 @@ function createSecureWriteHandlers({
     const playerId = safeId(data.playerId, "playerId");
     const roomRef = db.doc(`rooms/${roomId}`);
     const playerRef = roomRef.collection("players").doc(playerId);
+    const privatePlayerRef = roomRef.collection("playerPrivate").doc(playerId);
 
     return db.runTransaction(async (transaction) => {
-      const [roomSnapshot, playerSnapshot] = await Promise.all([
+      const [roomSnapshot, playerSnapshot, privatePlayerSnapshot] = await Promise.all([
         transaction.get(roomRef),
         transaction.get(playerRef),
+        transaction.get(privatePlayerRef),
       ]);
       if (!roomSnapshot.exists) throw new HttpsError("not-found", "Room not found");
       if (!playerSnapshot.exists) throw new HttpsError("not-found", "Player not found");
+      if (!privatePlayerSnapshot.exists) throw new HttpsError("not-found", "Player identity not found");
       const player = playerSnapshot.data();
-      requirePlayerOwner(player, request.auth);
+      requirePlayerOwner(privatePlayerSnapshot.data(), request.auth);
       const room = roomSnapshot.data();
       const practice = room.practiceMode === true || room.currentQuestion?.isPractice === true;
 
@@ -260,15 +345,18 @@ function createSecureWriteHandlers({
     const playerId = safeId(data.playerId, "playerId");
     const roomRef = db.doc(`rooms/${roomId}`);
     const playerRef = roomRef.collection("players").doc(playerId);
+    const privatePlayerRef = roomRef.collection("playerPrivate").doc(playerId);
     return db.runTransaction(async (transaction) => {
-      const [roomSnapshot, playerSnapshot] = await Promise.all([
+      const [roomSnapshot, playerSnapshot, privatePlayerSnapshot] = await Promise.all([
         transaction.get(roomRef),
         transaction.get(playerRef),
+        transaction.get(privatePlayerRef),
       ]);
       if (!roomSnapshot.exists) throw new HttpsError("not-found", "Room not found");
       if (!playerSnapshot.exists) throw new HttpsError("not-found", "Player not found");
+      if (!privatePlayerSnapshot.exists) throw new HttpsError("not-found", "Player identity not found");
       const player = playerSnapshot.data();
-      requirePlayerOwner(player, request.auth);
+      requirePlayerOwner(privatePlayerSnapshot.data(), request.auth);
       const room = roomSnapshot.data();
       if (room.stage === "question" || room.stage === "reveal") {
         throw new HttpsError("failed-precondition", "Joker cannot be cancelled after question start");
@@ -632,6 +720,202 @@ function createSecureWriteHandlers({
     });
   };
 
+  const getPlayerPrivateDetails = async (request) => {
+    requireAdmin(request.auth);
+    const data = exactInput(request.data, ["roomId", "playerId"]);
+    const roomId = safeId(data.roomId, "roomId");
+    const playerId = safeId(data.playerId, "playerId");
+    const privateSnapshot = await db.doc(
+      `rooms/${roomId}/playerPrivate/${playerId}`
+    ).get();
+    if (!privateSnapshot.exists) {
+      throw new HttpsError("not-found", "Player private details not found");
+    }
+    const privatePlayer = privateSnapshot.data();
+    return {
+      success: true,
+      playerId,
+      details: {
+        fullName: privatePlayer.fullName || "",
+        phone: privatePlayer.phoneNormalized || "",
+      },
+    };
+  };
+
+  const updatePlayerProfile = async (request) => {
+    const uid = requireAuthenticated(request.auth);
+    const data = exactInput(
+      request.data,
+      ["roomId", "playerId"],
+      ["name", "emoji", "fullName", "phone"]
+    );
+    const roomId = safeId(data.roomId, "roomId");
+    const playerId = safeId(data.playerId, "playerId");
+    const isAdminRequest = request.auth?.token?.admin === true;
+    const roomRef = db.doc(`rooms/${roomId}`);
+    const playerRef = roomRef.collection("players").doc(playerId);
+    const privatePlayerRef = roomRef.collection("playerPrivate").doc(playerId);
+    const registrationKeysRef = roomRef.collection("playerRegistrationKeys");
+
+    return db.runTransaction(async (transaction) => {
+      const [playerSnapshot, privatePlayerSnapshot] = await Promise.all([
+        transaction.get(playerRef),
+        transaction.get(privatePlayerRef),
+      ]);
+      if (!playerSnapshot.exists || !privatePlayerSnapshot.exists) {
+        throw new HttpsError("not-found", "Player not found");
+      }
+      if (!isAdminRequest) {
+        requirePlayerOwner(privatePlayerSnapshot.data(), request.auth);
+      } else if (!uid) {
+        throw new HttpsError("unauthenticated", "Authentication is required");
+      }
+
+      const publicUpdates = {};
+      const privateUpdates = {};
+      const keyChanges = [];
+      if (data.name !== undefined) {
+        const name = String(data.name || "").trim();
+        if (name.length < 1 || name.length > 40) {
+          throw new HttpsError("invalid-argument", "Player display name is invalid");
+        }
+        const oldName = playerSnapshot.data().name || "";
+        const newNameKeyRef = registrationKeysRef.doc(registrationKeyId("name", name));
+        const newNameKey = await transaction.get(newNameKeyRef);
+        if (newNameKey.exists && newNameKey.data().playerId !== playerId) {
+          throw new HttpsError("already-exists", "Player display name is already registered");
+        }
+        if (name !== oldName) {
+          keyChanges.push({
+            oldRef: registrationKeysRef.doc(registrationKeyId("name", oldName)),
+            newRef: newNameKeyRef,
+            type: "name",
+          });
+        }
+        publicUpdates.name = name;
+        publicUpdates.displayName = name;
+      }
+      if (data.emoji !== undefined) {
+        publicUpdates.emoji = String(data.emoji || "").trim().slice(0, 8);
+      }
+      if (data.fullName !== undefined) {
+        const normalized = normalizeRecoveryName(data.fullName);
+        privateUpdates.fullName = normalized.fullName;
+        privateUpdates.recoveryNameNormalized = normalized.recoveryNameNormalized;
+      }
+      if (data.phone !== undefined) {
+        const phoneNormalized = normalizePhone(data.phone);
+        const oldPhone = privatePlayerSnapshot.data().phoneNormalized || "";
+        const newPhoneKeyRef = registrationKeysRef.doc(
+          registrationKeyId("phone", phoneNormalized)
+        );
+        const newPhoneKey = await transaction.get(newPhoneKeyRef);
+        if (newPhoneKey.exists && newPhoneKey.data().playerId !== playerId) {
+          throw new HttpsError("already-exists", "Phone is already registered");
+        }
+        if (phoneNormalized !== oldPhone) {
+          keyChanges.push({
+            oldRef: registrationKeysRef.doc(registrationKeyId("phone", oldPhone)),
+            newRef: newPhoneKeyRef,
+            type: "phone",
+          });
+        }
+        privateUpdates.phoneNormalized = phoneNormalized;
+      }
+      if (!Object.keys(publicUpdates).length && !Object.keys(privateUpdates).length) {
+        throw new HttpsError("invalid-argument", "No profile fields were provided");
+      }
+      const updatedAt = serverTimestamp();
+      if (Object.keys(publicUpdates).length) {
+        transaction.update(playerRef, { ...publicUpdates, updatedAt });
+      }
+      if (Object.keys(privateUpdates).length) {
+        transaction.update(privatePlayerRef, { ...privateUpdates, updatedAt });
+      }
+      for (const change of keyChanges) {
+        transaction.delete(change.oldRef);
+        transaction.set(change.newRef, {
+          type: change.type,
+          playerId,
+          createdAt: updatedAt,
+        });
+      }
+      return {
+        success: true,
+        status: "updated",
+        playerId,
+        player: {
+          name: publicUpdates.name || playerSnapshot.data().name || "",
+          displayName:
+            publicUpdates.displayName ||
+            playerSnapshot.data().displayName ||
+            playerSnapshot.data().name ||
+            "",
+          emoji:
+            publicUpdates.emoji === undefined
+              ? playerSnapshot.data().emoji || ""
+              : publicUpdates.emoji,
+        },
+      };
+    });
+  };
+
+  const deletePlayer = async (request) => {
+    const adminUid = requireAdmin(request.auth);
+    const data = exactInput(request.data, ["roomId", "playerId", "reason"]);
+    const roomId = safeId(data.roomId, "roomId");
+    const playerId = safeId(data.playerId, "playerId");
+    const reason = String(data.reason || "").trim();
+    if (reason.length < 3 || reason.length > 200) {
+      throw new HttpsError("invalid-argument", "reason must contain 3 to 200 characters");
+    }
+    const roomRef = db.doc(`rooms/${roomId}`);
+    const playerRef = roomRef.collection("players").doc(playerId);
+    const privatePlayerRef = roomRef.collection("playerPrivate").doc(playerId);
+    const auditRef = roomRef.collection("auditLogs").doc();
+    return db.runTransaction(async (transaction) => {
+      const [playerSnapshot, privatePlayerSnapshot] = await Promise.all([
+        transaction.get(playerRef),
+        transaction.get(privatePlayerRef),
+      ]);
+      if (!playerSnapshot.exists && !privatePlayerSnapshot.exists) {
+        return { success: true, status: "already-deleted", playerId };
+      }
+      if (playerSnapshot.exists) transaction.delete(playerRef);
+      if (privatePlayerSnapshot.exists) transaction.delete(privatePlayerRef);
+      if (playerSnapshot.exists) {
+        transaction.delete(
+          roomRef
+            .collection("playerRegistrationKeys")
+            .doc(registrationKeyId("name", playerSnapshot.data().name || ""))
+        );
+      }
+      if (privatePlayerSnapshot.exists) {
+        const privatePlayer = privatePlayerSnapshot.data();
+        transaction.delete(
+          roomRef
+            .collection("playerRegistrationKeys")
+            .doc(registrationKeyId("uid", privatePlayer.authUid || ""))
+        );
+        transaction.delete(
+          roomRef
+            .collection("playerRegistrationKeys")
+            .doc(registrationKeyId("phone", privatePlayer.phoneNormalized || ""))
+        );
+      }
+      transaction.create(auditRef, {
+        type: "delete-player",
+        adminUid,
+        targetId: playerId,
+        playerId,
+        reason,
+        runId: runId(),
+        createdAt: serverTimestamp(),
+      });
+      return { success: true, status: "deleted", playerId };
+    });
+  };
+
   const adjustPlayerScore = async (request) => {
     const adminUid = requireAdmin(request.auth);
     const { roomId, playerId, delta, reason } = validateScoreAdjustment(request.data);
@@ -800,7 +1084,7 @@ function createSecureWriteHandlers({
     }
     const collectionNames =
       mode === "full"
-        ? ["players", "answers", "messages"]
+        ? ["players", "playerPrivate", "playerRegistrationKeys", "visitors", "answers", "messages"]
         : mode === "messages"
           ? ["messages"]
           : ["answers", "messages"];
@@ -835,12 +1119,16 @@ function createSecureWriteHandlers({
     adjustPlayerScore,
     cancelJoker,
     controlQuestion,
+    deletePlayer,
+    getPlayerPrivateDetails,
     prepareQuestion,
+    recoverPlayer,
     registerPlayer,
     resetPracticeScores,
     resetQuizData,
     startQuestion,
     submitAnswer,
+    updatePlayerProfile,
   };
 }
 
