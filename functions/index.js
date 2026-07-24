@@ -3,6 +3,7 @@ const { onRequest, onCall } = require("firebase-functions/v2/https");
 const { initializeApp } = require("firebase-admin/app");
 const { getFirestore } = require("firebase-admin/firestore");
 const { createFinalizeQuestionHandler } = require("./finalize-question/handler");
+const { createSecureWriteHandlers } = require("./secure-writes/handlers");
 
 initializeApp();
 setGlobalOptions({ maxInstances: 10 });
@@ -18,3 +19,15 @@ exports.testFunction = onRequest((request, response) => {
 exports.finalizeQuestion = onCall(
   createFinalizeQuestionHandler({ db: getFirestore() })
 );
+
+const secureWrites = createSecureWriteHandlers({ db: getFirestore() });
+exports.registerPlayer = onCall(secureWrites.registerPlayer);
+exports.submitAnswer = onCall(secureWrites.submitAnswer);
+exports.activateJoker = onCall(secureWrites.activateJoker);
+exports.cancelJoker = onCall(secureWrites.cancelJoker);
+exports.prepareQuestion = onCall(secureWrites.prepareQuestion);
+exports.startQuestion = onCall(secureWrites.startQuestion);
+exports.controlQuestion = onCall(secureWrites.controlQuestion);
+exports.adjustPlayerScore = onCall(secureWrites.adjustPlayerScore);
+exports.resetPracticeScores = onCall(secureWrites.resetPracticeScores);
+exports.resetQuizData = onCall(secureWrites.resetQuizData);

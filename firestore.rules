@@ -1,12 +1,161 @@
-// DEVELOPMENT EMULATOR RULES — DO NOT DEPLOY
-// These permissive rules exist only so the current unauthenticated application
-// can be exercised locally. Replace them with authenticated production rules.
 rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return signedIn()
+        && request.auth.token.keys().hasAll(['admin'])
+        && request.auth.token.admin == true;
+    }
+
+    function affected() {
+      return request.resource.data.diff(resource.data).affectedKeys();
+    }
+
+    function safeRoomCreate() {
+      return isAdmin()
+        && !['ready', 'question', 'reveal', 'results'].hasAny([request.resource.data.stage])
+        && request.resource.data.currentQuestion == null
+        && request.resource.data.acceptingAnswers != true
+        && request.resource.data.activeQuestionId == null;
+    }
+
+    function safeAdminRoomUpdate() {
+      let sensitive = [
+        'currentQuestion',
+        'activeQuestionId',
+        'acceptingAnswers',
+        'questionStartedAtMs',
+        'questionSentAt',
+        'answerRevealAtMs',
+        'answerStartAtMs',
+        'answerEndAtMs',
+        'mediaStartedAt',
+        'mediaEndedAt',
+        'audioStartedAt',
+        'audioEndedAt',
+        'processedQuestionId',
+        'resultsCalculated',
+        'resultsCalculatedQuestionId',
+        'questionResultsById',
+        'collectingBonusByPlayer',
+        'collectingBonusJokerByPlayer',
+        'rankMovementByPlayer',
+        'collectingAnswerCorrectByPlayer',
+        'resultsDisplaySnapshot',
+        'calculationStatus',
+        'finalization',
+        'processingQuestionId',
+        'auditLogs'
+      ];
+      let attemptsSensitiveWrite = affected().hasAny(sensitive);
+      let attemptsProtectedStage = affected().hasAny(['stage'])
+        && ['ready', 'question', 'reveal', 'results'].hasAny([request.resource.data.stage]);
+      let safeReset = request.resource.data.currentQuestion == null
+        && request.resource.data.acceptingAnswers != true
+        && request.resource.data.activeQuestionId == null
+        && !['ready', 'question', 'reveal', 'results'].hasAny([request.resource.data.stage]);
+      return isAdmin()
+        && ((!attemptsSensitiveWrite && !attemptsProtectedStage) || safeReset);
+    }
+
+    function playerOwnsExistingDocument() {
+      return signedIn() && resource.data.authUid == request.auth.uid;
+    }
+
+    match /rooms/{roomId} {
+      allow read: if true;
+      allow create: if safeRoomCreate();
+      allow update: if safeAdminRoomUpdate()
+        || (
+          signedIn()
+          && affected().hasOnly(['categoryVote', 'healthCheck', 'updatedAt'])
+        );
+      allow delete: if isAdmin();
+
+      match /players/{playerId} {
+        allow read: if true;
+        allow create: if signedIn()
+          && request.resource.data.isVisitorOnly == true
+          && request.resource.data.authUid == request.auth.uid
+          && request.resource.data.keys().hasOnly([
+            'isVisitorOnly',
+            'authUid',
+            'seenAtMs',
+            'seenAt',
+            'playerId',
+            'playerName',
+            'registered'
+          ]);
+        allow update: if (
+          playerOwnsExistingDocument()
+          && affected().hasOnly([
+            'name',
+            'emoji',
+            'fullName',
+            'phone',
+            'seenAtMs',
+            'seenAt',
+            'playerName',
+            'registered'
+          ])
+        ) || (
+          isAdmin()
+          && affected().hasOnly(['name', 'emoji', 'fullName', 'phone'])
+        );
+        allow delete: if isAdmin();
+      }
+
+      match /answers/{answerId} {
+        allow read: if true;
+        allow write: if false;
+      }
+
+      match /questions/{questionId} {
+        allow read, write: if isAdmin();
+      }
+
+      match /questionSecrets/{questionId} {
+        allow read, write: if false;
+      }
+
+      match /questionResults/{questionId} {
+        allow read: if true;
+        allow write: if false;
+      }
+
+      match /auditLogs/{logId} {
+        allow read: if isAdmin();
+        allow write: if false;
+      }
+
+      match /messages/{messageId} {
+        allow read: if true;
+        allow create: if signedIn()
+          && request.resource.data.playerId is string
+          && exists(/databases/$(database)/documents/rooms/$(roomId)/players/$(request.resource.data.playerId))
+          && get(/databases/$(database)/documents/rooms/$(roomId)/players/$(request.resource.data.playerId)).data.authUid == request.auth.uid
+          && request.resource.data.keys().hasOnly([
+            'playerId',
+            'playerName',
+            'text',
+            'createdAtMs',
+            'createdAt'
+          ]);
+        allow update, delete: if isAdmin();
+      }
+
+      match /{document=**} {
+        allow read, write: if isAdmin();
+      }
+    }
+
     match /{document=**} {
-      allow read, write: if true;
+      allow read, write: if false;
     }
   }
 }

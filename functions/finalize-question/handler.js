@@ -34,6 +34,7 @@ function createFinalizeQuestionHandler({ db, now = () => Date.now(), runId = () 
     const currentRunId = runId();
     const roomRef = db.doc(`rooms/${roomId}`);
     const resultRef = roomRef.collection("questionResults").doc(questionId);
+    const secretRef = roomRef.collection("questionSecrets").doc(questionId);
     let claimed = false;
 
     try {
@@ -43,10 +44,22 @@ function createFinalizeQuestionHandler({ db, now = () => Date.now(), runId = () 
           throw new HttpsError("not-found", "Room not found");
         }
         const room = roomSnapshot.data();
-        const resultSnapshot = await transaction.get(resultRef);
+        const [resultSnapshot, secretSnapshot] = await Promise.all([
+          transaction.get(resultRef),
+          transaction.get(secretRef),
+        ]);
         if (resultSnapshot.exists) return resultSnapshot.data();
 
-        validateQuestion(room, questionId);
+        const trustedRoom = secretSnapshot.exists
+          ? {
+              ...room,
+              currentQuestion: {
+                ...room.currentQuestion,
+                ...secretSnapshot.data(),
+              },
+            }
+          : room;
+        validateQuestion(trustedRoom, questionId);
         const finalization = room.finalization || {};
         const startedAtMs = Number(finalization.startedAtMs || 0);
         if (
@@ -86,7 +99,10 @@ function createFinalizeQuestionHandler({ db, now = () => Date.now(), runId = () 
           throw new HttpsError("not-found", "Room not found");
         }
         const room = roomSnapshot.data();
-        const resultSnapshot = await transaction.get(resultRef);
+        const [resultSnapshot, secretSnapshot] = await Promise.all([
+          transaction.get(resultRef),
+          transaction.get(secretRef),
+        ]);
         if (resultSnapshot.exists) {
           return publicResult(resultSnapshot.data(), "already-finalized");
         }
@@ -100,7 +116,16 @@ function createFinalizeQuestionHandler({ db, now = () => Date.now(), runId = () 
           throw new HttpsError("aborted", "Question finalization lock ownership was lost");
         }
 
-        const question = validateQuestion(room, questionId);
+        const trustedRoom = secretSnapshot.exists
+          ? {
+              ...room,
+              currentQuestion: {
+                ...room.currentQuestion,
+                ...secretSnapshot.data(),
+              },
+            }
+          : room;
+        const question = validateQuestion(trustedRoom, questionId);
         const playersQuery = roomRef.collection("players");
         const answersQuery = roomRef.collection("answers").where("questionId", "==", questionId);
         const playersSnapshot = await transaction.get(playersQuery);

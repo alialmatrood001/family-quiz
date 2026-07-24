@@ -81,7 +81,15 @@ export function roomRef(roomId) {
 
 export async function deleteRoom(roomId) {
   const ref = roomRef(roomId);
-  for (const collectionName of ["answers", "players", "questions", "messages", "questionResults"]) {
+  for (const collectionName of [
+    "answers",
+    "players",
+    "questions",
+    "messages",
+    "questionResults",
+    "questionSecrets",
+    "auditLogs",
+  ]) {
     const snapshot = await ref.collection(collectionName).get();
     for (let offset = 0; offset < snapshot.docs.length; offset += 400) {
       const batch = db.batch();
@@ -174,27 +182,46 @@ async function authToken(role) {
   return body.idToken;
 }
 
-export async function callFinalizeQuestion(
+export async function signInEmulatorIdentity(identity) {
+  assertEmulatorSafety();
+  const response = await fetch(
+    "http://127.0.0.1:9099/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=demo-key",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        email: identity.email,
+        password: identity.password,
+        returnSecureToken: true,
+      }),
+    }
+  );
+  const body = await response.json();
+  assert.ok(response.ok && body.idToken, "Authentication Emulator sign-in failed");
+  return body.idToken;
+}
+
+export async function callCallable(
+  name,
   data,
-  { authRole = "admin", timeoutMs = 20_000 } = {}
+  { token = null, authRole = null, timeoutMs = 20_000 } = {}
 ) {
   assertEmulatorSafety();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const url =
-    `http://127.0.0.1:5001/${DEMO_PROJECT_ID}/${FUNCTION_REGION}/${FUNCTION_NAME}`;
   const headers = { "content-type": "application/json" };
-  if (authRole !== "none") {
-    headers.authorization = `Bearer ${await authToken(authRole)}`;
-  }
-
+  const resolvedToken = token || (authRole ? await authToken(authRole) : null);
+  if (resolvedToken) headers.authorization = `Bearer ${resolvedToken}`;
   try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ data }),
-      signal: controller.signal,
-    });
+    const response = await fetch(
+      `http://127.0.0.1:5001/${DEMO_PROJECT_ID}/${FUNCTION_REGION}/${name}`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ data }),
+        signal: controller.signal,
+      }
+    );
     const body = await response.json();
     if (!response.ok || body.error) {
       const error = new Error(body.error?.message || `Callable failed with HTTP ${response.status}`);
@@ -207,6 +234,17 @@ export async function callFinalizeQuestion(
   } finally {
     clearTimeout(timer);
   }
+}
+
+export async function callFinalizeQuestion(
+  data,
+  { authRole = "admin", timeoutMs = 20_000 } = {}
+) {
+  assertEmulatorSafety();
+  return callCallable(FUNCTION_NAME, data, {
+    authRole: authRole === "none" ? null : authRole,
+    timeoutMs,
+  });
 }
 
 export function playerMap(players) {

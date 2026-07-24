@@ -11,7 +11,9 @@
     "test:baseline": "npm run test:unit && node --test --test-concurrency=1 tests/integration/baseline-50.test.mjs tests/integration/idempotency.test.mjs tests/integration/edge-cases.test.mjs",
     "test:baseline:50": "node --test --test-concurrency=1 tests/integration/baseline-50.test.mjs",
     "test:baseline:edge": "node --test --test-concurrency=1 tests/integration/edge-cases.test.mjs",
-    "test:baseline:performance": "node --test --test-concurrency=1 tests/integration/performance.test.mjs"
+    "test:baseline:performance": "node --test --test-concurrency=1 tests/integration/performance.test.mjs",
+    "test:secure-writes": "node --test --test-concurrency=1 tests/integration/secure-writes-flow.test.mjs",
+    "test:secure-writes:performance": "node --test --test-concurrency=1 tests/integration/secure-writes-performance.test.mjs"
   },
   "engines": {
     "node": "24"

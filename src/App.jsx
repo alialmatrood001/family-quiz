@@ -15,11 +15,27 @@ import {
   deleteDoc,
   arrayUnion,
   runTransaction,
-  writeBatch,
 } from "firebase/firestore";
 import { db } from "./firebase.js";
 import { adminAuth } from "./admin-auth.js";
 import { useQuestionFinalization } from "./use-question-finalization.js";
+import {
+  activateJokerSecurely,
+  cancelJokerSecurely,
+  registerPlayerSecurely,
+  submitAnswerSecurely,
+} from "./quiz-write-client.js";
+import {
+  controlQuestionSecurely,
+  prepareQuestionSecurely,
+  startQuestionSecurely,
+} from "./question-control-client.js";
+import {
+  adjustPlayerScoreSecurely,
+  resetQuizDataSecurely,
+  resetPracticeScoresSecurely,
+} from "./admin-player-actions-client.js";
+import { ensureAnonymousPlayerAuth } from "./player-auth.js";
 import "./App.css";
 
 const ROOM_ID = "family-quiz-001";
@@ -31,7 +47,6 @@ const GROUP_NAME_IMAGE_SRC = "/Group_name.png";
 
 const REVEAL_OPTIONS_DELAY_MS = 3000;
 const MEDIA_REVEAL_OPTIONS_DELAY_MS = 5000;
-const QUESTION_START_SYNC_BUFFER_MS = 300;
 const RESULTS_LEADERBOARD_LIMIT = 15;
 const DEFAULT_PACKAGE_ID = "default";
 const DEFAULT_PACKAGE_NAME = "المسابقة الحالية";
@@ -68,10 +83,6 @@ function clamp(value, min, max) {
 
 function isSameId(a, b) {
   return a != null && b != null && String(a) === String(b);
-}
-
-function getAnswerStartMs(question = {}) {
-  return Number(question.answerStartAtMs || question.answerRevealAtMs || question.questionStartedAtMs || question.sentAtMs || 0);
 }
 
 function formatAnswerTime(answer) {
@@ -305,20 +316,11 @@ function getQuestionTimeLeft(question, room, localNow) {
 async function extendQuestionTime(room, seconds = 10) {
   const question = room?.currentQuestion;
   if (!question || room?.stage !== "question") return;
-
-  const answerStartAt = getAnswerStartAt(room, question);
-  if (!answerStartAt) return;
-
-  const currentEndAt =
-    Number(room?.answerEndAtMs) ||
-    Number(question?.answerEndAtMs) ||
-    answerStartAt + Number(question.seconds || 20) * 1000;
-  const nextEndAt = Math.max(currentEndAt, getNow()) + seconds * 1000;
-
-  await updateDoc(doc(db, "rooms", ROOM_ID), {
-    answerEndAtMs: nextEndAt,
-    "currentQuestion.answerEndAtMs": nextEndAt,
-    updatedAt: serverTimestamp(),
+  await controlQuestionSecurely({
+    roomId: ROOM_ID,
+    questionId: question.questionId || question.id,
+    action: "extend",
+    seconds,
   });
 }
 
@@ -345,31 +347,6 @@ function getPointsProgressPercent(question, room, localNow) {
   const elapsed = Math.max(0, serverNow - answerStartAt) / 1000;
 
   return clamp(((seconds - elapsed) / seconds) * 100, 0, 100);
-}
-
-function calculateBasePoints({ question, room, answeredAt }) {
-  const maxPoints = Number(question.maxPoints || 1000);
-  const minPoints = Number(question.minPoints || 100);
-  const seconds = Number(question.seconds || 20);
-
-  const answeredAtServer = getServerNow(room, answeredAt);
-  const answerStartAt = getAnswerStartAt(room, question);
-
-  if (!answerStartAt) return maxPoints;
-
-  const elapsed = Math.max(0, answeredAtServer - answerStartAt) / 1000;
-  const ratio = clamp((seconds - elapsed) / seconds, 0, 1);
-
-  return Math.round(minPoints + ratio * (maxPoints - minPoints));
-}
-
-function calculateFinalPoints({ isCorrect, basePoints, jokerApplied, jokerMultiplier = 3 }) {
-  if (jokerApplied) {
-    const multiplier = Number(jokerMultiplier || 3);
-    return isCorrect ? basePoints * multiplier : -basePoints;
-  }
-
-  return isCorrect ? basePoints : 0;
 }
 
 function getJokerMultiplier(player, question) {
@@ -596,10 +573,14 @@ function usePlayers() {
   return players;
 }
 
-function useQuestions(activePackageId = DEFAULT_PACKAGE_ID) {
+function useQuestions(activePackageId = DEFAULT_PACKAGE_ID, enabled = true) {
   const [questions, setQuestions] = useState([]);
 
   useEffect(() => {
+    if (!enabled) {
+      setQuestions([]);
+      return undefined;
+    }
     const packageId = activePackageId || DEFAULT_PACKAGE_ID;
     const questionsRef = collection(db, "rooms", ROOM_ID, "questions");
     const questionsSource =
@@ -626,7 +607,7 @@ function useQuestions(activePackageId = DEFAULT_PACKAGE_ID) {
     );
 
     return () => unsub();
-  }, [activePackageId]);
+  }, [activePackageId, enabled]);
 
   return questions;
 }
@@ -659,10 +640,14 @@ function useQuestionPackages() {
   return packages;
 }
 
-function useAllQuestions() {
+function useAllQuestions(enabled = true) {
   const [questions, setQuestions] = useState([]);
 
   useEffect(() => {
+    if (!enabled) {
+      setQuestions([]);
+      return undefined;
+    }
     const unsub = onSnapshot(
       collection(db, "rooms", ROOM_ID, "questions"),
       (snap) => {
@@ -677,17 +662,19 @@ function useAllQuestions() {
     );
 
     return () => unsub();
-  }, []);
+  }, [enabled]);
 
   return questions;
 }
 
 function useAnswers(questionId) {
   const [answers, setAnswers] = useState([]);
+  const [officialResult, setOfficialResult] = useState(null);
 
   useEffect(() => {
     if (!questionId) {
       setAnswers([]);
+      setOfficialResult(null);
       return;
     }
 
@@ -704,15 +691,29 @@ function useAnswers(questionId) {
         }))
       );
     });
+    const unsubResult = onSnapshot(
+      doc(db, "rooms", ROOM_ID, "questionResults", questionId),
+      (snapshot) => setOfficialResult(snapshot.exists() ? snapshot.data() : null),
+    );
 
-    return () => unsub();
+    return () => {
+      unsub();
+      unsubResult();
+    };
   }, [questionId]);
 
-  return answers;
+  const officialByPlayer = new Map(
+    (officialResult?.results || []).map((item) => [item.playerId, item]),
+  );
+  return answers.map((answer) => ({
+    ...answer,
+    ...(officialByPlayer.get(answer.playerId) || {}),
+  }));
 }
 
 function useAllAnswers() {
   const [answers, setAnswers] = useState([]);
+  const [officialResults, setOfficialResults] = useState([]);
 
   useEffect(() => {
     const unsub = onSnapshot(
@@ -726,11 +727,29 @@ function useAllAnswers() {
         );
       }
     );
+    const unsubResults = onSnapshot(
+      collection(db, "rooms", ROOM_ID, "questionResults"),
+      (snapshot) => {
+        setOfficialResults(snapshot.docs.map((item) => item.data()));
+      },
+    );
 
-    return () => unsub();
+    return () => {
+      unsub();
+      unsubResults();
+    };
   }, []);
 
-  return answers;
+  const officialByAnswer = new Map();
+  officialResults.forEach((result) => {
+    (result.results || []).forEach((item) => {
+      officialByAnswer.set(`${result.questionId}/${item.playerId}`, item);
+    });
+  });
+  return answers.map((answer) => ({
+    ...answer,
+    ...(officialByAnswer.get(`${answer.questionId}/${answer.playerId}`) || {}),
+  }));
 }
 
 function useMessages() {
@@ -780,11 +799,11 @@ function useVisitors() {
   return visitors;
 }
 
-function getOrCreateVisitorId() {
+function getOrCreateVisitorId(uid = "") {
   const storageKey = "familyQuizVisitorId";
   const existing = localStorage.getItem(storageKey);
   if (existing) return existing;
-  const id = `visitor-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+  const id = `visitor-${uid}`;
   localStorage.setItem(storageKey, id);
   return id;
 }
@@ -838,25 +857,29 @@ async function createOrResetRoom() {
   );
 }
 
-async function clearCollection(pathSegments) {
-  const snap = await getDocs(collection(db, ...pathSegments));
-  await Promise.all(snap.docs.map((item) => deleteDoc(item.ref)));
-}
-
 async function resetPlayersAnswersMessages() {
-  await clearCollection(["rooms", ROOM_ID, "players"]);
-  await clearCollection(["rooms", ROOM_ID, "answers"]);
-  await clearCollection(["rooms", ROOM_ID, "messages"]);
+  await resetQuizDataSecurely({
+    roomId: ROOM_ID,
+    mode: "full",
+    reason: "إعادة تهيئة المسابقة من لوحة الإدارة",
+  });
 }
 
 async function clearAnswersAndMessages() {
-  await clearCollection(["rooms", ROOM_ID, "answers"]);
-  await clearCollection(["rooms", ROOM_ID, "messages"]);
+  await resetQuizDataSecurely({
+    roomId: ROOM_ID,
+    mode: "answers-messages",
+    reason: "مسح الإجابات والرسائل من لوحة الإدارة",
+  });
   await createOrResetRoom();
 }
 
 async function clearMessagesOnly() {
-  await clearCollection(["rooms", ROOM_ID, "messages"]);
+  await resetQuizDataSecurely({
+    roomId: ROOM_ID,
+    mode: "messages",
+    reason: "مسح الرسائل من لوحة الإدارة",
+  });
 }
 
 async function returnToRegistrationKeepingPlayers() {
@@ -993,89 +1016,15 @@ async function resetAndStartRegistration() {
   );
 }
 
-function buildQuestionPayload(question, questionStartedAtMs = getNow() + QUESTION_START_SYNC_BUFFER_MS) {
-  const revealDelayMs = getRevealDelayMs(question);
-  const answerRevealAtMs = isMediaQuestion(question) ? null : questionStartedAtMs + revealDelayMs;
-  const answerEndAtMs = answerRevealAtMs
-    ? answerRevealAtMs + Number(question.seconds || question.time || 20) * 1000
-    : null;
-
-  const cleanQuestion = {
-    ...question,
-    questionId: question.id,
-    questionStartedAtMs,
-    sentAtMs: questionStartedAtMs,
-    answerRevealAtMs,
-    answerStartAtMs: answerRevealAtMs,
-    answerEndAtMs,
-    fallbackSentAt: null,
-    fallbackMediaStartedAt: null,
-    fallbackMediaEndedAt: null,
-    imageUrl: question.type === "image" ? question.imageUrl || "" : "",
-    questionImageUrl: question.type === "image" ? question.questionImageUrl || question.imageUrl || "" : "",
-    optionImageUrls: question.type === "image" ? question.optionImageUrls || [] : [],
-    mediaUrl: isMediaQuestion(question) ? getQuestionMediaUrl(question) : "",
-    audioUrl: question.type === "audio" ? getQuestionMediaUrl(question) : "",
-    videoUrl: question.type === "video" ? getQuestionMediaUrl(question) : "",
-    isPractice: !!question.isPractice,
-    practiceNote: question.isPractice ? "هذا السؤال للتدريب فقط ولا يؤثر على النقاط أو الترتيب." : "",
-    resultsCalculated: false,
-    resultsCalculatedAt: null,
-  };
-
-  return {
-    cleanQuestion,
-    questionStartedAtMs,
-    answerRevealAtMs,
-    answerStartAtMs: answerRevealAtMs,
-    answerEndAtMs,
-  };
-}
-
-async function preloadQuestionForReady(question, index, readyUntilMs) {
-  const stageStartedAtMs = getNow();
-  const {
-    cleanQuestion,
-    questionStartedAtMs,
-    answerRevealAtMs,
-    answerStartAtMs,
-    answerEndAtMs,
-  } = buildQuestionPayload(question, readyUntilMs);
-
-  await updateDoc(doc(db, "rooms", ROOM_ID), {
-    stage: "ready",
-    currentQuestion: cleanQuestion,
-    currentQuestionIndex: index,
-    questionStartedAtMs,
-    answerRevealAtMs,
-    answerStartAtMs,
-    answerEndAtMs,
-    questionSentAt: null,
-    audioStartedAt: null,
-    audioEndedAt: null,
-    mediaStartedAt: null,
-    mediaEndedAt: null,
-    questionIgnored: false,
-    isPractice: !!question.isPractice,
-    processedQuestionId: null,
-    resultsCalculated: false,
-    resultsCalculatedQuestionId: null,
-    processingQuestionId: null,
-    processingStartedAtMs: null,
-    collectingBonusByPlayer: {},
-    collectingBonusJokerByPlayer: {},
-    collectingBonusPlayerId: null,
-    collectingBonusPoints: 0,
-    rankMovementByPlayer: {},
-    nextQuestionReadyUntilMs: readyUntilMs,
-    nextQuestionReadyQuestionIndex: index,
-    categoryVote: null,
-    [`usedQuestionIds.${question.id || question.questionId}`]: true,
-    stageStartedAtMs,
-    readyStartedAtMs: stageStartedAtMs,
-    revealStartedAtMs: null,
-    resultsStartedAtMs: null,
-    updatedAt: serverTimestamp(),
+async function preloadQuestionForReady(question, index, _readyUntilMs) {
+  void _readyUntilMs;
+  return prepareQuestionSecurely({
+    roomId: ROOM_ID,
+    questionId: question.id || question.questionId,
+    questionIndex: index,
+    ...(question.selectedVoteCategory
+      ? { selectedCategory: question.selectedVoteCategory }
+      : {}),
   });
 }
 
@@ -1144,7 +1093,6 @@ async function resolveCategoryVote(room, questions, { selectedCategory = null, c
 }
 
 async function activatePreloadedQuestion(expectedQuestionId = null, expectedQuestionIndex = null) {
-  const stageStartedAtMs = getNow();
   const roomRef = doc(db, "rooms", ROOM_ID);
   const roomSnap = await getDoc(roomRef);
   const latestRoom = roomSnap.exists() ? roomSnap.data() : null;
@@ -1167,47 +1115,32 @@ async function activatePreloadedQuestion(expectedQuestionId = null, expectedQues
     return false;
   }
 
-  await updateDoc(roomRef, {
-    stage: "question",
-    questionSentAt: serverTimestamp(),
-    nextQuestionReadyUntilMs: null,
-    nextQuestionReadyQuestionIndex: null,
-    stageStartedAtMs,
-    questionStageStartedAtMs: stageStartedAtMs,
-    revealStartedAtMs: null,
-    resultsStartedAtMs: null,
-    updatedAt: serverTimestamp(),
-  });
+  await startQuestionSecurely({ roomId: ROOM_ID, questionId: expectedId });
   return true;
 }
 
 async function startMediaQuestion() {
-  const fallbackMediaStartedAt = getNow();
-
-  await updateDoc(doc(db, "rooms", ROOM_ID), {
-    mediaStartedAt: serverTimestamp(),
-    audioStartedAt: serverTimestamp(),
-    "currentQuestion.fallbackMediaStartedAt": fallbackMediaStartedAt,
-    updatedAt: serverTimestamp(),
+  const roomSnapshot = await getDoc(doc(db, "rooms", ROOM_ID));
+  const questionId =
+    roomSnapshot.data()?.currentQuestion?.questionId || roomSnapshot.data()?.currentQuestion?.id;
+  await controlQuestionSecurely({
+    roomId: ROOM_ID,
+    questionId,
+    action: "media-start",
   });
 }
 
 async function finishMediaQuestion(question = null) {
-  const mediaEndedAtMs = getNow();
-  const answerRevealAtMs = mediaEndedAtMs + getRevealDelayMs(question);
-  const answerEndAtMs = answerRevealAtMs + Number(question?.seconds || question?.time || 20) * 1000;
-
-  await updateDoc(doc(db, "rooms", ROOM_ID), {
-    mediaEndedAt: serverTimestamp(),
-    audioEndedAt: serverTimestamp(),
-    answerRevealAtMs,
-    answerEndAtMs,
-    "currentQuestion.mediaEndedAtMs": mediaEndedAtMs,
-    "currentQuestion.answerRevealAtMs": answerRevealAtMs,
-    "currentQuestion.answerStartAtMs": answerRevealAtMs,
-    "currentQuestion.answerEndAtMs": answerEndAtMs,
-    "currentQuestion.fallbackMediaEndedAt": null,
-    updatedAt: serverTimestamp(),
+  let questionId = question?.questionId || question?.id;
+  if (!questionId) {
+    const roomSnapshot = await getDoc(doc(db, "rooms", ROOM_ID));
+    questionId =
+      roomSnapshot.data()?.currentQuestion?.questionId || roomSnapshot.data()?.currentQuestion?.id;
+  }
+  await controlQuestionSecurely({
+    roomId: ROOM_ID,
+    questionId,
+    action: "media-finish",
   });
 }
 
@@ -1266,7 +1199,6 @@ async function answerSystemCheck({ playerId, playerName, answerText }) {
 }
 
 async function revealCorrectAnswer({ allowUndo = false, expectedQuestionId = null } = {}) {
-  const stageStartedAtMs = getNow();
   const roomRef = doc(db, "rooms", ROOM_ID);
   const roomSnap = await getDoc(roomRef);
   const latestRoom = roomSnap.exists() ? roomSnap.data() : null;
@@ -1285,37 +1217,13 @@ async function revealCorrectAnswer({ allowUndo = false, expectedQuestionId = nul
     return false;
   }
 
-  await setDoc(
-    roomRef,
-    {
-      stage: "reveal",
-      stageStartedAtMs,
-      revealStartedAtMs: stageStartedAtMs,
-      resultsStartedAtMs: null,
-      revealUndoUntilMs: allowUndo ? getNow() + 3000 : null,
-      updatedAt: serverTimestamp(),
-    },
-    { merge: true }
-  );
+  void allowUndo;
+  await controlQuestionSecurely({
+    roomId: ROOM_ID,
+    questionId: latestQuestionId,
+    action: "reveal",
+  });
   return true;
-}
-
-async function reopenQuestion(room) {
-  if (room?.stage !== "reveal" || getQuestionTimeLeft(room?.currentQuestion, room, getNow()) <= 0) return;
-  const stageStartedAtMs = getNow();
-  await setDoc(
-    doc(db, "rooms", ROOM_ID),
-    {
-      stage: "question",
-      stageStartedAtMs,
-      questionStageStartedAtMs: stageStartedAtMs,
-      revealStartedAtMs: null,
-      resultsStartedAtMs: null,
-      revealUndoUntilMs: null,
-      updatedAt: serverTimestamp(),
-    },
-    { merge: true }
-  );
 }
 
 async function beginFinalCountdown() {
@@ -1421,189 +1329,6 @@ async function finishGame(players = [], questions = [], allAnswers = [], message
     },
     { merge: true }
   );
-}
-
-/* TestMode helpers */
-
-async function updateTestMode(updates) {
-  await setDoc(
-    doc(db, "rooms", ROOM_ID),
-    { testMode: updates, updatedAt: serverTimestamp() },
-    { merge: true }
-  );
-}
-
-async function createFakePlayers(count = 5) {
-  const batch = writeBatch(db);
-  const emojis = ["🙂", "😎", "⭐", "🎯", "⚡", "🏆", "🔥", "💡", "🎲", "🚀"];
-  for (let i = 0; i < Math.max(1, Math.min(count, 60)); i++) {
-    const fakeId = `fake_${Date.now()}_${i}`;
-    const playerRef = doc(db, "rooms", ROOM_ID, "players", fakeId);
-    const number = i + 1;
-    batch.set(playerRef, {
-      id: fakeId,
-      name: `اختبار ${number}`,
-      fullName: `متسابق وهمي ${number}`,
-      phone: `050000${String(number).padStart(4, "0")}`,
-      emoji: emojis[i % emojis.length],
-      score: 0,
-      isFake: true,
-      source: "testMode",
-      joinedAt: serverTimestamp(),
-    });
-  }
-  await batch.commit();
-}
-
-async function deleteFakeAnswersForQuestion(questionId) {
-  if (!questionId) return 0;
-  const answersSnap = await getDocs(
-    query(collection(db, "rooms", ROOM_ID, "answers"), where("questionId", "==", questionId))
-  );
-  const fakeAnswers = answersSnap.docs.filter((item) => item.data()?.isFake || item.data()?.playerIsFake);
-  if (fakeAnswers.length === 0) return 0;
-  const batch = writeBatch(db);
-  fakeAnswers.forEach((item) => batch.delete(item.ref));
-  await batch.commit();
-  return fakeAnswers.length;
-}
-
-async function deleteFakePlayers(players) {
-  const fakePlayers = players.filter((p) => p.isFake === true);
-  if (fakePlayers.length === 0) return;
-  const batch = writeBatch(db);
-  for (const p of fakePlayers) {
-    batch.delete(doc(db, "rooms", ROOM_ID, "players", p.id));
-  }
-  await batch.commit();
-}
-
-async function sendFakeAnswerForPlayer(player, room, existingAnswerIds = new Set()) {
-  const question = room?.currentQuestion;
-  const questionId = question?.questionId || question?.id;
-  if (!questionId || !player?.id) return null;
-
-  const answerId = `${questionId}_${player.id}`;
-
-  // skip if already answered
-  if (existingAnswerIds.has(answerId)) return "duplicate";
-
-  const options = question?.options || [];
-  // match the exact field the real submitAnswer uses: correctIndex
-  const correctIndex = question?.correctIndex ?? question?.correctOption ?? question?.correctOptionIndex ?? null;
-
-  if (options.length === 0 || correctIndex === null || correctIndex === undefined) {
-    return "no-options";
-  }
-
-  // 75% correct, 25% random wrong
-  const isCorrect = Math.random() < 0.75;
-  let selectedIndex = Number(correctIndex);
-  if (!isCorrect && options.length > 1) {
-    const wrongOptions = options.map((_, i) => i).filter((i) => i !== Number(correctIndex));
-    selectedIndex = wrongOptions[Math.floor(Math.random() * wrongOptions.length)];
-  }
-
-  // Spread answeredAt across the full question duration so points vary clearly
-  const answerStartAtMs = getAnswerStartMs(question);
-  const questionSeconds = Math.max(5, Number(question.seconds || 20));
-  const maxOffsetSeconds = Math.max(1, questionSeconds - 0.5);
-  const rand = Math.random();
-  let offsetSeconds;
-  if (rand < 0.25) {
-    offsetSeconds = 1 + Math.random() * 2;            // 25%: 1–3s (fast)
-  } else if (rand < 0.60) {
-    offsetSeconds = 4 + Math.random() * 4;            // 35%: 4–8s (normal)
-  } else if (rand < 0.85) {
-    offsetSeconds = 9 + Math.random() * 6;            // 25%: 9–15s (slow)
-  } else {
-    offsetSeconds = maxOffsetSeconds * 0.78 + Math.random() * (maxOffsetSeconds * 0.20); // 15%: near end
-  }
-  offsetSeconds = Math.min(Math.max(1, offsetSeconds), maxOffsetSeconds);
-
-  const answeredAt = answerStartAtMs
-    ? Math.round(answerStartAtMs + offsetSeconds * 1000)
-    : getNow();
-  const answerTimeSeconds = answerStartAtMs
-    ? Math.max(0, (answeredAt - answerStartAtMs) / 1000)
-    : null;
-
-  const basePoints = calculateBasePoints({ question, room, answeredAt });
-  const points = calculateFinalPoints({ isCorrect, basePoints, jokerApplied: false });
-
-  await setDoc(
-    doc(db, "rooms", ROOM_ID, "answers", answerId),
-    {
-      playerId: player.id,
-      playerName: player.name || "",
-      fullName: player.fullName || "",
-      phone: player.phone || "",
-      questionId,
-      selectedIndex,
-      isCorrect,
-      basePoints,
-      jokerApplied: false,
-      jokerMultiplier: null,
-      jokerTiming: null,
-      isPractice: !!question.isPractice,
-      points,
-      answeredAt,
-      answerStartAtMs,
-      answerTimeSeconds,
-      createdAt: serverTimestamp(),
-      isFake: true,
-      source: "testMode",
-      playerIsFake: true,
-    }
-  );
-
-  return "written";
-}
-
-async function sendFakeAnswersForQuestion(players, room) {
-  const question = room?.currentQuestion;
-  const questionId = question?.questionId || question?.id;
-  const fakePlayers = players.filter((p) => p.isFake === true);
-
-  console.log("[TestMode] sendFakeAnswersForQuestion", {
-    fakePlayers: fakePlayers.length,
-    questionId,
-    options: question?.options?.length,
-    correctIndex: question?.correctIndex,
-  });
-
-  if (fakePlayers.length === 0) {
-    console.warn("[TestMode] لا يوجد لاعبون وهميون");
-    return { written: 0, duplicates: 0, failed: 0, error: "no-fake-players" };
-  }
-  if (!questionId) {
-    console.warn("[TestMode] لا يوجد سؤال حالي");
-    return { written: 0, duplicates: 0, failed: 0, error: "no-question" };
-  }
-
-  // pre-fetch existing answer ids for this question to avoid overwriting
-  let existingAnswerIds = new Set();
-  try {
-    const existingSnap = await getDocs(
-      query(collection(db, "rooms", ROOM_ID, "answers"), where("questionId", "==", questionId))
-    );
-    existingSnap.docs.forEach((d) => existingAnswerIds.add(d.id));
-  } catch (e) {
-    console.error("[TestMode] Failed to fetch existing answers", e);
-  }
-
-  const results = await Promise.all(
-    fakePlayers.map((p) => sendFakeAnswerForPlayer(p, room, existingAnswerIds))
-  );
-
-  const written = results.filter((r) => r === "written").length;
-  const duplicates = results.filter((r) => r === "duplicate").length;
-  const noOptions = results.filter((r) => r === "no-options").length;
-  const failed = results.filter((r) => r === null).length;
-
-  console.log("[TestMode] نتيجة إرسال الإجابات الوهمية", { written, duplicates, noOptions, failed });
-
-  return { written, duplicates, noOptions, failed };
 }
 
 /* Automation */
@@ -1738,70 +1463,6 @@ function AutoActivateReadyQuestion({ room }) {
   return null;
 }
 
-function AutoLockJokers({ room, players }) {
-  const [lockedQuestionId, setLockedQuestionId] = useState(null);
-
-  useEffect(() => {
-    async function lockJokers() {
-      const questionId = room?.currentQuestion?.questionId;
-      const questionNumber = (room?.currentQuestionIndex ?? -1) + 1;
-
-      if (!room || !["ready", "question"].includes(room.stage) || !questionId) return;
-      if (lockedQuestionId === questionId) return;
-
-      setLockedQuestionId(questionId);
-
-      const playersToLock = players.filter(
-        (player) =>
-          player.pendingJoker &&
-          !player.jokerUsed &&
-          player.jokerQuestionId !== questionId
-      );
-      const practicePlayersToLock = players.filter(
-        (player) =>
-          room.currentQuestion?.isPractice &&
-          player.practicePendingJoker &&
-          player.practiceJokerQuestionId !== questionId
-      );
-
-      await Promise.all(
-        [
-          ...playersToLock.map((player) =>
-            updateDoc(doc(db, "rooms", ROOM_ID, "players", player.id), {
-              pendingJoker: false,
-              jokerUsed: true,
-              jokerQuestionId: questionId,
-              jokerQuestionNumber: questionNumber,
-              jokerTiming: "before",
-              jokerMultiplier: 3,
-              jokerLockedAt: serverTimestamp(),
-            })
-          ),
-          ...practicePlayersToLock.map((player) =>
-            updateDoc(doc(db, "rooms", ROOM_ID, "players", player.id), {
-              practicePendingJoker: false,
-              practiceJokerQuestionId: questionId,
-              practiceJokerTiming: "before",
-              practiceJokerMultiplier: 3,
-              practiceJokerLockedAt: serverTimestamp(),
-            })
-          ),
-        ]
-      );
-    }
-
-    lockJokers();
-  }, [room, players, lockedQuestionId]);
-
-  useEffect(() => {
-    if (room?.stage !== "question") {
-      setLockedQuestionId(null);
-    }
-  }, [room?.stage]);
-
-  return null;
-}
-
 function AutoFinalizeQuestion({ room, finalization }) {
   useEffect(() => {
     const questionId = room?.currentQuestion?.questionId || room?.currentQuestion?.id;
@@ -1862,87 +1523,6 @@ function AutoFinishFinalCountdown({ room, players = [], questions = [], allAnswe
 
   return null;
 }
-function AutoFakeAnswers({ room, players = [] }) {
-  const timerIdsRef = useRef([]);
-  const scheduledQIdRef = useRef(null);
-
-  const autoEnabled = room?.testMode?.autoAnswerEnabled === true;
-  const stage = room?.stage;
-  const question = room?.currentQuestion;
-  const questionId = question?.questionId || question?.id || null;
-  // Use count as dep — avoids object identity re-renders on every Firestore update
-  const fakeCount = players.filter((p) => p.isFake).length;
-
-  useEffect(() => {
-    // Guard: nothing to do
-    if (
-      !autoEnabled ||
-      !questionId ||
-      stage !== "question" ||
-      question?.answersLocked ||
-      question?.resultsCalculated ||
-      fakeCount === 0 ||
-      scheduledQIdRef.current === questionId // already scheduled for this question
-    ) {
-      return;
-    }
-
-    // Capture stable snapshot at schedule time
-    const capturedQId = questionId;
-    const capturedRoom = room;
-    const capturedFakePlayers = players.filter((p) => p.isFake === true);
-
-    scheduledQIdRef.current = capturedQId;
-
-    const answerStartAtMs = getAnswerStartMs(question);
-    const now = getNow();
-    const questionSeconds = Math.max(5, Number(question.seconds || 20));
-
-    console.log(`[AutoFakeAnswers] Scheduling ${capturedFakePlayers.length} answers for Q:${capturedQId}`);
-
-    const newTimerIds = capturedFakePlayers.map((player) => {
-      const rand = Math.random();
-      let offsetSec;
-      if (rand < 0.25) offsetSec = 1 + Math.random() * 2;
-      else if (rand < 0.60) offsetSec = 4 + Math.random() * 4;
-      else if (rand < 0.85) offsetSec = 9 + Math.random() * 6;
-      else offsetSec = Math.max(1, questionSeconds * 0.78 + Math.random() * (questionSeconds * 0.20));
-      offsetSec = Math.min(Math.max(1, offsetSec), questionSeconds - 0.5);
-
-      const targetMs = answerStartAtMs
-        ? answerStartAtMs + offsetSec * 1000
-        : now + offsetSec * 1000;
-      const delayMs = Math.max(300, targetMs - now);
-
-      return setTimeout(async () => {
-        // Abort if question changed since scheduling
-        if (scheduledQIdRef.current !== capturedQId) {
-          console.log(`[AutoFakeAnswers] Stale timer, skipping ${player.name}`);
-          return;
-        }
-        try {
-          const result = await sendFakeAnswerForPlayer(player, capturedRoom, new Set());
-          console.log(`[AutoFakeAnswers] ${result === "written" ? "✓" : result} ${player.name} (Q:${capturedQId})`);
-        } catch (e) {
-          console.error(`[AutoFakeAnswers] ✗ ${player.name}:`, e);
-        }
-      }, delayMs);
-    });
-
-    timerIdsRef.current = newTimerIds;
-
-    return () => {
-      console.log(`[AutoFakeAnswers] Cancelling ${newTimerIds.length} timers for Q:${capturedQId}`);
-      newTimerIds.forEach(clearTimeout);
-      timerIdsRef.current = [];
-      scheduledQIdRef.current = null;
-    };
-  // Specific deps only — NOT room/players object to avoid cancellation on every Firestore update
-  }, [autoEnabled, questionId, stage, fakeCount]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  return null;
-}
-
 /* Shared UI */
 
 function Leaderboard({
@@ -3334,107 +2914,16 @@ function JokerControl({ player, stage, room = null, compact = false, locked = fa
 
   async function activateJoker() {
     if (!player?.id || jokerAlreadyUsed) return;
-
-    if (isBeforeCurrentQuestion) {
-      if (isPracticeJoker) {
-        await updateDoc(doc(db, "rooms", ROOM_ID, "players", player.id), {
-          practicePendingJoker: false,
-          practiceJokerQuestionId: activeQuestionId,
-          practiceJokerTiming: "before",
-          practiceJokerMultiplier: 3,
-          practiceJokerLockedAt: serverTimestamp(),
-        });
-      } else {
-        await updateDoc(doc(db, "rooms", ROOM_ID, "players", player.id), {
-          pendingJoker: false,
-          jokerUsed: true,
-          jokerQuestionId: activeQuestionId,
-          jokerQuestionNumber: (room?.currentQuestionIndex ?? -1) + 1,
-          jokerTiming: "before",
-          jokerMultiplier: 3,
-          jokerLockedAt: serverTimestamp(),
-        });
-      }
-      return;
-    }
-
-    if (isDuringQuestion) {
-      if (isPracticeJoker) {
-        await updateDoc(doc(db, "rooms", ROOM_ID, "players", player.id), {
-          practicePendingJoker: false,
-          practiceJokerQuestionId: activeQuestionId,
-          practiceJokerTiming: "during",
-          practiceJokerMultiplier: 2,
-          practiceJokerLockedAt: serverTimestamp(),
-        });
-      } else {
-        await updateDoc(doc(db, "rooms", ROOM_ID, "players", player.id), {
-          pendingJoker: false,
-          jokerUsed: true,
-          jokerQuestionId: activeQuestionId,
-          jokerQuestionNumber: (room?.currentQuestionIndex ?? -1) + 1,
-          jokerTiming: "during",
-          jokerMultiplier: 2,
-          jokerLockedAt: serverTimestamp(),
-        });
-      }
-      return;
-    }
-
-    if (isPracticeJoker) {
-      await updateDoc(doc(db, "rooms", ROOM_ID, "players", player.id), {
-        practicePendingJoker: true,
-        practiceJokerTiming: "before",
-        practiceJokerMultiplier: 3,
-      });
-    } else {
-      await updateDoc(doc(db, "rooms", ROOM_ID, "players", player.id), {
-        pendingJoker: true,
-        jokerTiming: "before",
-        jokerMultiplier: 3,
-      });
-    }
+    await activateJokerSecurely({
+      roomId: ROOM_ID,
+      playerId: player.id,
+      questionId: isDuringQuestion || isBeforeCurrentQuestion ? activeQuestionId : "next",
+    });
   }
 
   async function cancelJoker() {
     if (!player?.id) return;
-
-    if (isPracticeJoker && practiceJokerUsedForQuestion && isDuringQuestion) {
-      await updateDoc(doc(db, "rooms", ROOM_ID, "players", player.id), {
-        practiceJokerQuestionId: null,
-        practiceJokerTiming: null,
-        practiceJokerMultiplier: null,
-      });
-      return;
-    }
-
-    if (!isPracticeJoker && player.jokerUsed && isDuringQuestion && player.jokerQuestionId === activeQuestionId) {
-      await updateDoc(doc(db, "rooms", ROOM_ID, "players", player.id), {
-        jokerUsed: false,
-        jokerQuestionId: null,
-        jokerQuestionNumber: null,
-        jokerTiming: null,
-        jokerMultiplier: null,
-      });
-      return;
-    }
-
-    if (isPracticeJoker) {
-      await updateDoc(doc(db, "rooms", ROOM_ID, "players", player.id), {
-        practicePendingJoker: false,
-        practiceJokerTiming: null,
-        practiceJokerMultiplier: null,
-      });
-      return;
-    }
-
-    if (player.jokerUsed) return;
-
-    await updateDoc(doc(db, "rooms", ROOM_ID, "players", player.id), {
-      pendingJoker: false,
-      jokerTiming: null,
-      jokerMultiplier: null,
-    });
+    await cancelJokerSecurely({ roomId: ROOM_ID, playerId: player.id });
   }
 
   const availableCount = jokerAlreadyUsed ? 0 : 1;
@@ -4477,13 +3966,11 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
   const [editingPlayer, setEditingPlayer] = useState(null);
   const [editPlayerName, setEditPlayerName] = useState("");
   const [editPlayerScore, setEditPlayerScore] = useState(0);
-  const [editPlayerJokers, setEditPlayerJokers] = useState(1);
+  const [editScoreReason, setEditScoreReason] = useState("");
   const [activeAdminSection, setActiveAdminSection] = useState("live");
   const [previousAdminSection, setPreviousAdminSection] = useState(null);
   const [adminAdvancing, setAdminAdvancing] = useState(false);
   const adminAdvancingRef = useRef(false);
-  const [testModeWorking, setTestModeWorking] = useState(false);
-  const [testModeMsg, setTestModeMsg] = useState(null);
   const [quickControlsOpen, setQuickControlsOpen] = useState(false);
   const [selectedPrizeWinnerByPrize, setSelectedPrizeWinnerByPrize] = useState({});
   const [excludePrizeWinners, setExcludePrizeWinners] = useState(true);
@@ -4761,32 +4248,10 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
   }
 
   async function finishPracticeAndReturnToStart() {
-    const playersSnap = await getDocs(collection(db, "rooms", ROOM_ID, "players"));
-    await Promise.all(playersSnap.docs.map((playerDoc) =>
-      updateDoc(playerDoc.ref, {
-        score: 0,
-        answeredCount: 0,
-        lastQuestionPoints: 0,
-        lastQuestionId: null,
-        manualScoreDelta: 0,
-        manualScoreBaseline: 0,
-        practicePendingJoker: false,
-        practiceJokerQuestionId: null,
-        practiceJokerTiming: null,
-        practiceJokerMultiplier: null,
-        practiceJokerLockedAt: null,
-      })
-    ));
-    await setDoc(doc(db, "rooms", ROOM_ID), {
-      stage: "practiceComplete",
-      practiceMode: false,
-      practiceFinished: true,
-      currentQuestion: null,
-      currentQuestionIndex: -1,
-      processedQuestionId: null,
-      registrationOverrideOpen: false,
-      updatedAt: serverTimestamp(),
-    }, { merge: true });
+    await resetPracticeScoresSecurely({
+      roomId: ROOM_ID,
+      reason: "إنهاء الجولة التدريبية من لوحة الإدارة",
+    });
   }
 
   async function startRealCompetition() {
@@ -4795,22 +4260,6 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
       alert("لا توجد أسئلة فعلية. أضف سؤالًا غير تجريبي أولًا.");
       return;
     }
-    const playersSnap = await getDocs(collection(db, "rooms", ROOM_ID, "players"));
-    await Promise.all(playersSnap.docs.map((playerDoc) =>
-      updateDoc(playerDoc.ref, {
-        score: 0,
-        answeredCount: 0,
-        lastQuestionPoints: 0,
-        lastQuestionId: null,
-        manualScoreDelta: 0,
-        manualScoreBaseline: 0,
-        practicePendingJoker: false,
-        practiceJokerQuestionId: null,
-        practiceJokerTiming: null,
-        practiceJokerMultiplier: null,
-        practiceJokerLockedAt: null,
-      })
-    ));
     await setDoc(doc(db, "rooms", ROOM_ID), { practiceMode: false, practiceFinished: true, registrationOverrideOpen: false, currentQuestionIndex: -1, usedQuestionIds: {}, updatedAt: serverTimestamp() }, { merge: true });
     if (isVotingQuestion(firstQuestion)) {
       await startCategoryVote(firstQuestion, room, 0);
@@ -4856,16 +4305,16 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
     setEditingPlayer(player);
     setEditPlayerName(player.name || "");
     setEditPlayerScore(Number(player.score || 0));
-    setEditPlayerJokers(player.jokerUsed ? 0 : 1);
+    setEditScoreReason("");
   }
 
   async function restoreEditedPlayerOriginalScore() {
     if (!editingPlayer || !editingPlayerHasManualDelta) return;
-    await updateDoc(doc(db, "rooms", ROOM_ID, "players", editingPlayer.id), {
-      score: editingPlayerBaseline,
-      manualScoreBaseline: editingPlayerBaseline,
-      manualScoreDelta: 0,
-      manualScoreAdjustedAt: null,
+    await adjustPlayerScoreSecurely({
+      roomId: ROOM_ID,
+      playerId: editingPlayer.id,
+      delta: editingPlayerBaseline - Number(editingPlayer.score || 0),
+      reason: "استعادة النقاط الأصلية من لوحة الإدارة",
     });
     setEditPlayerScore(editingPlayerBaseline);
     setEditingPlayer((player) => player ? {
@@ -4881,9 +4330,8 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
     if (!editingPlayer) return;
     const cleanName = editPlayerName.trim();
     const score = Number(editPlayerScore);
-    const jokerAvailable = editPlayerJokers === 1;
     if (!cleanName || !Number.isFinite(score)) {
-      alert("تحقق من الاسم والنقاط وعدد الجواكر.");
+      alert("تحقق من الاسم والنقاط.");
       return;
     }
     const duplicate = players.some((player) => player.id !== editingPlayer.id && String(player.name || "").trim().toLowerCase() === cleanName.toLowerCase());
@@ -4891,20 +4339,24 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
       alert("الاسم المستعار مستخدم بالفعل.");
       return;
     }
-    const baseline = editingPlayerBaseline;
-    const manualDelta = score - baseline;
-
-    await updateDoc(doc(db, "rooms", ROOM_ID, "players", editingPlayer.id), {
-      name: cleanName,
-      score,
-      manualScoreBaseline: baseline,
-      manualScoreDelta: manualDelta || 0,
-      manualScoreAdjustedAt: manualDelta ? serverTimestamp() : null,
-      jokerUsed: !jokerAvailable,
-      pendingJoker: false,
-      jokerQuestionId: jokerAvailable ? null : editingPlayer.jokerQuestionId || null,
-      jokerQuestionNumber: jokerAvailable ? null : editingPlayer.jokerQuestionNumber || null,
-    });
+    const scoreDelta = score - Number(editingPlayer.score || 0);
+    if (scoreDelta && editScoreReason.trim().length < 3) {
+      alert("اكتب سبب تعديل النقاط (3 أحرف على الأقل).");
+      return;
+    }
+    if (cleanName !== String(editingPlayer.name || "")) {
+      await updateDoc(doc(db, "rooms", ROOM_ID, "players", editingPlayer.id), {
+        name: cleanName,
+      });
+    }
+    if (scoreDelta) {
+      await adjustPlayerScoreSecurely({
+        roomId: ROOM_ID,
+        playerId: editingPlayer.id,
+        delta: scoreDelta,
+        reason: editScoreReason.trim(),
+      });
+    }
     setEditingPlayer(null);
   }
 
@@ -4950,7 +4402,6 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
           </div>
           <div className="dashboard-nav-group muted">
             <span>تجربة</span>
-            <button type="button" className={activeAdminSection === "testMode" ? "active" : ""} onClick={() => openAdminSection("testMode")}>وضع الاختبار</button>
           </div>
         </nav>
         <a className="dashboard-display-button" href="/?view=display" target="_blank" rel="noreferrer">فتح صفحة العرض ↗</a>
@@ -4996,7 +4447,6 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
                       ))}
                     </>
                   )}
-                  {stage === "reveal" && Number(room?.revealUndoUntilMs || 0) > adminNow && getQuestionTimeLeft(room?.currentQuestion, room, adminNow) > 0 && <button className="warning-action" onClick={() => reopenQuestion(room)}>تراجع</button>}
                   {stage === "reveal" && (!room?.practiceMode && adminCurrentIsLastQuestion ? <button onClick={() => handleFinalizeQuestion({ announceWinners: true })} disabled={finalization.isBusy}>{finalization.isBusy ? "جاري اعتماد النتائج..." : "إعلان الفائزين"}</button> : <button onClick={() => handleFinalizeQuestion()} disabled={finalization.isBusy}>{finalization.isBusy ? "جاري اعتماد النتائج..." : "إظهار النتائج"}</button>)}
                   {stage === "results" && room?.practiceMode && <button className="secondary-action" onClick={launchInstructionsClarityPoll}>تصويت</button>}
                   {stage === "results" && room?.practiceMode && <button className="warning-action" onClick={finishPracticeAndReturnToStart}>إنهاء التجربة</button>}
@@ -5058,7 +4508,6 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
             {stage === "question" && <button className="secondary-action" onClick={() => extendQuestionTime(room, 10)}>+10 ثوانٍ</button>}
             {stage === "question" && isMediaQuestion(room?.currentQuestion) && !hasMediaEnded(room, room.currentQuestion) && <button className="secondary-action" onClick={() => finishMediaQuestion(room.currentQuestion)}>تجاوز المقطع</button>}
             {stage === "reveal" && (!room?.practiceMode && adminCurrentIsLastQuestion ? <button onClick={() => handleFinalizeQuestion({ announceWinners: true })} disabled={finalization.isBusy}>{finalization.isBusy ? "جاري اعتماد النتائج..." : "إعلان الفائزين"}</button> : <button onClick={() => handleFinalizeQuestion()} disabled={finalization.isBusy}>{finalization.isBusy ? "جاري اعتماد النتائج..." : "إظهار النتائج"}</button>)}
-            {stage === "reveal" && Number(room?.revealUndoUntilMs || 0) > adminNow && getQuestionTimeLeft(room?.currentQuestion, room, adminNow) > 0 && <button className="secondary-action" onClick={() => reopenQuestion(room)}>تراجع عن الكشف</button>}
             {stage === "results" && (room?.practiceMode ? practiceQuestions[currentQuestionIndex + 1] : competitionQuestions[currentQuestionIndex + 1]) && <button onClick={advanceFromDashboard} disabled={adminAdvancing || !adminCurrentProcessed}>{!adminCurrentProcessed ? "جاري احتساب النتائج..." : nextAdminQuestionNeedsVote ? "بدء تصويت الجولة التالية" : adminNextQuestionIsLast ? "عرض السؤال الأخير" : "عرض السؤال التالي"}</button>}
             {stage === "results" && room?.practiceMode && <button className="secondary-action" onClick={finishPracticeAndReturnToStart}>إنهاء التجربة</button>}
             {stage === "finished" && <span className="broadcast-finished-label">انتهت المسابقة — راجع النتائج من قسم التقارير.</span>}
@@ -5637,155 +5086,6 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
       </div>
       )}
 
-      {activeAdminSection === "testMode" && (
-      <div className="tm-panel">
-        <div className="tm-panel-header">
-          <div className="tm-title-block">
-            <span className="tm-panel-title">وضع الاختبار</span>
-            <span className="tm-panel-desc muted">أدوات تجربة قبل البث. كل بطاقة توضّح ماذا يفعل زرها.</span>
-          </div>
-          <span className="tm-count-badge">{players.filter((p) => p.isFake).length} وهمي</span>
-          <span className={`tm-status-badge ${room?.testMode?.autoAnswerEnabled ? "tm-status-on" : "tm-status-off"}`}>
-            {room?.testMode?.autoAnswerEnabled ? "تلقائي ✓" : "تلقائي ✗"}
-          </span>
-          <span className={`tm-status-badge ${room?.testMode?.slowResultsEnabled ? "tm-status-warn" : "tm-status-off"}`}>
-            {room?.testMode?.slowResultsEnabled ? `تأخير ${Math.round((room?.testMode?.slowResultsDelayMs || 15000) / 1000)}ث` : "بلا تأخير"}
-          </span>
-        </div>
-
-        <div className="tm-scenarios">
-          <div className="tm-scenario tm-scenario-primary">
-            <div>
-              <span className="tm-scenario-kicker">ابدأ من هنا</span>
-              <h3>تجربة سريعة</h3>
-              <p>يضيف 5 متسابقين وهميين ويشغّل الإجابات التلقائية بدون تأخير. مناسب للتأكد أن السؤال والنتائج واللوحة تعمل.</p>
-            </div>
-            <button type="button" className="tm-btn tm-btn-primary" disabled={testModeWorking}
-              onClick={async () => { setTestModeWorking(true); try { await createFakePlayers(5); await updateTestMode({ autoAnswerEnabled: true, slowResultsEnabled: false, slowResultsDelayMs: 15000 }); } catch (e) { console.error(e); } finally { setTestModeWorking(false); } }}>
-              {testModeWorking ? "جاري..." : "تجهيز سريع"}
-            </button>
-          </div>
-
-          <div className="tm-scenario">
-            <div>
-              <span className="tm-scenario-kicker">اختبار شكل البث</span>
-              <h3>محاكاة 30 متسابق</h3>
-              <p>يضيف عددًا كبيرًا من الوهميين ويشغّل إجابات تلقائية، حتى ترى شكل لوحة المتصدرين والجداول عند الزحمة.</p>
-            </div>
-            <button type="button" className="tm-btn" disabled={testModeWorking}
-              onClick={async () => { setTestModeWorking(true); try { await createFakePlayers(30); await updateTestMode({ autoAnswerEnabled: true, slowResultsEnabled: false, slowResultsDelayMs: 15000 }); } catch (e) { console.error(e); } finally { setTestModeWorking(false); } }}>
-              محاكاة 30
-            </button>
-          </div>
-
-          <div className="tm-scenario">
-            <div>
-              <span className="tm-scenario-kicker">أثناء السؤال</span>
-              <h3>إجابات السؤال الحالي</h3>
-              <p>يرسل إجابات للوهميين على السؤال المعروض فقط. استخدمه إذا أردت اختبار احتساب النتائج بدون انتظار.</p>
-            </div>
-            <div className="tm-scenario-actions">
-              <button type="button" className="tm-btn" disabled={testModeWorking}
-                onClick={async () => {
-                  setTestModeWorking(true); setTestModeMsg(null);
-                  try {
-                    const result = await sendFakeAnswersForQuestion(players, room);
-                    if (result.error === "no-fake-players") setTestModeMsg({ type: "error", text: "لا يوجد لاعبون وهميون." });
-                    else if (result.error === "no-question") setTestModeMsg({ type: "error", text: "لا يوجد سؤال حالي." });
-                    else if (result.noOptions > 0 && result.written === 0) setTestModeMsg({ type: "error", text: "تعذر تحديد خيارات السؤال." });
-                    else setTestModeMsg({ type: "success", text: `كُتبت ${result.written} إجابة${result.duplicates > 0 ? ` (${result.duplicates} مكررة)` : ""}` });
-                  } catch (e) { setTestModeMsg({ type: "error", text: `خطأ: ${e.message}` }); } finally { setTestModeWorking(false); }
-                }}>
-                {testModeWorking ? "جاري..." : "إرسال إجابات"}
-              </button>
-              <button type="button" className="tm-btn tm-btn-soft-danger" disabled={testModeWorking || !adminCurrentQuestionId}
-                onClick={async () => {
-                  if (!window.confirm("حذف إجابات الوهميين للسؤال الحالي فقط؟")) return;
-                  setTestModeWorking(true); setTestModeMsg(null);
-                  try {
-                    const deleted = await deleteFakeAnswersForQuestion(adminCurrentQuestionId);
-                    setTestModeMsg({ type: "success", text: `حُذفت ${deleted} إجابة وهمية.` });
-                  } catch (e) {
-                    setTestModeMsg({ type: "error", text: `خطأ: ${e.message}` });
-                  } finally {
-                    setTestModeWorking(false);
-                  }
-                }}>
-                حذف إجابات السؤال
-              </button>
-            </div>
-            {testModeMsg && (
-              <p className={testModeMsg.type === "error" ? "tm-warning" : "tm-success-msg"}>{testModeMsg.text}</p>
-            )}
-          </div>
-
-          <div className="tm-scenario">
-            <div>
-              <span className="tm-scenario-kicker">تشغيل تلقائي</span>
-              <h3>إجابة تلقائية مستمرة</h3>
-              <p>عند تشغيله، الوهميون يجاوبون تلقائيًا في كل سؤال جديد. أوقفه قبل التجربة اليدوية.</p>
-            </div>
-            {!room?.testMode?.autoAnswerEnabled ? (
-              <button type="button" className="tm-btn tm-btn-activate"
-                onClick={async () => { await updateTestMode({ autoAnswerEnabled: true }); }}>
-                تشغيل التلقائي
-              </button>
-            ) : (
-              <button type="button" className="tm-btn tm-btn-danger"
-                onClick={async () => { await updateTestMode({ autoAnswerEnabled: false }); }}>
-                إيقاف التلقائي
-              </button>
-            )}
-          </div>
-
-          <div className="tm-scenario tm-scenario-warning">
-            <div>
-              <span className="tm-scenario-kicker">اختبار طارئ فقط</span>
-              <h3>محاكاة بطء النتائج</h3>
-              <p>يجعل شاشة “جاري احتساب النتائج” تتأخر عمدًا. اتركه مطفأ أثناء البث الحقيقي.</p>
-            </div>
-            <div className="tm-scenario-actions">
-              <label className="tm-inline-label">
-                <span>ثوانٍ</span>
-                <input type="number" className="tm-number-input" min="5" max="60"
-                  defaultValue={Math.round((room?.testMode?.slowResultsDelayMs || 15000) / 1000)}
-                  onBlur={async (e) => { const ms = Math.max(5000, Math.min(60000, Number(e.target.value) * 1000)); await updateTestMode({ slowResultsDelayMs: ms }); }} />
-              </label>
-              {!room?.testMode?.slowResultsEnabled ? (
-                <button type="button" className="tm-btn tm-btn-activate"
-                  onClick={async () => { await updateTestMode({ slowResultsEnabled: true }); }}>
-                  تفعيل التأخير
-                </button>
-              ) : (
-                <button type="button" className="tm-btn tm-btn-danger"
-                  onClick={async () => { await updateTestMode({ slowResultsEnabled: false }); }}>
-                  إيقاف التأخير
-                </button>
-              )}
-            </div>
-          </div>
-
-          <div className="tm-scenario tm-scenario-cleanup">
-            <div>
-              <span className="tm-scenario-kicker">تنظيف</span>
-              <h3>إنهاء الاختبار</h3>
-              <p>إيقاف الاختبار فقط يحافظ على الوهميين. إيقاف وتنظيف يحذفهم ويطفئ كل وضع الاختبار.</p>
-            </div>
-            <div className="tm-scenario-actions">
-              <button type="button" className="tm-btn" disabled={testModeWorking}
-                onClick={async () => { await updateTestMode({ autoAnswerEnabled: false, slowResultsEnabled: false, slowResultsDelayMs: 15000 }); }}>
-                إيقاف الاختبار فقط
-              </button>
-              <button type="button" className="tm-btn tm-btn-danger" disabled={testModeWorking}
-                onClick={async () => { if (!window.confirm("إيقاف وضع الاختبار وحذف الوهميين؟")) return; setTestModeWorking(true); try { await deleteFakePlayers(players); await updateTestMode({ autoAnswerEnabled: false, slowResultsEnabled: false }); } catch (e) { console.error(e); } finally { setTestModeWorking(false); } }}>
-                إيقاف وتنظيف
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-      )}
-
       {activeAdminSection === "analytics" && (
       <div className="dashboard-analytics-hub">
         <section className="analytics-hero-card">
@@ -5890,11 +5190,8 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
             <button type="button" className="secondary-action restore-score-button" onClick={restoreEditedPlayerOriginalScore} disabled={!editingPlayerHasManualDelta}>
               إرجاع النقاط الأصلية
             </button>
-            <label>حالة الجوكر</label>
-            <div className="joker-availability-toggle">
-              <button type="button" className={editPlayerJokers === 1 ? "active" : ""} onClick={() => setEditPlayerJokers(1)}>متوفر</button>
-              <button type="button" className={editPlayerJokers === 0 ? "active" : ""} onClick={() => setEditPlayerJokers(0)}>غير متوفر</button>
-            </div>
+            <label>سبب تعديل النقاط</label>
+            <input value={editScoreReason} onChange={(e) => setEditScoreReason(e.target.value)} placeholder="سبب واضح يظهر في سجل التدقيق" />
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
               <button onClick={saveEditedPlayer}>حفظ</button>
               <button className="danger" onClick={() => setEditingPlayer(null)}>إلغاء</button>
@@ -6479,8 +5776,15 @@ function LastGamePanel({ room, gameHistory = [], embedded = false }) {
 function AdminPanel({ initialView = "control", adminSession }) {
   const room = useRoom();
   const players = usePlayers();
-  const questions = useQuestions(room?.activePackageId || DEFAULT_PACKAGE_ID);
-  const allQuestions = useAllQuestions();
+  const canReadQuestionBank = initialView !== "display";
+  const storedQuestions = useQuestions(
+    room?.activePackageId || DEFAULT_PACKAGE_ID,
+    canReadQuestionBank,
+  );
+  const storedAllQuestions = useAllQuestions(canReadQuestionBank);
+  const questions =
+    canReadQuestionBank || !room?.currentQuestion ? storedQuestions : [room.currentQuestion];
+  const allQuestions = canReadQuestionBank ? storedAllQuestions : questions;
   const questionPackages = useQuestionPackages();
   const messages = useMessages();
   const answers = useAnswers(room?.currentQuestion?.questionId);
@@ -6500,10 +5804,8 @@ function AdminPanel({ initialView = "control", adminSession }) {
       <AutoRevealCorrectAnswer room={room} />
       <AutoEndQuestionOnTimer room={room} />
       <AutoActivateReadyQuestion room={room} />
-      <AutoLockJokers room={room} players={players} />
       <AutoFinalizeQuestion room={room} finalization={finalization} />
       <AutoFinishFinalCountdown room={room} players={players} questions={questions} allAnswers={allAnswers} messages={messages} />
-      <AutoFakeAnswers room={room} players={players} />
     </>
   );
 
@@ -6769,58 +6071,28 @@ function JoinForm({ onJoined, room }) {
     setError("");
 
     try {
-      const duplicateQuery = query(
-        collection(db, "rooms", ROOM_ID, "players"),
-        where("name", "==", cleanNickname)
-      );
-      const duplicateSnap = await getDocs(duplicateQuery);
-
-      if (!duplicateSnap.empty) {
-        setError("الاسم المستعار مستخدم بالفعل. اختر اسمًا آخر.");
-        setLoading(false);
-        return;
-      }
-
-      const duplicatePhoneQuery = query(
-        collection(db, "rooms", ROOM_ID, "players"),
-        where("phone", "==", cleanPhone)
-      );
-      const duplicatePhoneSnap = await getDocs(duplicatePhoneQuery);
-
-      if (!duplicatePhoneSnap.empty) {
-        setError("رقم الجوال مسجل بالفعل. استخدم رقمًا آخر أو تواصل مع المقدم.");
-        setLoading(false);
-        return;
-      }
-
-      const playerRef = await addDoc(collection(db, "rooms", ROOM_ID, "players"), {
+      const result = await registerPlayerSecurely({
+        roomId: ROOM_ID,
         name: cleanNickname,
         emoji: emoji.trim(),
         fullName: cleanFullName,
         phone: cleanPhone,
-        score: 0,
-        answeredCount: 0,
-      pendingJoker: false,
-      jokerUsed: false,
-      jokerQuestionId: null,
-      jokerQuestionNumber: null,
-      practicePendingJoker: false,
-      practiceJokerQuestionId: null,
-      practiceJokerTiming: null,
-      practiceJokerMultiplier: null,
-      joinedAt: serverTimestamp(),
       });
 
-      localStorage.setItem("familyQuizPlayerId", playerRef.id);
+      localStorage.setItem("familyQuizPlayerId", result.playerId);
       localStorage.setItem("familyQuizPlayerName", cleanNickname);
       localStorage.setItem("familyQuizPlayerEmoji", emoji.trim());
       localStorage.setItem("familyQuizPlayerFullName", cleanFullName);
       localStorage.setItem("familyQuizPlayerPhone", cleanPhone);
 
-      onJoined(playerRef.id, cleanNickname);
+      onJoined(result.playerId, cleanNickname);
     } catch (err) {
       console.error(err);
-      setError("تعذر الانضمام. تأكد من إعداد Firebase وقواعد Firestore.");
+      setError(
+        err?.code === "already-exists"
+          ? "الاسم المستعار أو رقم الجوال مستخدم بالفعل."
+          : err?.message || "تعذر الانضمام.",
+      );
     } finally {
       setLoading(false);
     }
@@ -7380,7 +6652,6 @@ function writeLocalAnswerLock(playerId, questionId, selectedIndex, answeredAt) {
 function PlayerPanel() {
   const room = useRoom();
   const players = usePlayers();
-  const questions = useQuestions(room?.activePackageId || DEFAULT_PACKAGE_ID);
   const answers = useAnswers(room?.currentQuestion?.questionId);
 
   const [playerId, setPlayerId] = useState(() =>
@@ -7400,11 +6671,8 @@ function PlayerPanel() {
   const currentQuestion = room?.currentQuestion;
   const stage = room?.stage || "home";
   const currentQuestionIndex = room?.currentQuestionIndex ?? -1;
-  const activeQuestionList = room?.practiceMode
-    ? getPracticeQuestions(questions)
-    : getMainQuestions(questions);
-  const totalQuestions = activeQuestionList.length;
-  const hasNextQuestion = !!activeQuestionList[currentQuestionIndex + 1];
+  const totalQuestions = Number(room?.totalQuestions || 0);
+  const hasNextQuestion = room?.hasNextQuestion === true;
   const currentQuestionId = currentQuestion?.questionId || currentQuestion?.id || null;
   const lastAnswer = answers.find((answer) =>
     answer.playerId === playerId &&
@@ -7432,20 +6700,25 @@ function PlayerPanel() {
     (stage === "instructions" || stage === "registration" || stage === "practiceComplete" || stage === "reveal" || stage === "results");
 
   useEffect(() => {
+    ensureAnonymousPlayerAuth().catch(() => {});
+  }, []);
+
+  useEffect(() => {
     const shouldTrackVisitor =
       !player?.id &&
       (stage === "home" || stage === "registration" || stage === "instructions");
 
     if (!shouldTrackVisitor) return undefined;
 
-    const visitorId = getOrCreateVisitorId();
-
     async function markVisitorSeen() {
       try {
+        const user = await ensureAnonymousPlayerAuth();
+        const visitorId = getOrCreateVisitorId(user.uid);
         await setDoc(
           doc(db, "rooms", ROOM_ID, "players", visitorId),
           {
             isVisitorOnly: true,
+            authUid: user.uid,
             seenAtMs: Date.now(),
             seenAt: serverTimestamp(),
             playerId: player?.id || null,
@@ -7516,69 +6789,42 @@ function PlayerPanel() {
 
     const answeredAt = getNow();
     const revealCountdown = getRevealCountdown(currentQuestion, room, answeredAt);
-    const answerStartAtMs = getAnswerStartMs(currentQuestion);
-    const answerTimeSeconds = answerStartAtMs ? Math.max(0, (answeredAt - answerStartAtMs) / 1000) : null;
 
     if (stage !== "question" || revealCountdown === null || revealCountdown > 0) return;
 
-    const isCorrect = index === currentQuestion.correctIndex;
     const frozenPercent = getPointsProgressPercent(
       currentQuestion,
       room,
       answeredAt
     );
 
-    const basePoints = calculateBasePoints({
-      question: currentQuestion,
-      room,
-      answeredAt,
-    });
-
-    const jokerApplied =
-      currentQuestion.isPractice
-        ? player.practiceJokerQuestionId === currentQuestion.questionId
-        : !!player.jokerUsed && player.jokerQuestionId === currentQuestion.questionId;
-    const jokerMultiplier = getJokerMultiplier(player, currentQuestion);
-    const jokerTiming = jokerApplied
-      ? currentQuestion.isPractice
-        ? player.practiceJokerTiming || (Number(jokerMultiplier) === 2 ? "during" : "before")
-        : (Number(jokerMultiplier) === 2 ? "during" : "before")
-      : null;
-
-    const points = calculateFinalPoints({
-      isCorrect,
-      basePoints,
-      jokerApplied,
-      jokerMultiplier,
-    });
-
-    setSelectedIndex(index);
-    setFrozenProgressPercent(frozenPercent);
-    setAnsweredQuestionId(currentQuestion.questionId);
-    setAnswerMessage("تم إرسال إجابتك");
-    writeLocalAnswerLock(playerId, currentQuestion.questionId, index, answeredAt);
-    vibrateDevice(65);
-
-    await addDoc(collection(db, "rooms", ROOM_ID, "answers"), {
-      playerId,
-      playerName: player?.name || playerName,
-      fullName: player?.fullName || "",
-      phone: player?.phone || "",
-      questionId: currentQuestion.questionId,
-      selectedIndex: index,
-      isCorrect,
-      basePoints,
-      jokerApplied,
-      jokerMultiplier: jokerApplied ? jokerMultiplier : null,
-      jokerTiming,
-      isPractice: !!currentQuestion.isPractice,
-      voteCategory: currentQuestion.selectedVoteCategory || null,
-      points,
-      answeredAt,
-      answerStartAtMs,
-      answerTimeSeconds,
-      createdAt: serverTimestamp(),
-    });
+    try {
+      setAnswerMessage("جاري إرسال الإجابة...");
+      const result = await submitAnswerSecurely({
+        roomId: ROOM_ID,
+        questionId: currentQuestion.questionId,
+        playerId,
+        selectedIndex: index,
+      });
+      setSelectedIndex(index);
+      setFrozenProgressPercent(frozenPercent);
+      setAnsweredQuestionId(currentQuestion.questionId);
+      setAnswerMessage("تم إرسال إجابتك");
+      writeLocalAnswerLock(
+        playerId,
+        currentQuestion.questionId,
+        index,
+        result.receivedAtMs || answeredAt,
+      );
+      vibrateDevice(65);
+    } catch (error) {
+      if (error?.code === "already-exists") {
+        setAnsweredQuestionId(currentQuestion.questionId);
+        setAnswerMessage("تم إرسال إجابتك مسبقًا");
+      } else {
+        setAnswerMessage(error?.message || "تعذر إرسال الإجابة.");
+      }
+    }
   }
 
   async function handleCategoryVote(categoryLabel) {

@@ -21,7 +21,9 @@
     "test:baseline": "firebase emulators:exec --project demo-family-quiz --only auth,functions,firestore,database \"npm --prefix functions run test:baseline\"",
     "test:baseline:50": "firebase emulators:exec --project demo-family-quiz --only auth,functions,firestore,database \"npm --prefix functions run test:baseline:50\"",
     "test:baseline:edge": "firebase emulators:exec --project demo-family-quiz --only auth,functions,firestore,database \"npm --prefix functions run test:baseline:edge\"",
-    "test:baseline:performance": "firebase emulators:exec --project demo-family-quiz --only auth,functions,firestore,database \"npm --prefix functions run test:baseline:performance\""
+    "test:baseline:performance": "firebase emulators:exec --project demo-family-quiz --only auth,functions,firestore,database \"npm --prefix functions run test:baseline:performance\"",
+    "test:secure-writes": "firebase emulators:exec --project demo-family-quiz --only auth,functions,firestore,database \"npm --prefix functions run test:secure-writes\"",
+    "test:secure-writes:performance": "firebase emulators:exec --project demo-family-quiz --only auth,functions,firestore,database \"npm --prefix functions run test:secure-writes:performance\""
   },
   "dependencies": {
     "firebase": "^12.13.0",

@@ -44,7 +44,7 @@ function validateQuestion(room, questionId) {
   if (!question || !sameId(question.questionId || question.id, questionId)) {
     throw new HttpsError("not-found", "The requested question is not the active room question");
   }
-  if (!["question", "results"].includes(room.stage)) {
+  if (!["question", "reveal", "results"].includes(room.stage)) {
     throw new HttpsError("failed-precondition", "The room state does not allow finalization");
   }
   const options = Array.isArray(question.options) ? question.options : [];
