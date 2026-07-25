@@ -1,5 +1,8 @@
 {
   "projects": {
-    "default": "family-quiz-b7960"
-  }
+    "default": "family-quiz-b7960",
+    "staging": "family-quiz-staging"
+  },
+  "targets": {},
+  "etags": {}
 }
