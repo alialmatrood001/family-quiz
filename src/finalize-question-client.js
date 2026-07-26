@@ -1,16 +1,11 @@
 import { doc, onSnapshot } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
-import { db, functions } from "./firebase.js";
+import { db } from "./firebase.js";
+import { normalizeServerError, serverApiClient } from "./server-api-client.js";
 
 const RESULT_WAIT_TIMEOUT_MS = 25_000;
 
 export function normalizeFinalizeError(error) {
-  const rawCode = String(error?.code || "internal");
-  const code = rawCode.replace(/^functions\//, "");
-  return {
-    code,
-    message: String(error?.message || "تعذر إنهاء السؤال."),
-  };
+  return normalizeServerError(error, "تعذر إنهاء السؤال.");
 }
 
 export function waitForOfficialQuestionResult(
@@ -55,10 +50,9 @@ export function waitForOfficialQuestionResult(
 
 export function createQuestionFinalizationClient({
   firestore,
-  functionsInstance,
+  finalizeOperation = serverApiClient.finalizeQuestion,
   resultTimeoutMs = RESULT_WAIT_TIMEOUT_MS,
 }) {
-  const callable = httpsCallable(functionsInstance, "finalizeQuestion");
   const inFlight = new Map();
 
   async function finalizeAndWait({ roomId, questionId, signal, onAccepted } = {}) {
@@ -75,8 +69,11 @@ export function createQuestionFinalizationClient({
 
     const operation = (async () => {
       try {
-        const response = await callable({ roomId: safeRoomId, questionId: safeQuestionId });
-        onAccepted?.(response.data);
+        const response = await finalizeOperation(
+          { roomId: safeRoomId, questionId: safeQuestionId },
+          { signal },
+        );
+        onAccepted?.(response);
       } catch (error) {
         const normalized = normalizeFinalizeError(error);
         if (normalized.code !== "aborted" && normalized.code !== "already-exists") {
@@ -105,5 +102,4 @@ export function createQuestionFinalizationClient({
 
 export const questionFinalizationClient = createQuestionFinalizationClient({
   firestore: db,
-  functionsInstance: functions,
 });

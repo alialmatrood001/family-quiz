@@ -13,6 +13,10 @@ import {
   createQuestionFinalizationClient,
   waitForOfficialQuestionResult,
 } from "../../../src/finalize-question-client.js";
+import {
+  createFirebaseCallableInvoker,
+  createServerApiClient,
+} from "../../../src/server-api-client.js";
 import { buildScenario } from "../fixtures/scenarios.mjs";
 import {
   createEmulatorIdentity,
@@ -43,9 +47,14 @@ test("authenticated React client finalizes once and waits for the official resul
   connectFunctionsEmulator(functions, "127.0.0.1", 5001);
 
   const authService = createAdminAuthService(auth);
+  const serverClient = createServerApiClient({
+    transport: "callable",
+    auth,
+    callableInvoker: createFirebaseCallableInvoker(functions),
+  });
   const finalizationClient = createQuestionFinalizationClient({
     firestore,
-    functionsInstance: functions,
+    finalizeOperation: serverClient.finalizeQuestion,
     resultTimeoutMs: 10_000,
   });
   const ordinary = await createEmulatorIdentity({ label: "operation5-ordinary" });
@@ -108,7 +117,7 @@ test("authenticated React client finalizes once and waits for the official resul
 
   const reloadedClient = createQuestionFinalizationClient({
     firestore,
-    functionsInstance: functions,
+    finalizeOperation: serverClient.finalizeQuestion,
     resultTimeoutMs: 10_000,
   });
   const afterReload = await reloadedClient.finalizeAndWait({

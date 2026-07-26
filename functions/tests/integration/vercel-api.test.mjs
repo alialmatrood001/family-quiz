@@ -4,6 +4,7 @@ import adminHandler from "../../../api/admin.js";
 import healthHandler from "../../../api/health.js";
 import playerHandler from "../../../api/player.js";
 import quizHandler from "../../../api/quiz.js";
+import { createServerApiClient } from "../../../src/server-api-core.js";
 import {
   createEmulatorIdentity,
   deleteEmulatorIdentity,
@@ -52,6 +53,46 @@ async function invoke(handler, { method = "POST", token, action, data = {}, orig
   const res = responseMock();
   await handler(req, res);
   return res;
+}
+
+async function localApiFetch(url, options) {
+  const handlers = {
+    "/api/admin": adminHandler,
+    "/api/player": playerHandler,
+    "/api/quiz": quizHandler,
+  };
+  const handler = handlers[url];
+  if (!handler) throw new TypeError(`No local API handler for ${url}`);
+  const req = {
+    method: options.method,
+    headers: {
+      ...Object.fromEntries(
+        Object.entries(options.headers || {}).map(([key, value]) => [key.toLowerCase(), value]),
+      ),
+      origin: localOrigin,
+      "content-length": String(Buffer.byteLength(options.body || "")),
+    },
+    body: options.body,
+  };
+  const res = responseMock();
+  await handler(req, res);
+  return {
+    ok: res.statusCode >= 200 && res.statusCode < 300,
+    status: res.statusCode,
+    async json() {
+      return res.body;
+    },
+  };
+}
+
+function tokenAuth(token) {
+  return {
+    currentUser: {
+      async getIdToken() {
+        return token;
+      },
+    },
+  };
 }
 
 test("Vercel API uses the shared server operations safely", { timeout: 90_000 }, async (t) => {
@@ -370,5 +411,97 @@ test("Vercel API uses the shared server operations safely", { timeout: 90_000 },
     assert.equal(first.body.data.runId, second.body.data.runId);
     const results = await room.collection("questionResults").get();
     assert.equal(results.size, 1);
+  });
+
+  await t.test("unified React adapter completes the critical Vercel flow on emulators", async () => {
+    const adapterRoomId = "operation9-client-adapter";
+    const adapterQuestionId = "adapter-question-01";
+    const adapterRoom = roomRef(adapterRoomId);
+    await adapterRoom.set({
+      stage: "registration",
+      currentQuestion: null,
+      acceptingAnswers: false,
+      activeQuestionId: null,
+    });
+    await adapterRoom.collection("questions").doc(adapterQuestionId).set({
+      text: "Unified adapter question",
+      options: ["A", "B"],
+      correctIndex: 0,
+      maxPoints: 1000,
+      minPoints: 100,
+      seconds: 20,
+      answerRevealDelaySeconds: 0,
+    });
+    t.after(() => deleteRoom(adapterRoomId));
+
+    const playerClient = createServerApiClient({
+      transport: "vercel",
+      auth: tokenAuth(playerToken),
+      fetchImpl: localApiFetch,
+    });
+    const adminClient = createServerApiClient({
+      transport: "vercel",
+      auth: tokenAuth(adminToken),
+      fetchImpl: localApiFetch,
+    });
+    const registrationResult = await playerClient.registerPlayer({
+      roomId: adapterRoomId,
+      name: "Adapter Player",
+      emoji: "AP",
+      fullName: "Adapter Player Full",
+      phone: "0500000891",
+    });
+    const adapterPlayerId = registrationResult.playerId;
+    assert.equal(registrationResult.status, "registered");
+    assert.equal(
+      (await playerClient.activateJoker({
+        roomId: adapterRoomId,
+        questionId: "next",
+        playerId: adapterPlayerId,
+      })).status,
+      "pending",
+    );
+    assert.equal(
+      (await adminClient.prepareQuestion({
+        roomId: adapterRoomId,
+        questionId: adapterQuestionId,
+        questionIndex: 0,
+      })).status,
+      "prepared",
+    );
+    assert.equal(
+      (await adminClient.startQuestion({
+        roomId: adapterRoomId,
+        questionId: adapterQuestionId,
+      })).status,
+      "started",
+    );
+    assert.equal(
+      (await playerClient.submitAnswer({
+        roomId: adapterRoomId,
+        questionId: adapterQuestionId,
+        playerId: adapterPlayerId,
+        selectedIndex: 0,
+      })).status,
+      "received",
+    );
+    await adminClient.controlQuestion({
+      roomId: adapterRoomId,
+      questionId: adapterQuestionId,
+      action: "reveal",
+    });
+    assert.equal(
+      (await adminClient.finalizeQuestion({
+        roomId: adapterRoomId,
+        questionId: adapterQuestionId,
+      })).status,
+      "finalized",
+    );
+    const details = await adminClient.getPlayerPrivateDetails({
+      roomId: adapterRoomId,
+      playerId: adapterPlayerId,
+    });
+    assert.equal(details.details.fullName, "Adapter Player Full");
+    assert.equal(details.details.phone, "0500000891");
   });
 });
