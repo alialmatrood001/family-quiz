@@ -1,12 +1,10 @@
 const { setGlobalOptions } = require("firebase-functions");
 const { onRequest, onCall } = require("firebase-functions/v2/https");
-const { initializeApp } = require("firebase-admin/app");
-const { getFirestore } = require("firebase-admin/firestore");
-const { createFinalizeQuestionHandler } = require("./finalize-question/handler");
-const { createSecureWriteHandlers } = require("./secure-writes/handlers");
+const { asFirebaseCallable } = require("./server/firebase-callable");
+const { getServerOperations } = require("./server/operations");
 
-initializeApp();
 setGlobalOptions({ maxInstances: 10 });
+const operations = getServerOperations();
 
 exports.testFunction = onRequest((request, response) => {
   response.json({
@@ -17,21 +15,22 @@ exports.testFunction = onRequest((request, response) => {
 });
 
 exports.finalizeQuestion = onCall(
-  createFinalizeQuestionHandler({ db: getFirestore() })
+  asFirebaseCallable(operations.finalizeQuestion)
 );
 
-const secureWrites = createSecureWriteHandlers({ db: getFirestore() });
-exports.registerPlayer = onCall(secureWrites.registerPlayer);
-exports.recoverPlayer = onCall(secureWrites.recoverPlayer);
-exports.submitAnswer = onCall(secureWrites.submitAnswer);
-exports.activateJoker = onCall(secureWrites.activateJoker);
-exports.cancelJoker = onCall(secureWrites.cancelJoker);
-exports.prepareQuestion = onCall(secureWrites.prepareQuestion);
-exports.startQuestion = onCall(secureWrites.startQuestion);
-exports.controlQuestion = onCall(secureWrites.controlQuestion);
-exports.adjustPlayerScore = onCall(secureWrites.adjustPlayerScore);
-exports.getPlayerPrivateDetails = onCall(secureWrites.getPlayerPrivateDetails);
-exports.updatePlayerProfile = onCall(secureWrites.updatePlayerProfile);
-exports.deletePlayer = onCall(secureWrites.deletePlayer);
-exports.resetPracticeScores = onCall(secureWrites.resetPracticeScores);
-exports.resetQuizData = onCall(secureWrites.resetQuizData);
+exports.registerPlayer = onCall(asFirebaseCallable(operations.registerPlayer));
+exports.recoverPlayer = onCall(asFirebaseCallable(operations.recoverPlayer));
+exports.submitAnswer = onCall(asFirebaseCallable(operations.submitAnswer));
+exports.activateJoker = onCall(asFirebaseCallable(operations.activateJoker));
+exports.cancelJoker = onCall(asFirebaseCallable(operations.cancelJoker));
+exports.prepareQuestion = onCall(asFirebaseCallable(operations.prepareQuestion));
+exports.startQuestion = onCall(asFirebaseCallable(operations.startQuestion));
+exports.controlQuestion = onCall(asFirebaseCallable(operations.controlQuestion));
+exports.adjustPlayerScore = onCall(asFirebaseCallable(operations.adjustPlayerScore));
+exports.getPlayerPrivateDetails = onCall(
+  asFirebaseCallable(operations.getPlayerPrivateDetails)
+);
+exports.updatePlayerProfile = onCall(asFirebaseCallable(operations.updatePlayerProfile));
+exports.deletePlayer = onCall(asFirebaseCallable(operations.deletePlayer));
+exports.resetPracticeScores = onCall(asFirebaseCallable(operations.resetPracticeScores));
+exports.resetQuizData = onCall(asFirebaseCallable(operations.resetQuizData));
