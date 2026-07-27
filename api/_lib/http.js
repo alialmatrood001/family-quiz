@@ -35,6 +35,28 @@ function configuredOrigins() {
     .split(",")
     .map((value) => value.trim())
     .filter(Boolean);
+  if (process.env.APP_ENVIRONMENT === "staging") {
+    const stagingOrigin = String(process.env.STAGING_ORIGIN || "").trim();
+    const productionOrigin = String(process.env.PRODUCTION_ORIGIN || "").trim();
+    let parsed;
+    try {
+      parsed = new URL(stagingOrigin);
+    } catch {
+      throw httpError(500, "staging-configuration-invalid", "Staging configuration is invalid");
+    }
+    if (
+      !stagingOrigin ||
+      parsed.protocol !== "https:" ||
+      parsed.origin !== stagingOrigin ||
+      stagingOrigin.includes("*") ||
+      stagingOrigin === productionOrigin ||
+      configured.length !== 1 ||
+      configured[0] !== stagingOrigin
+    ) {
+      throw httpError(500, "staging-configuration-invalid", "Staging configuration is invalid");
+    }
+    return new Set([...LOCAL_ORIGINS, stagingOrigin]);
+  }
   return new Set([...LOCAL_ORIGINS, ...configured]);
 }
 
@@ -58,7 +80,16 @@ function httpError(status, code, message) {
 }
 
 function send(res, status, body) {
+  res.setHeader("Cache-Control", "no-store, max-age=0");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
   res.status(status).json(body);
+}
+
+function setNoStore(res) {
+  res.setHeader("Cache-Control", "no-store, max-age=0");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
 }
 
 function contentLength(req) {
@@ -144,6 +175,7 @@ export function createActionEndpoint({ actions, adminOnly = false }) {
   const allowed = new Set(actions);
   return async function actionEndpoint(req, res) {
     try {
+      setNoStore(res);
       setCors(req, res);
       if (req.method === "OPTIONS") {
         res.status(204).end();
@@ -182,6 +214,7 @@ export function createActionEndpoint({ actions, adminOnly = false }) {
 export function createHealthEndpoint() {
   return async function healthEndpoint(req, res) {
     try {
+      setNoStore(res);
       setCors(req, res);
       if (req.method === "OPTIONS") {
         res.status(204).end();
@@ -195,6 +228,10 @@ export function createHealthEndpoint() {
         data: {
           status: "ok",
           service: "family-quiz-vercel-api",
+          environment:
+            process.env.APP_ENVIRONMENT ||
+            (process.env.FIRESTORE_EMULATOR_HOST ? "local-emulator" : "local"),
+          transport: process.env.SERVER_TRANSPORT || "vercel",
         },
       });
     } catch (error) {

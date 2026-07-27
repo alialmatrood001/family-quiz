@@ -121,7 +121,12 @@ test("Vercel API uses the shared server operations safely", { timeout: 90_000 },
     assert.equal(response.statusCode, 200);
     assert.deepEqual(response.body, {
       ok: true,
-      data: { status: "ok", service: "family-quiz-vercel-api" },
+      data: {
+        status: "ok",
+        service: "family-quiz-vercel-api",
+        environment: "local-emulator",
+        transport: "vercel",
+      },
     });
   });
 

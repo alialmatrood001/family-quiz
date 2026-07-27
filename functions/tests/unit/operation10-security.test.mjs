@@ -217,7 +217,12 @@ test("health metadata is safe and operational endpoints are POST-only", async ()
   const health = await invokeApi("health", { method: "GET" });
   assert.deepEqual(health.body, {
     ok: true,
-    data: { status: "ok", service: "family-quiz-vercel-api" },
+    data: {
+      status: "ok",
+      service: "family-quiz-vercel-api",
+      environment: "local-emulator",
+      transport: "vercel",
+    },
   });
   const serialized = JSON.stringify(health.body);
   assert.doesNotMatch(serialized, /project|credential|token|phone|authUid|private/i);

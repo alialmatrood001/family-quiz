@@ -4,6 +4,7 @@ const { applicationDefault, cert, getApp, getApps, initializeApp } = require("fi
 const { getAuth } = require("firebase-admin/auth");
 const { getDatabase } = require("firebase-admin/database");
 const { getFirestore } = require("firebase-admin/firestore");
+const { validateStagingServerEnvironment } = require("./environment-guard");
 
 const DEMO_PROJECT_ID = "demo-family-quiz";
 const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
@@ -70,6 +71,13 @@ function productionConfiguration() {
     };
   }
 
+  const deploymentEnvironment = String(process.env.APP_ENVIRONMENT || "").trim();
+  if (deploymentEnvironment !== "staging") {
+    throw new Error(
+      "Vercel Firebase Admin requires APP_ENVIRONMENT=staging; production is not configured here"
+    );
+  }
+  validateStagingServerEnvironment(process.env);
   const clientEmail = process.env.FIREBASE_ADMIN_CLIENT_EMAIL;
   const privateKey = process.env.FIREBASE_ADMIN_PRIVATE_KEY;
   if (!projectId || !clientEmail || !privateKey) {
