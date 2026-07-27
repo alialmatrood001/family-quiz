@@ -74,6 +74,13 @@ function parseProtocolBody(req) {
   if (contentLength(req) > MAX_JSON_BYTES) {
     throw httpError(413, "body-too-large", "Request body is too large");
   }
+  const contentType = String(req.headers?.["content-type"] || "")
+    .split(";", 1)[0]
+    .trim()
+    .toLowerCase();
+  if (contentType && contentType !== "application/json") {
+    throw httpError(415, "unsupported-media-type", "Content-Type must be application/json");
+  }
   let body = req.body;
   if (typeof body === "string" || Buffer.isBuffer(body)) {
     try {
