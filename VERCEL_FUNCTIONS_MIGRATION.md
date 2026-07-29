@@ -60,13 +60,32 @@ Local emulator execution:
 
 Future Vercel server runtime:
 
+- `FIREBASE_ADMIN_AUTH_MODE`
 - `FIREBASE_ADMIN_PROJECT_ID`
-- `FIREBASE_ADMIN_CLIENT_EMAIL`
-- `FIREBASE_ADMIN_PRIVATE_KEY`
+- `FIREBASE_PRODUCTION_PROJECT_ID`
+- `CONFIRM_STAGING_PROJECT`
 - `FIREBASE_DATABASE_URL`
+- `GOOGLE_CLOUD_PROJECT`
+- `GCP_PROJECT_NUMBER`
+- `GCP_WORKLOAD_IDENTITY_POOL_ID`
+- `GCP_WORKLOAD_IDENTITY_PROVIDER_ID`
+- `GCP_SERVICE_ACCOUNT_EMAIL`
+- `VERCEL_OIDC_ISSUER`
+- `VERCEL_OIDC_AUDIENCE`
+- `VERCEL_OIDC_SUBJECT`
+- `STAGING_ORIGIN`
+- `PRODUCTION_ORIGIN`
 - `VERCEL_ALLOWED_ORIGINS`
 
-No values or credentials are committed. Emulator tests refuse service-account credentials and require project namespace `demo-family-quiz`.
+`VERCEL_OIDC_TOKEN` is supplied by Vercel to the function request and is never a
+manually configured application variable. The runtime exchanges it in memory
+through Google Workload Identity Federation and service-account impersonation.
+No credential file or private key is required. The legacy
+`FIREBASE_ADMIN_CLIENT_EMAIL` plus `FIREBASE_ADMIN_PRIVATE_KEY` mode remains
+available only when explicitly selected and cannot coexist with OIDC settings.
+
+No values or credentials are committed. Emulator tests refuse service-account
+credentials and require project namespace `demo-family-quiz`.
 
 ## Temporary compatibility
 

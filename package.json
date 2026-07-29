@@ -38,6 +38,7 @@
     "test:operation10:rollback": "node scripts/run-operation10.mjs --mode=rollback",
     "test:operation10:all": "node scripts/run-operation10.mjs --mode=all",
     "test:operation11": "node --test functions/tests/unit/operation11-staging.test.mjs functions/tests/unit/operation11-http.test.mjs",
+    "test:oidc": "node --test functions/tests/unit/vercel-oidc.test.mjs",
     "test:operation11:builds": "node scripts/test-operation11-builds.mjs",
     "test:operation11:all": "npm run test:operation11 && npm run test:operation11:builds",
     "vercel:emulator-safety": "node scripts/assert-vercel-emulator-safety.mjs",

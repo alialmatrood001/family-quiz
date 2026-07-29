@@ -13,15 +13,16 @@ const { validateStagingServerEnvironment } = require("../../server/environment-g
 const { calculateQuestionPoints } = require("../../finalize-question/calculate-points.js");
 
 function serverEnvironment(overrides = {}) {
-  const projectId = "family-quiz-staging-test";
+  const projectId = "family-quiz-staging";
   return {
     APP_ENVIRONMENT: "staging",
     SERVER_TRANSPORT: "vercel",
+    FIREBASE_ADMIN_AUTH_MODE: "legacy-key",
     FIREBASE_ADMIN_PROJECT_ID: projectId,
-    FIREBASE_PRODUCTION_PROJECT_ID: "family-quiz-production",
+    FIREBASE_PRODUCTION_PROJECT_ID: "family-quiz-b7960",
     CONFIRM_STAGING_PROJECT: projectId,
     FIREBASE_ADMIN_CLIENT_EMAIL:
-      "firebase-adminsdk-test@family-quiz-staging-test.iam.gserviceaccount.com",
+      "firebase-adminsdk-test@family-quiz-staging.iam.gserviceaccount.com",
     FIREBASE_ADMIN_PRIVATE_KEY:
       "-----BEGIN PRIVATE KEY-----\nTEST-ONLY\n-----END PRIVATE KEY-----",
     FIREBASE_DATABASE_URL: `https://${projectId}.firebaseio.com`,
@@ -52,8 +53,9 @@ test("server guard accepts a complete isolated staging profile", () => {
   assert.deepEqual(validateStagingServerEnvironment(serverEnvironment()), {
     environment: "staging",
     transport: "vercel",
-    projectId: "family-quiz-staging-test",
+    projectId: "family-quiz-staging",
     stagingOrigin: "https://family-quiz-staging.vercel.app",
+    authMode: "legacy-key",
   });
 });
 
@@ -63,7 +65,7 @@ test("server guard blocks Production, missing values, and mixed targets", () => 
       validateStagingServerEnvironment(
         serverEnvironment({ FIREBASE_ADMIN_PROJECT_ID: "family-quiz-production" }),
       ),
-    /match FIREBASE_ADMIN_PROJECT_ID|must not equal/,
+    /family-quiz-staging|match FIREBASE_ADMIN_PROJECT_ID|must not equal/,
   );
   assert.throws(
     () => validateStagingServerEnvironment(serverEnvironment({ FIREBASE_ADMIN_PRIVATE_KEY: "" })),

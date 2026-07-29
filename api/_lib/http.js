@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import process from "node:process";
-import { serverRuntime } from "./server-runtime.js";
+import { serverRuntime, withServerRequestIdentity } from "./server-runtime.js";
 
 export const MAX_JSON_BYTES = 32 * 1024;
 
@@ -188,15 +188,17 @@ export function createActionEndpoint({ actions, adminOnly = false }) {
       if (!allowed.has(action)) {
         throw httpError(404, "unknown-action", SAFE_MESSAGES["unknown-action"]);
       }
-      const auth = await verifiedAuth(req);
-      if (adminOnly && auth.token?.admin !== true) {
-        throw httpError(403, "permission-denied", "Admin permission is required");
-      }
-      const operation = serverRuntime().operations[action];
-      if (typeof operation !== "function") {
-        throw httpError(404, "unknown-action", SAFE_MESSAGES["unknown-action"]);
-      }
-      const result = await operation({ auth, data });
+      const result = await withServerRequestIdentity(req, async () => {
+        const auth = await verifiedAuth(req);
+        if (adminOnly && auth.token?.admin !== true) {
+          throw httpError(403, "permission-denied", "Admin permission is required");
+        }
+        const operation = serverRuntime().operations[action];
+        if (typeof operation !== "function") {
+          throw httpError(404, "unknown-action", SAFE_MESSAGES["unknown-action"]);
+        }
+        return operation({ auth, data });
+      });
       send(res, 200, { ok: true, data: result ?? {} });
     } catch (error) {
       const normalized = normalizeError(error);

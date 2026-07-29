@@ -5,6 +5,7 @@ const { getAuth } = require("firebase-admin/auth");
 const { getDatabase } = require("firebase-admin/database");
 const { getFirestore } = require("firebase-admin/firestore");
 const { validateStagingServerEnvironment } = require("./environment-guard");
+const { getWifCredential } = require("./vercel-oidc");
 
 const DEMO_PROJECT_ID = "demo-family-quiz";
 const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
@@ -16,32 +17,32 @@ function localHostname(value) {
     .split(/[:\]]/)[0];
 }
 
-function assertLocalEmulator(name) {
-  const value = process.env[name];
+function assertLocalEmulator(env, name) {
+  const value = env[name];
   if (!value || !LOCAL_HOSTS.has(localHostname(value))) {
     throw new Error(`${name} must point to localhost in emulator mode`);
   }
 }
 
-function emulatorConfiguration() {
+function emulatorConfiguration(env = process.env) {
   const names = [
     "FIRESTORE_EMULATOR_HOST",
     "FIREBASE_AUTH_EMULATOR_HOST",
     "FIREBASE_DATABASE_EMULATOR_HOST",
   ];
-  const enabled = names.some((name) => Boolean(process.env[name]));
+  const enabled = names.some((name) => Boolean(env[name]));
   if (!enabled) return null;
-  names.forEach(assertLocalEmulator);
+  names.forEach((name) => assertLocalEmulator(env, name));
   if (
-    process.env.GOOGLE_APPLICATION_CREDENTIALS &&
-    process.env.FUNCTIONS_EMULATOR !== "true"
+    env.GOOGLE_APPLICATION_CREDENTIALS &&
+    env.FUNCTIONS_EMULATOR !== "true"
   ) {
     throw new Error("Service-account credentials are forbidden in emulator mode");
   }
   const projectId =
-    process.env.GCLOUD_PROJECT ||
-    process.env.GOOGLE_CLOUD_PROJECT ||
-    process.env.FIREBASE_ADMIN_PROJECT_ID ||
+    env.GCLOUD_PROJECT ||
+    env.GOOGLE_CLOUD_PROJECT ||
+    env.FIREBASE_ADMIN_PROJECT_ID ||
     DEMO_PROJECT_ID;
   if (projectId !== DEMO_PROJECT_ID) {
     throw new Error(`Emulator mode is restricted to ${DEMO_PROJECT_ID}`);
@@ -49,37 +50,48 @@ function emulatorConfiguration() {
   return { projectId, mode: "emulator" };
 }
 
-function productionConfiguration() {
+function productionConfiguration(
+  env = process.env,
+  { oidcCredentialFactory = getWifCredential } = {},
+) {
   const projectId =
-    process.env.FIREBASE_ADMIN_PROJECT_ID ||
-    process.env.GCLOUD_PROJECT ||
-    process.env.GOOGLE_CLOUD_PROJECT;
+    env.FIREBASE_ADMIN_PROJECT_ID ||
+    env.GCLOUD_PROJECT ||
+    env.GOOGLE_CLOUD_PROJECT;
   const managedFirebaseRuntime =
     Boolean(
-      process.env.FIREBASE_CONFIG ||
-        process.env.K_SERVICE ||
-        process.env.FUNCTION_TARGET
+      env.FIREBASE_CONFIG ||
+        env.K_SERVICE ||
+        env.FUNCTION_TARGET
     ) &&
-    Boolean(process.env.GCLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT);
+    Boolean(env.GCLOUD_PROJECT || env.GOOGLE_CLOUD_PROJECT);
 
   if (managedFirebaseRuntime) {
     return {
       projectId,
       credential: applicationDefault(),
-      databaseURL: process.env.FIREBASE_DATABASE_URL,
+      databaseURL: env.FIREBASE_DATABASE_URL,
       mode: "firebase-managed",
     };
   }
 
-  const deploymentEnvironment = String(process.env.APP_ENVIRONMENT || "").trim();
+  const deploymentEnvironment = String(env.APP_ENVIRONMENT || "").trim();
   if (deploymentEnvironment !== "staging") {
     throw new Error(
       "Vercel Firebase Admin requires APP_ENVIRONMENT=staging; production is not configured here"
     );
   }
-  validateStagingServerEnvironment(process.env);
-  const clientEmail = process.env.FIREBASE_ADMIN_CLIENT_EMAIL;
-  const privateKey = process.env.FIREBASE_ADMIN_PRIVATE_KEY;
+  const staging = validateStagingServerEnvironment(env);
+  if (staging.authMode === "oidc") {
+    return {
+      projectId,
+      credential: oidcCredentialFactory(env),
+      databaseURL: env.FIREBASE_DATABASE_URL,
+      mode: "vercel-oidc",
+    };
+  }
+  const clientEmail = env.FIREBASE_ADMIN_CLIENT_EMAIL;
+  const privateKey = env.FIREBASE_ADMIN_PRIVATE_KEY;
   if (!projectId || !clientEmail || !privateKey) {
     throw new Error(
       "Firebase Admin production configuration is incomplete; set FIREBASE_ADMIN_PROJECT_ID, FIREBASE_ADMIN_CLIENT_EMAIL, and FIREBASE_ADMIN_PRIVATE_KEY"
@@ -92,8 +104,8 @@ function productionConfiguration() {
       clientEmail,
       privateKey: privateKey.replace(/\\n/g, "\n"),
     }),
-    databaseURL: process.env.FIREBASE_DATABASE_URL,
-    mode: "vercel",
+    databaseURL: env.FIREBASE_DATABASE_URL,
+    mode: "vercel-legacy-key",
   };
 }
 
@@ -119,5 +131,7 @@ function getServerFirebase() {
 
 module.exports = {
   DEMO_PROJECT_ID,
+  emulatorConfiguration,
   getServerFirebase,
+  productionConfiguration,
 };
