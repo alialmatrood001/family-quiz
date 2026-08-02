@@ -37,7 +37,8 @@
     "test:operation10:load": "node scripts/run-operation10.mjs --mode=load",
     "test:operation10:rollback": "node scripts/run-operation10.mjs --mode=rollback",
     "test:operation10:all": "node scripts/run-operation10.mjs --mode=all",
-    "test:operation11": "node --test functions/tests/unit/operation11-staging.test.mjs functions/tests/unit/operation11-http.test.mjs",
+    "test:vercel-runtime-deps": "node scripts/check-vercel-runtime-dependencies.mjs",
+    "test:operation11": "npm run test:vercel-runtime-deps && node --test functions/tests/unit/operation11-staging.test.mjs functions/tests/unit/operation11-http.test.mjs",
     "test:oidc": "node --test functions/tests/unit/vercel-oidc.test.mjs",
     "test:operation11:builds": "node scripts/test-operation11-builds.mjs",
     "test:operation11:all": "npm run test:operation11 && npm run test:operation11:builds",
@@ -49,8 +50,10 @@
     "migration:players:emulator": "node functions/scripts/migrate-player-private-data.mjs --room family-quiz-001 --apply"
   },
   "dependencies": {
+    "firebase-admin": "^13.6.0",
     "firebase": "^12.13.0",
     "framer-motion": "^12.40.0",
+    "google-auth-library": "^10.7.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6"
   },
