@@ -30,6 +30,8 @@ const rootPackage = JSON.parse(await readFile(path.join(root, "package.json"), "
 const functionsPackage = JSON.parse(
   await readFile(path.join(root, "functions", "package.json"), "utf8"),
 );
+assert.equal(rootPackage.engines?.node, "24.x", "Vercel runtime must be pinned to Node 24.x");
+assert.equal(functionsPackage.engines?.node, "24", "Callable runtime must remain on Node 24");
 for (const dependency of [
   "firebase-admin",
   "firebase-functions",

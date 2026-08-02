@@ -33,6 +33,64 @@ const SAFE_MESSAGES = {
 };
 
 const STAGING_FIREBASE_PROJECT_ID = "family-quiz-staging";
+const CONFIGURATION_VARIABLES = Object.freeze([
+  "APP_ENVIRONMENT",
+  "SERVER_TRANSPORT",
+  "VERCEL_ENV",
+  "FIREBASE_ADMIN_AUTH_MODE",
+  "FIREBASE_ADMIN_PROJECT_ID",
+  "FIREBASE_PRODUCTION_PROJECT_ID",
+  "CONFIRM_STAGING_PROJECT",
+  "FIREBASE_DATABASE_URL",
+  "STAGING_ORIGIN",
+  "PRODUCTION_ORIGIN",
+  "VERCEL_ALLOWED_ORIGINS",
+  "GOOGLE_CLOUD_PROJECT",
+  "GCP_PROJECT_NUMBER",
+  "GCP_WORKLOAD_IDENTITY_POOL_ID",
+  "GCP_WORKLOAD_IDENTITY_PROVIDER_ID",
+  "GCP_SERVICE_ACCOUNT_EMAIL",
+  "VERCEL_OIDC_ISSUER",
+  "VERCEL_OIDC_AUDIENCE",
+  "VERCEL_OIDC_SUBJECT",
+]);
+
+function safeConfigurationVariable(error) {
+  const message = String(error?.message || "");
+  return CONFIGURATION_VARIABLES.find((name) => message.includes(name)) || null;
+}
+
+function safeOidcMetadata(req) {
+  const value = req?.headers?.["x-vercel-oidc-token"];
+  const token = typeof value === "string" ? value : "";
+  return {
+    headerPresent: token.length > 0,
+    jwtPartCount: token ? token.split(".").length : 0,
+  };
+}
+
+function logSafeServerFailure(req, error, normalized) {
+  if (
+    process.env.APP_ENVIRONMENT !== "staging" ||
+    process.env.STAGING_AUTH_DIAGNOSTICS === "false" ||
+    normalized.status < 500
+  ) return;
+  console.error("staging-server-auth-diagnostic", {
+    authMode: String(process.env.FIREBASE_ADMIN_AUTH_MODE || "unset"),
+    appEnvironment: String(process.env.APP_ENVIRONMENT || "unset"),
+    firebaseProjectId: String(process.env.FIREBASE_ADMIN_PROJECT_ID || "unset"),
+    projectNumber: String(process.env.GCP_PROJECT_NUMBER || "unset"),
+    poolId: String(process.env.GCP_WORKLOAD_IDENTITY_POOL_ID || "unset"),
+    providerId: String(process.env.GCP_WORKLOAD_IDENTITY_PROVIDER_ID || "unset"),
+    serviceAccountDomain: String(process.env.GCP_SERVICE_ACCOUNT_EMAIL || "").split("@")[1] || "unset",
+    ...safeOidcMetadata(req),
+    failedStage:
+      error?.diagnosticStage ||
+      (normalized.code === "server-configuration-error" ? "environment-guard" : "unknown"),
+    configurationVariable: safeConfigurationVariable(error),
+    errorCode: normalized.code,
+  });
+}
 
 function configuredOrigins() {
   const configured = String(process.env.VERCEL_ALLOWED_ORIGINS || "")
@@ -64,7 +122,7 @@ function configuredOrigins() {
   return new Set([...LOCAL_ORIGINS, ...configured]);
 }
 
-function setCors(req, res) {
+function setCors(req, res, methods = ["POST", "OPTIONS"]) {
   const origin = req.headers?.origin;
   if (!origin) return;
   if (!configuredOrigins().has(origin)) {
@@ -73,7 +131,7 @@ function setCors(req, res) {
   res.setHeader("Access-Control-Allow-Origin", origin);
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", methods.join(", "));
 }
 
 function httpError(status, code, message) {
@@ -253,12 +311,16 @@ export async function verifiedAuth(
   let runtime;
   try {
     runtime = runtimeFactory();
-  } catch {
-    throw httpError(
+  } catch (error) {
+    const wrapped = httpError(
       500,
       "server-configuration-error",
       SAFE_MESSAGES["server-configuration-error"],
     );
+    wrapped.cause = error;
+    wrapped.diagnosticStage = error?.diagnosticStage || "environment-guard";
+    wrapped.configurationVariable = safeConfigurationVariable(error);
+    throw wrapped;
   }
   if (runtime?.projectId !== projectId || typeof runtime?.auth?.verifyIdToken !== "function") {
     throw httpError(
@@ -332,6 +394,7 @@ export function createActionEndpoint({ actions, adminOnly = false }) {
       send(res, 200, { ok: true, data: result ?? {} });
     } catch (error) {
       const normalized = normalizeError(error);
+      logSafeServerFailure(req, error?.cause || error, normalized);
       send(res, normalized.status, {
         ok: false,
         error: {
@@ -347,7 +410,7 @@ export function createHealthEndpoint() {
   return async function healthEndpoint(req, res) {
     try {
       setNoStore(res);
-      setCors(req, res);
+      setCors(req, res, ["GET", "OPTIONS"]);
       if (req.method === "OPTIONS") {
         res.status(204).end();
         return;

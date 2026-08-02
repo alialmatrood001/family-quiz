@@ -14,7 +14,6 @@ import {
   serverTimestamp,
   deleteDoc,
   arrayUnion,
-  runTransaction,
 } from "firebase/firestore";
 import { db } from "./firebase.js";
 import { adminAuth } from "./admin-auth.js";
@@ -34,6 +33,8 @@ import {
 } from "./question-control-client.js";
 import {
   adjustPlayerScoreSecurely,
+  controlQuizLifecycleSecurely,
+  finishQuizSecurely,
   getPlayerPrivateDetailsSecurely,
   initializeQuizSecurely,
   resetQuizDataSecurely,
@@ -843,48 +844,7 @@ async function clearMessagesOnly() {
 }
 
 async function returnToRegistrationKeepingPlayers() {
-  await setDoc(
-    doc(db, "rooms", ROOM_ID),
-    {
-      title: QUIZ_TITLE,
-      subtitle: QUIZ_SUBTITLE,
-      stage: "registration",
-      currentQuestion: null,
-      currentQuestionIndex: -1,
-      questionSentAt: null,
-      audioStartedAt: null,
-      audioEndedAt: null,
-      mediaStartedAt: null,
-      mediaEndedAt: null,
-      questionIgnored: false,
-      ignoredQuestionIds: {},
-      processedQuestionId: null,
-      resultsCalculated: false,
-      resultsCalculatedQuestionId: null,
-      collectingBonusByPlayer: {},
-      collectingBonusJokerByPlayer: {},
-      collectingBonusPlayerId: null,
-      collectingBonusPoints: 0,
-      rankMovementByPlayer: {},
-      collectingAnswerCorrectByPlayer: {},
-      resultsDisplaySnapshot: null,
-      calculationStatus: null,
-      processingQuestionId: null,
-      processingStartedAtMs: null,
-      resultsError: null,
-      practiceMode: false,
-      healthCheck: { active: false },
-      "prizeWheel.spinning": false,
-      categoryVote: null,
-      testMode: {
-        autoAnswerEnabled: false,
-        slowResultsEnabled: false,
-        slowResultsDelayMs: 15000,
-      },
-      updatedAt: serverTimestamp(),
-    },
-    { merge: true }
-  );
+  await controlQuizLifecycleSecurely({ roomId: ROOM_ID, action: "return-registration" });
 }
 
 async function setTemporaryRegistrationOpen(isOpen) {
@@ -905,75 +865,12 @@ async function hardResetGame() {
 }
 
 async function showInstructionsPage() {
-  await setDoc(
-    doc(db, "rooms", ROOM_ID),
-    {
-      title: QUIZ_TITLE,
-      subtitle: QUIZ_SUBTITLE,
-      stage: "instructions",
-      currentQuestion: null,
-      currentQuestionIndex: -1,
-      questionSentAt: null,
-      audioStartedAt: null,
-      mediaStartedAt: null,
-      mediaEndedAt: null,
-      questionIgnored: false,
-      ignoredQuestionIds: {},
-      processedQuestionId: null,
-      collectingBonusByPlayer: {},
-      collectingBonusJokerByPlayer: {},
-      collectingBonusPlayerId: null,
-      collectingBonusPoints: 0,
-      rankMovementByPlayer: {},
-      healthCheck: { active: false },
-      practiceMode: false,
-      registrationOverrideOpen: false,
-      updatedAt: serverTimestamp(),
-    },
-    { merge: true }
-  );
+  await controlQuizLifecycleSecurely({ roomId: ROOM_ID, action: "show-instructions" });
 }
 
 async function resetAndStartRegistration() {
   await resetPlayersAnswersMessages();
-
-  await setDoc(
-    doc(db, "rooms", ROOM_ID),
-    {
-      title: QUIZ_TITLE,
-      subtitle: QUIZ_SUBTITLE,
-      stage: "registration",
-      currentQuestion: null,
-      currentQuestionIndex: -1,
-      questionSentAt: null,
-      audioStartedAt: null,
-      mediaStartedAt: null,
-      mediaEndedAt: null,
-      questionIgnored: false,
-      ignoredQuestionIds: {},
-      processedQuestionId: null,
-      collectingBonusByPlayer: {},
-      collectingBonusJokerByPlayer: {},
-      collectingBonusPlayerId: null,
-      collectingBonusPoints: 0,
-      rankMovementByPlayer: {},
-      healthCheck: { active: false },
-      practiceMode: false,
-      registrationOverrideOpen: false,
-      practiceFinished: false,
-      categoryVote: null,
-      usedQuestionIds: {},
-      resultsDisplaySnapshot: null,
-      calculationStatus: null,
-      testMode: {
-        autoAnswerEnabled: false,
-        slowResultsEnabled: false,
-        slowResultsDelayMs: 15000,
-      },
-      updatedAt: serverTimestamp(),
-    },
-    { merge: true }
-  );
+  await controlQuizLifecycleSecurely({ roomId: ROOM_ID, action: "open-registration" });
 }
 
 async function preloadQuestionForReady(question, index, _readyUntilMs) {
@@ -1187,19 +1084,7 @@ async function revealCorrectAnswer({ allowUndo = false, expectedQuestionId = nul
 }
 
 async function beginFinalCountdown() {
-  const startedAtMs = getNow();
-  await setDoc(
-    doc(db, "rooms", ROOM_ID),
-    {
-      stage: "finalCountdown",
-      stageStartedAtMs: startedAtMs,
-      finalCountdownStartedAtMs: startedAtMs,
-      finalCountdownUntilMs: startedAtMs + 3000,
-      revealUndoUntilMs: null,
-      updatedAt: serverTimestamp(),
-    },
-    { merge: true }
-  );
+  await controlQuizLifecycleSecurely({ roomId: ROOM_ID, action: "begin-final-countdown" });
 }
 
 async function toggleDisplayVideoSlot(enabled) {
@@ -1213,80 +1098,13 @@ async function toggleDisplayVideoSlot(enabled) {
   );
 }
 
-async function archiveLastGame(players = [], questions = [], allAnswers = [], messages = [], room = null) {
-  const sortedPlayers = [...players].sort((a, b) => (b.score || 0) - (a.score || 0));
-  const savedAtMs = getNow();
-  const prizeWinners = room?.prizeWheel?.winners || [];
-  const archivedGame = {
-    id: `game-${savedAtMs}`,
-    savedAtMs,
-    title: `${QUIZ_TITLE} - ${new Date(savedAtMs).toLocaleDateString("ar-SA")}`,
-    players: sortedPlayers.map((player, index) => ({
-      rank: index + 1,
-      id: player.id,
-      name: player.name || "",
-      score: player.score || 0,
-      jokerUsed: !!player.jokerUsed,
-      jokerQuestionNumber: player.jokerQuestionNumber || null,
-    })),
-    questions: questions.map((question, index) => ({
-      id: question.id,
-      questionId: question.questionId || question.id,
-      order: index + 1,
-      text: question.text || "",
-      type: question.type || "multiple_choice",
-      options: (question.options || []).map(getOptionText),
-      correctIndex: Number(question.correctIndex || 0),
-      maxPoints: Number(question.maxPoints || 0),
-      minPoints: Number(question.minPoints || 0),
-      seconds: Number(question.seconds || 0),
-      answerRevealDelaySeconds: Number(question.answerRevealDelaySeconds || 0),
-    })),
-    answers: allAnswers.filter((answer) => !answer.isPractice).map((answer) => ({ ...answer })),
-    messages: messages.map((message) => ({
-      playerName: message.playerName || "",
-      text: message.text || "",
-      createdAtMs: message.createdAtMs || 0,
-    })),
-    prizeWinners: prizeWinners.map((winner) => ({ ...winner })),
-  };
-
-  await setDoc(
-    doc(db, "rooms", ROOM_ID),
-    {
-      gameHistory: arrayUnion(archivedGame),
-      updatedAt: serverTimestamp(),
-    },
-    { merge: true }
-  );
-}
-
 async function finishGame(players = [], questions = [], allAnswers = [], messages = [], room = null) {
-  const roomRef = doc(db, "rooms", ROOM_ID);
-  const canFinish = await runTransaction(db, async (transaction) => {
-    const roomSnap = await transaction.get(roomRef);
-    const roomData = roomSnap.exists() ? roomSnap.data() : {};
-    if (roomData.stage === "finished" || roomData.finalizingGame) return false;
-    transaction.set(roomRef, { finalizingGame: true, updatedAt: serverTimestamp() }, { merge: true });
-    return true;
-  });
-  if (!canFinish) return;
-
-  try {
-    await archiveLastGame(players, questions, allAnswers, messages, room);
-  } catch (error) {
-    console.error("Could not archive the finished game.", error);
-  }
-  await setDoc(
-    roomRef,
-    {
-      stage: "finished",
-      finalizingGame: false,
-      finalCountdownUntilMs: null,
-      updatedAt: serverTimestamp(),
-    },
-    { merge: true }
-  );
+  void players;
+  void questions;
+  void allAnswers;
+  void messages;
+  void room;
+  await finishQuizSecurely({ roomId: ROOM_ID });
 }
 
 /* Automation */
@@ -4201,7 +4019,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
       alert("أضف أسئلة تجريبية أولًا من إعدادات الأسئلة، ثم اختر نوع السؤال: سؤال تجريبي.");
       return;
     }
-    await setDoc(doc(db, "rooms", ROOM_ID), { practiceMode: true, practiceFinished: false, currentQuestionIndex: -1, updatedAt: serverTimestamp() }, { merge: true });
+    await controlQuizLifecycleSecurely({ roomId: ROOM_ID, action: "start-practice" });
     await advanceFromDashboard(firstPractice, 0);
   }
 
@@ -4218,7 +4036,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
       alert("لا توجد أسئلة فعلية. أضف سؤالًا غير تجريبي أولًا.");
       return;
     }
-    await setDoc(doc(db, "rooms", ROOM_ID), { practiceMode: false, practiceFinished: true, registrationOverrideOpen: false, currentQuestionIndex: -1, usedQuestionIds: {}, updatedAt: serverTimestamp() }, { merge: true });
+    await controlQuizLifecycleSecurely({ roomId: ROOM_ID, action: "start-competition" });
     if (isVotingQuestion(firstQuestion)) {
       await startCategoryVote(firstQuestion, room, 0);
     } else {

@@ -16,6 +16,12 @@ const initialize = createSingleFlightCallable(
 );
 const deletePlayer = createSingleFlightCallable("deletePlayer", "تعذر حذف المتسابق.");
 
+const controlLifecycle = createSingleFlightCallable(
+  "controlQuizLifecycle",
+  "Unable to update the quiz stage.",
+);
+const finish = createSingleFlightCallable("finishQuiz", "Unable to finish the quiz.");
+
 export const adjustPlayerScoreSecurely = (data) =>
   adjust(data, `score/${data.roomId}/${data.playerId}`);
 export const resetPracticeScoresSecurely = (data) =>
@@ -28,3 +34,6 @@ export const initializeQuizSecurely = (data) =>
   initialize(data, `quiz-initialize/${data.roomId}`);
 export const deletePlayerSecurely = (data) =>
   deletePlayer(data, `delete/${data.roomId}/${data.playerId}`);
+export const controlQuizLifecycleSecurely = (data) =>
+  controlLifecycle(data, `quiz-lifecycle/${data.roomId}/${data.action}`);
+export const finishQuizSecurely = (data) => finish(data, `quiz-finish/${data.roomId}`);

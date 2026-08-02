@@ -13,6 +13,8 @@ export const SERVER_OPERATIONS = Object.freeze({
   startQuestion: { endpoint: "quiz" },
   controlQuestion: { endpoint: "quiz" },
   finalizeQuestion: { endpoint: "quiz", timeoutMs: FINALIZE_TIMEOUT_MS },
+  controlQuizLifecycle: { endpoint: "admin" },
+  finishQuiz: { endpoint: "admin", timeoutMs: FINALIZE_TIMEOUT_MS },
   adjustPlayerScore: { endpoint: "admin" },
   getPlayerPrivateDetails: { endpoint: "admin" },
   initializeQuiz: { endpoint: "admin" },

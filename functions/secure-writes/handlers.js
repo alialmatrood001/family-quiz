@@ -2,7 +2,7 @@
 
 const crypto = require("node:crypto");
 const { HttpsError } = require("firebase-functions/v2/https");
-const { Timestamp } = require("firebase-admin/firestore");
+const { FieldValue, Timestamp } = require("firebase-admin/firestore");
 const {
   exactInput,
   normalizePhone,
@@ -56,6 +56,10 @@ const QUIZ_INITIALIZATION = Object.freeze({
 
 function sameId(left, right) {
   return String(left || "") === String(right || "");
+}
+
+function optionText(option) {
+  return typeof option === "string" ? option : option?.text || option?.label || "";
 }
 
 function timestampFactory(now) {
@@ -1173,13 +1177,264 @@ function createSecureWriteHandlers({
     return { success: true, status: "reset", mode, deletedCount, runId: operationRunId };
   };
 
+  const controlQuizLifecycle = async (request) => {
+    requireAdmin(request.auth);
+    const data = exactInput(request.data, ["roomId", "action"]);
+    const roomId = safeId(data.roomId, "roomId");
+    const action = String(data.action || "");
+    const allowedActions = new Set([
+      "open-registration",
+      "return-registration",
+      "show-instructions",
+      "start-competition",
+      "start-practice",
+      "begin-final-countdown",
+    ]);
+    if (!allowedActions.has(action)) {
+      throw new HttpsError("invalid-argument", "Unsupported quiz lifecycle action");
+    }
+    const roomRef = db.doc(`rooms/${roomId}`);
+    return db.runTransaction(async (transaction) => {
+      const snapshot = await transaction.get(roomRef);
+      if (!snapshot.exists) throw new HttpsError("not-found", "Room not found");
+      const room = snapshot.data();
+      const updatedAt = serverTimestamp();
+      const commonRegistration = {
+        stage: "registration",
+        currentQuestion: null,
+        currentQuestionIndex: -1,
+        activeQuestionId: null,
+        acceptingAnswers: false,
+        questionSentAt: null,
+        audioStartedAt: null,
+        audioEndedAt: null,
+        mediaStartedAt: null,
+        mediaEndedAt: null,
+        questionIgnored: false,
+        ignoredQuestionIds: {},
+        processedQuestionId: null,
+        resultsCalculated: false,
+        resultsCalculatedQuestionId: null,
+        collectingBonusByPlayer: {},
+        collectingBonusJokerByPlayer: {},
+        collectingBonusPlayerId: null,
+        collectingBonusPoints: 0,
+        rankMovementByPlayer: {},
+        collectingAnswerCorrectByPlayer: {},
+        resultsDisplaySnapshot: null,
+        calculationStatus: null,
+        processingQuestionId: null,
+        processingStartedAtMs: null,
+        resultsError: null,
+        practiceMode: false,
+        healthCheck: { active: false },
+        registrationOverrideOpen: false,
+        categoryVote: null,
+        testMode: {
+          autoAnswerEnabled: false,
+          slowResultsEnabled: false,
+          slowResultsDelayMs: 15000,
+        },
+        updatedAt,
+      };
+      let updates;
+      if (action === "open-registration") {
+        if (room.stage === "registration" && room.practiceFinished === false) {
+          return { success: true, status: "already-open" };
+        }
+        updates = {
+          ...commonRegistration,
+          practiceFinished: false,
+          usedQuestionIds: {},
+        };
+      } else if (action === "return-registration") {
+        if (room.stage === "registration" && room.practiceMode !== true) {
+          return { success: true, status: "already-open" };
+        }
+        updates = commonRegistration;
+      } else if (action === "show-instructions") {
+        if (room.stage === "instructions") {
+          return { success: true, status: "already-showing" };
+        }
+        if (room.stage !== "registration") {
+          throw new HttpsError("failed-precondition", "Instructions require registration stage");
+        }
+        updates = {
+          stage: "instructions",
+          currentQuestion: null,
+          currentQuestionIndex: -1,
+          activeQuestionId: null,
+          acceptingAnswers: false,
+          questionSentAt: null,
+          audioStartedAt: null,
+          mediaStartedAt: null,
+          mediaEndedAt: null,
+          questionIgnored: false,
+          ignoredQuestionIds: {},
+          processedQuestionId: null,
+          collectingBonusByPlayer: {},
+          collectingBonusJokerByPlayer: {},
+          collectingBonusPlayerId: null,
+          collectingBonusPoints: 0,
+          rankMovementByPlayer: {},
+          healthCheck: { active: false },
+          practiceMode: false,
+          registrationOverrideOpen: false,
+          updatedAt,
+        };
+      } else if (action === "start-competition") {
+        updates = {
+          practiceMode: false,
+          practiceFinished: true,
+          registrationOverrideOpen: false,
+          currentQuestionIndex: -1,
+          usedQuestionIds: {},
+          updatedAt,
+        };
+      } else if (action === "start-practice") {
+        updates = {
+          practiceMode: true,
+          practiceFinished: false,
+          currentQuestionIndex: -1,
+          updatedAt,
+        };
+      } else {
+        const startedAtMs = updatedAt.toMillis();
+        if (room.stage === "finalCountdown") {
+          return { success: true, status: "already-counting-down" };
+        }
+        if (!["results", "reveal"].includes(room.stage)) {
+          throw new HttpsError("failed-precondition", "Final countdown requires results");
+        }
+        updates = {
+          stage: "finalCountdown",
+          stageStartedAtMs: startedAtMs,
+          finalCountdownStartedAtMs: startedAtMs,
+          finalCountdownUntilMs: startedAtMs + 3000,
+          revealUndoUntilMs: null,
+          updatedAt,
+        };
+      }
+      transaction.set(roomRef, updates, { merge: true });
+      return { success: true, status: action };
+    });
+  };
+
+  const finishQuiz = async (request) => {
+    requireAdmin(request.auth);
+    const data = exactInput(request.data, ["roomId"]);
+    const roomId = safeId(data.roomId, "roomId");
+    const roomRef = db.doc(`rooms/${roomId}`);
+    const [
+      roomSnapshot,
+      playersSnapshot,
+      questionsSnapshot,
+      answersSnapshot,
+      resultsSnapshot,
+      messagesSnapshot,
+    ] =
+      await Promise.all([
+        roomRef.get(),
+        roomRef.collection("players").get(),
+        roomRef.collection("questions").get(),
+        roomRef.collection("answers").get(),
+        roomRef.collection("questionResults").get(),
+        roomRef.collection("messages").get(),
+      ]);
+    if (!roomSnapshot.exists) throw new HttpsError("not-found", "Room not found");
+    if (roomSnapshot.data().stage === "finished") {
+      return { success: true, status: "already-finished" };
+    }
+    const savedAtMs = now();
+    const players = playersSnapshot.docs
+      .filter((document) => !document.data().isVisitorOnly)
+      .map((document) => ({ id: document.id, ...document.data() }))
+      .sort((left, right) => Number(right.score || 0) - Number(left.score || 0));
+    const questions = questionsSnapshot.docs
+      .map((document) => ({ id: document.id, ...document.data() }))
+      .filter((question) => question.isPractice !== true);
+    const officialByAnswer = new Map();
+    for (const resultDocument of resultsSnapshot.docs) {
+      const result = resultDocument.data();
+      for (const item of Array.isArray(result.results) ? result.results : []) {
+        officialByAnswer.set(`${result.questionId}/${item.playerId}`, item);
+      }
+    }
+    const archivedGame = {
+      id: `game-${savedAtMs}`,
+      savedAtMs,
+      title: `${roomSnapshot.data().title || "Family Quiz"} - ${new Date(savedAtMs).toISOString().slice(0, 10)}`,
+      players: players.map((player, index) => ({
+        rank: index + 1,
+        id: player.id,
+        name: player.name || "",
+        score: Number(player.score || 0),
+        jokerUsed: player.jokerUsed === true,
+        jokerQuestionNumber: player.jokerQuestionNumber || null,
+      })),
+      questions: questions.map((question, index) => ({
+        id: question.id,
+        questionId: question.questionId || question.id,
+        order: index + 1,
+        text: question.text || "",
+        type: question.type || "multiple_choice",
+        options: Array.isArray(question.options) ? question.options.map(optionText) : [],
+        correctIndex: Number(question.correctIndex || 0),
+        maxPoints: Number(question.maxPoints || 0),
+        minPoints: Number(question.minPoints || 0),
+        seconds: Number(question.seconds || 0),
+        answerRevealDelaySeconds: Number(question.answerRevealDelaySeconds || 0),
+      })),
+      answers: answersSnapshot.docs
+        .map((document) => {
+          const answer = { id: document.id, ...document.data() };
+          return {
+            ...answer,
+            ...(officialByAnswer.get(`${answer.questionId}/${answer.playerId}`) || {}),
+          };
+        })
+        .filter((answer) => answer.isPractice !== true),
+      messages: messagesSnapshot.docs.map((document) => {
+        const message = document.data();
+        return {
+          playerName: message.playerName || "",
+          text: message.text || "",
+          createdAtMs: Number(message.createdAtMs || 0),
+        };
+      }),
+      prizeWinners: Array.isArray(roomSnapshot.data().prizeWheel?.winners)
+        ? roomSnapshot.data().prizeWheel.winners
+        : [],
+    };
+    return db.runTransaction(async (transaction) => {
+      const latest = await transaction.get(roomRef);
+      if (latest.data()?.stage === "finished") {
+        return { success: true, status: "already-finished" };
+      }
+      transaction.set(
+        roomRef,
+        {
+          gameHistory: FieldValue.arrayUnion(archivedGame),
+          stage: "finished",
+          finalizingGame: false,
+          finalCountdownUntilMs: null,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true },
+      );
+      return { success: true, status: "finished", archiveId: archivedGame.id };
+    });
+  };
+
   return {
     activateJoker,
     adjustPlayerScore,
     cancelJoker,
     controlQuestion,
+    controlQuizLifecycle,
     deletePlayer,
     getPlayerPrivateDetails,
+    finishQuiz,
     initializeQuiz,
     prepareQuestion,
     recoverPlayer,

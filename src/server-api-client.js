@@ -49,6 +49,9 @@ export const prepareQuestion = (data, options) => serverApiClient.prepareQuestio
 export const startQuestion = (data, options) => serverApiClient.startQuestion(data, options);
 export const controlQuestion = (data, options) => serverApiClient.controlQuestion(data, options);
 export const finalizeQuestion = (data, options) => serverApiClient.finalizeQuestion(data, options);
+export const controlQuizLifecycle = (data, options) =>
+  serverApiClient.controlQuizLifecycle(data, options);
+export const finishQuiz = (data, options) => serverApiClient.finishQuiz(data, options);
 export const adjustPlayerScore = (data, options) =>
   serverApiClient.adjustPlayerScore(data, options);
 export const getPlayerPrivateDetails = (data, options) =>

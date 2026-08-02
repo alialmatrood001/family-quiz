@@ -17,6 +17,7 @@ function serverEnvironment(overrides = {}) {
   return {
     APP_ENVIRONMENT: "staging",
     SERVER_TRANSPORT: "vercel",
+    VERCEL_ENV: "production",
     FIREBASE_ADMIN_AUTH_MODE: "legacy-key",
     FIREBASE_ADMIN_PROJECT_ID: projectId,
     FIREBASE_PRODUCTION_PROJECT_ID: "family-quiz-b7960",
@@ -54,6 +55,11 @@ test("server guard accepts a complete isolated staging profile", () => {
     environment: "staging",
     transport: "vercel",
     projectId: "family-quiz-staging",
+    projectNumber: null,
+    poolId: null,
+    providerId: null,
+    serviceAccountEmail: null,
+    databaseURL: "https://family-quiz-staging.firebaseio.com",
     stagingOrigin: "https://family-quiz-staging.vercel.app",
     authMode: "legacy-key",
   });
@@ -162,7 +168,7 @@ test("client banner and rollback modes remain explicit", () => {
 });
 
 test("operation registry and scoring behavior remain unchanged", () => {
-  assert.equal(Object.keys(SERVER_OPERATIONS).length, 16);
+  assert.equal(Object.keys(SERVER_OPERATIONS).length, 18);
   assert.deepEqual(Object.keys(SERVER_OPERATIONS), [
     "registerPlayer",
     "recoverPlayer",
@@ -174,6 +180,8 @@ test("operation registry and scoring behavior remain unchanged", () => {
     "startQuestion",
     "controlQuestion",
     "finalizeQuestion",
+    "controlQuizLifecycle",
+    "finishQuiz",
     "adjustPlayerScore",
     "getPlayerPrivateDetails",
     "initializeQuiz",

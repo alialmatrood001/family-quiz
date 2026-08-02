@@ -3,6 +3,9 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "engines": {
+    "node": "24.x"
+  },
   "scripts": {
     "dev": "vite",
     "dev:emulators": "npm run emulators",
@@ -44,6 +47,9 @@
     "test:oidc": "node --test functions/tests/unit/vercel-oidc.test.mjs",
     "test:operation11:builds": "node scripts/test-operation11-builds.mjs",
     "test:operation11:all": "npm run test:operation11 && npm run test:operation11:builds",
+    "test:staging-config": "node scripts/validate-staging-release-config.mjs",
+    "test:staging-release-smoke": "firebase emulators:exec --project demo-family-quiz --only auth,functions,firestore,database \"node scripts/assert-vercel-emulator-safety.mjs && node --test --test-concurrency=1 functions/tests/integration/staging-release-smoke.test.mjs\"",
+    "verify:staging-release": "node scripts/verify-staging-release.mjs",
     "vercel:emulator-safety": "node scripts/assert-vercel-emulator-safety.mjs",
     "staging:check": "node scripts/assert-staging-target.mjs",
     "staging:smoke": "firebase emulators:exec --project demo-family-quiz --only auth,functions,firestore,database \"node --test --test-concurrency=1 functions/tests/integration/staging-smoke.test.mjs\"",

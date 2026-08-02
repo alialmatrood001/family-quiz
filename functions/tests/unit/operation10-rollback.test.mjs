@@ -36,5 +36,5 @@ test("rollback is configuration-only and defaults safely to callable", async () 
     await callable.submitAnswer({ roomId: "room" }),
     await vercel.submitAnswer({ roomId: "room" }),
   );
-  assert.equal(Object.keys(SERVER_OPERATIONS).length, 16);
+  assert.equal(Object.keys(SERVER_OPERATIONS).length, 18);
 });

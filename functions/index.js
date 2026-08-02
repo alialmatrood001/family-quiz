@@ -26,6 +26,8 @@ exports.cancelJoker = onCall(asFirebaseCallable(operations.cancelJoker));
 exports.prepareQuestion = onCall(asFirebaseCallable(operations.prepareQuestion));
 exports.startQuestion = onCall(asFirebaseCallable(operations.startQuestion));
 exports.controlQuestion = onCall(asFirebaseCallable(operations.controlQuestion));
+exports.controlQuizLifecycle = onCall(asFirebaseCallable(operations.controlQuizLifecycle));
+exports.finishQuiz = onCall(asFirebaseCallable(operations.finishQuiz));
 exports.adjustPlayerScore = onCall(asFirebaseCallable(operations.adjustPlayerScore));
 exports.getPlayerPrivateDetails = onCall(
   asFirebaseCallable(operations.getPlayerPrivateDetails)

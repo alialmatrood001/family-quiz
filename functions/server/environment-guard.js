@@ -3,6 +3,11 @@
 const PLACEHOLDER_PATTERN = /(replace|placeholder|example|current_existing)/i;
 const EXPECTED_STAGING_PROJECT_ID = "family-quiz-staging";
 const EXPECTED_PRODUCTION_PROJECT_ID = "family-quiz-b7960";
+const EXPECTED_GCP_PROJECT_NUMBER = "110839511131";
+const EXPECTED_WIF_POOL_ID = "vercel-staging";
+const EXPECTED_WIF_PROVIDER_ID = "vercel-staging";
+const EXPECTED_SERVICE_ACCOUNT_EMAIL =
+  "vercel-staging-firebase-admin@family-quiz-staging.iam.gserviceaccount.com";
 const EXPECTED_VERCEL_ISSUER =
   "https://oidc.vercel.com/ali-almatrood-s-projects";
 const EXPECTED_VERCEL_AUDIENCE =
@@ -44,6 +49,11 @@ function validateStagingServerEnvironment(env = process.env) {
   }
   if (String(env.SERVER_TRANSPORT || "").trim() !== "vercel") {
     throw new Error("SERVER_TRANSPORT must be vercel in staging");
+  }
+  if (String(env.VERCEL_ENV || "").trim() !== "production") {
+    throw new Error(
+      "VERCEL_ENV must be production for the isolated Vercel staging project",
+    );
   }
   if (env.GOOGLE_APPLICATION_CREDENTIALS) {
     throw new Error("Service-account files are forbidden in Vercel staging");
@@ -130,25 +140,25 @@ function validateStagingServerEnvironment(env = process.env) {
     if (hasLegacyCredential) {
       throw new Error("Private-key credentials are forbidden in OIDC mode");
     }
-    const googleProject = String(env.GOOGLE_CLOUD_PROJECT || "").trim();
-    if (googleProject && googleProject !== EXPECTED_STAGING_PROJECT_ID) {
+    const googleProject = required(env, "GOOGLE_CLOUD_PROJECT");
+    if (googleProject !== EXPECTED_STAGING_PROJECT_ID) {
       throw new Error("GOOGLE_CLOUD_PROJECT must target the staging project");
     }
     const projectNumber = required(env, "GCP_PROJECT_NUMBER");
-    if (!/^\d{6,20}$/.test(projectNumber)) {
-      throw new Error("GCP_PROJECT_NUMBER must be a numeric project number");
+    if (projectNumber !== EXPECTED_GCP_PROJECT_NUMBER) {
+      throw new Error("GCP_PROJECT_NUMBER does not match the staging project");
     }
-    for (const name of [
-      "GCP_WORKLOAD_IDENTITY_POOL_ID",
-      "GCP_WORKLOAD_IDENTITY_PROVIDER_ID",
-    ]) {
-      if (!/^[a-z][a-z0-9-]{3,31}$/.test(required(env, name))) {
-        throw new Error(`${name} has an invalid identifier`);
-      }
+    const poolId = required(env, "GCP_WORKLOAD_IDENTITY_POOL_ID");
+    if (poolId !== EXPECTED_WIF_POOL_ID) {
+      throw new Error("GCP_WORKLOAD_IDENTITY_POOL_ID does not match staging");
+    }
+    const providerId = required(env, "GCP_WORKLOAD_IDENTITY_PROVIDER_ID");
+    if (providerId !== EXPECTED_WIF_PROVIDER_ID) {
+      throw new Error("GCP_WORKLOAD_IDENTITY_PROVIDER_ID does not match staging");
     }
     const serviceAccountEmail = required(env, "GCP_SERVICE_ACCOUNT_EMAIL");
-    if (!serviceAccountEmail.endsWith(`@${EXPECTED_STAGING_PROJECT_ID}.iam.gserviceaccount.com`)) {
-      throw new Error("GCP_SERVICE_ACCOUNT_EMAIL must belong to the staging project");
+    if (serviceAccountEmail !== EXPECTED_SERVICE_ACCOUNT_EMAIL) {
+      throw new Error("GCP_SERVICE_ACCOUNT_EMAIL does not match the staging service account");
     }
     const oidcClaims = {
       VERCEL_OIDC_ISSUER: EXPECTED_VERCEL_ISSUER,
@@ -167,6 +177,11 @@ function validateStagingServerEnvironment(env = process.env) {
     environment: "staging",
     transport: "vercel",
     projectId,
+    projectNumber: String(env.GCP_PROJECT_NUMBER || "").trim() || null,
+    poolId: String(env.GCP_WORKLOAD_IDENTITY_POOL_ID || "").trim() || null,
+    providerId: String(env.GCP_WORKLOAD_IDENTITY_PROVIDER_ID || "").trim() || null,
+    serviceAccountEmail: String(env.GCP_SERVICE_ACCOUNT_EMAIL || "").trim() || null,
+    databaseURL,
     stagingOrigin,
     authMode,
   });
@@ -174,9 +189,13 @@ function validateStagingServerEnvironment(env = process.env) {
 
 module.exports = {
   EXPECTED_PRODUCTION_PROJECT_ID,
+  EXPECTED_GCP_PROJECT_NUMBER,
+  EXPECTED_SERVICE_ACCOUNT_EMAIL,
   EXPECTED_STAGING_PROJECT_ID,
   EXPECTED_VERCEL_AUDIENCE,
   EXPECTED_VERCEL_ISSUER,
   EXPECTED_VERCEL_SUBJECT,
+  EXPECTED_WIF_POOL_ID,
+  EXPECTED_WIF_PROVIDER_ID,
   validateStagingServerEnvironment,
 };

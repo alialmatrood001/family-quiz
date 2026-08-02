@@ -28,6 +28,7 @@ function oidcEnvironment(overrides = {}) {
   return {
     APP_ENVIRONMENT: "staging",
     SERVER_TRANSPORT: "vercel",
+    VERCEL_ENV: "production",
     FIREBASE_ADMIN_AUTH_MODE: "oidc",
     FIREBASE_ADMIN_PROJECT_ID: "family-quiz-staging",
     FIREBASE_PRODUCTION_PROJECT_ID: "family-quiz-b7960",
@@ -37,11 +38,11 @@ function oidcEnvironment(overrides = {}) {
     PRODUCTION_ORIGIN: "https://family-quiz.com",
     VERCEL_ALLOWED_ORIGINS: "https://family-quiz-staging.vercel.app",
     GOOGLE_CLOUD_PROJECT: "family-quiz-staging",
-    GCP_PROJECT_NUMBER: "123456789012",
+    GCP_PROJECT_NUMBER: "110839511131",
     GCP_WORKLOAD_IDENTITY_POOL_ID: "vercel-staging",
-    GCP_WORKLOAD_IDENTITY_PROVIDER_ID: "vercel-oidc",
+    GCP_WORKLOAD_IDENTITY_PROVIDER_ID: "vercel-staging",
     GCP_SERVICE_ACCOUNT_EMAIL:
-      "vercel-runtime@family-quiz-staging.iam.gserviceaccount.com",
+      "vercel-staging-firebase-admin@family-quiz-staging.iam.gserviceaccount.com",
     VERCEL_OIDC_ISSUER: EXPECTED_VERCEL_ISSUER,
     VERCEL_OIDC_AUDIENCE: EXPECTED_VERCEL_AUDIENCE,
     VERCEL_OIDC_SUBJECT: EXPECTED_VERCEL_SUBJECT,
@@ -110,8 +111,8 @@ test("complete staging OIDC configuration is accepted and builds an in-memory ex
   const options = externalAccountOptions(env);
   assert.equal(
     options.audience,
-    "//iam.googleapis.com/projects/123456789012/locations/global/" +
-      "workloadIdentityPools/vercel-staging/providers/vercel-oidc",
+    "//iam.googleapis.com/projects/110839511131/locations/global/" +
+      "workloadIdentityPools/vercel-staging/providers/vercel-staging",
   );
   assert.equal(options.subject_token_type, SUBJECT_TOKEN_TYPE);
   assert.match(options.service_account_impersonation_url, /generateAccessToken$/);
@@ -122,6 +123,9 @@ test("complete staging OIDC configuration is accepted and builds an in-memory ex
 test("missing, Production, issuer, audience, subject, and mixed credential profiles fail closed", () => {
   const cases = [
     [{ GCP_PROJECT_NUMBER: "" }, /GCP_PROJECT_NUMBER/],
+    [{ VERCEL_ENV: "preview" }, /VERCEL_ENV/],
+    [{ GCP_PROJECT_NUMBER: "123456789012" }, /GCP_PROJECT_NUMBER/],
+    [{ GCP_WORKLOAD_IDENTITY_PROVIDER_ID: "vercel-oidc" }, /PROVIDER_ID/],
     [{ FIREBASE_ADMIN_PROJECT_ID: "family-quiz-b7960" }, /family-quiz-staging/],
     [{ VERCEL_OIDC_ISSUER: "https://oidc.vercel.com/other-team" }, /ISSUER/],
     [{ VERCEL_OIDC_AUDIENCE: "https://vercel.com/other-team" }, /AUDIENCE/],
@@ -148,6 +152,11 @@ test("missing, Production, issuer, audience, subject, and mixed credential profi
 
 test("Vercel token claims are preflight checked without trusting another project or environment", () => {
   assert.deepEqual(validateVercelOidcToken(testToken()), {
+    issuerApproved: true,
+    audienceApproved: true,
+    subjectApproved: true,
+  });
+  assert.deepEqual(validateVercelOidcToken(testToken({ aud: ["unused", EXPECTED_VERCEL_AUDIENCE] })), {
     issuerApproved: true,
     audienceApproved: true,
     subjectApproved: true,

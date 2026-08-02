@@ -18,37 +18,49 @@ const GOOGLE_SCOPES = Object.freeze([
 const requestTokenStorage = new AsyncLocalStorage();
 let cachedCredential;
 
+function identityError(message, diagnosticStage, {
+  stableCode = "server-configuration-error",
+  httpStatus = 500,
+} = {}) {
+  const error = new Error(message);
+  error.stableCode = stableCode;
+  error.httpStatus = httpStatus;
+  error.diagnosticStage = diagnosticStage;
+  return error;
+}
+
 function safeBase64Json(value) {
   try {
     return JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
   } catch {
-    throw new Error("Vercel OIDC token is malformed");
+    throw identityError("Vercel OIDC token is malformed", "oidc-claims");
   }
 }
 
 function validateVercelOidcToken(token, nowSeconds = Math.floor(Date.now() / 1000)) {
   if (typeof token !== "string" || token.length < 32 || token.length > 16_384) {
-    throw new Error("Vercel OIDC token is missing or malformed");
+    throw identityError("Vercel OIDC token is missing or malformed", "oidc-header");
   }
   const parts = token.split(".");
   if (parts.length !== 3) {
-    throw new Error("Vercel OIDC token is malformed");
+    throw identityError("Vercel OIDC token is malformed", "oidc-claims");
   }
   const claims = safeBase64Json(parts[1]);
   if (claims.iss !== EXPECTED_VERCEL_ISSUER) {
-    throw new Error("Vercel OIDC issuer is not approved");
+    throw identityError("Vercel OIDC issuer is not approved", "oidc-claims");
   }
-  if (claims.aud !== EXPECTED_VERCEL_AUDIENCE) {
-    throw new Error("Vercel OIDC audience is not approved");
+  const audiences = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
+  if (!audiences.includes(EXPECTED_VERCEL_AUDIENCE)) {
+    throw identityError("Vercel OIDC audience is not approved", "oidc-claims");
   }
   if (claims.sub !== EXPECTED_VERCEL_SUBJECT) {
-    throw new Error("Vercel OIDC subject is not approved");
+    throw identityError("Vercel OIDC subject is not approved", "oidc-claims");
   }
   if (!Number.isFinite(claims.exp) || claims.exp <= nowSeconds + 30) {
-    throw new Error("Vercel OIDC token is expired or too close to expiry");
+    throw identityError("Vercel OIDC token is expired or too close to expiry", "oidc-claims");
   }
   if (Number.isFinite(claims.nbf) && claims.nbf > nowSeconds + 30) {
-    throw new Error("Vercel OIDC token is not active");
+    throw identityError("Vercel OIDC token is not active", "oidc-claims");
   }
   return Object.freeze({
     issuerApproved: true,
@@ -58,9 +70,12 @@ function validateVercelOidcToken(token, nowSeconds = Math.floor(Date.now() / 100
 }
 
 function oidcTokenFromRequest(req) {
-  const value = req?.headers?.["x-vercel-oidc-token"];
+  const value =
+    req?.headers?.["x-vercel-oidc-token"] ??
+    req?.headers?.["X-Vercel-OIDC-Token"] ??
+    req?.headers?.get?.("x-vercel-oidc-token");
   if (Array.isArray(value) || typeof value !== "string") {
-    throw new Error("Vercel OIDC request token is required");
+    throw identityError("Vercel OIDC request token is required", "oidc-header");
   }
   return value;
 }
@@ -77,16 +92,16 @@ function externalAccountOptions(env) {
     throw new Error("External account configuration requires OIDC mode");
   }
   const providerAudience =
-    `//iam.googleapis.com/projects/${env.GCP_PROJECT_NUMBER}` +
-    `/locations/global/workloadIdentityPools/${env.GCP_WORKLOAD_IDENTITY_POOL_ID}` +
-    `/providers/${env.GCP_WORKLOAD_IDENTITY_PROVIDER_ID}`;
+    `//iam.googleapis.com/projects/${configuration.projectNumber}` +
+    `/locations/global/workloadIdentityPools/${configuration.poolId}` +
+    `/providers/${configuration.providerId}`;
   return Object.freeze({
     audience: providerAudience,
     subject_token_type: SUBJECT_TOKEN_TYPE,
     token_url: "https://sts.googleapis.com/v1/token",
     service_account_impersonation_url:
       "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/" +
-      `${encodeURIComponent(env.GCP_SERVICE_ACCOUNT_EMAIL)}:generateAccessToken`,
+      `${encodeURIComponent(configuration.serviceAccountEmail)}:generateAccessToken`,
     service_account_impersonation: { token_lifetime_seconds: 900 },
     scopes: [...GOOGLE_SCOPES],
   });
@@ -120,16 +135,16 @@ function createWifCredential(
       try {
         response = await authClient.getAccessToken();
       } catch {
-        const error = new Error("Server identity provider is unavailable");
-        error.httpStatus = 503;
-        error.stableCode = "server-authentication-unavailable";
-        throw error;
+        throw identityError("Server identity provider is unavailable", "sts", {
+          httpStatus: 503,
+          stableCode: "server-authentication-unavailable",
+        });
       }
       if (!response?.token) {
-        const error = new Error("Server identity provider returned no credential");
-        error.httpStatus = 503;
-        error.stableCode = "server-authentication-unavailable";
-        throw error;
+        throw identityError("Server identity provider returned no credential", "impersonation", {
+          httpStatus: 503,
+          stableCode: "server-authentication-unavailable",
+        });
       }
       const expiryDate = Number(authClient.credentials?.expiry_date);
       const expiresIn = Number.isFinite(expiryDate)

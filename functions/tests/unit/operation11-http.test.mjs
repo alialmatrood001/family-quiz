@@ -54,6 +54,7 @@ test("staging health reports safe metadata with no-store headers", async (t) => 
   });
   assert.equal(response.headers["cache-control"], "no-store, max-age=0");
   assert.equal(response.headers.pragma, "no-cache");
+  assert.equal(response.headers["access-control-allow-methods"], "GET, OPTIONS");
   assert.doesNotMatch(JSON.stringify(response.body), /must-never-appear|credential|private.key/i);
 });
 
