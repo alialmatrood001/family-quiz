@@ -18,6 +18,41 @@ const {
 } = require("./domain");
 
 const MAX_PLAYERS = 400;
+const QUIZ_INITIALIZATION = Object.freeze({
+  title: "مسابقة قروب العائلة العائلية",
+  subtitle: "من تقديم الأستاذ إبراهيم ال مطرود",
+  stage: "home",
+  currentQuestion: null,
+  currentQuestionIndex: -1,
+  questionSentAt: null,
+  audioStartedAt: null,
+  audioEndedAt: null,
+  mediaStartedAt: null,
+  mediaEndedAt: null,
+  questionIgnored: false,
+  ignoredQuestionIds: {},
+  processedQuestionId: null,
+  resultsCalculated: false,
+  resultsCalculatedQuestionId: null,
+  collectingBonusByPlayer: {},
+  collectingBonusJokerByPlayer: {},
+  collectingBonusPlayerId: null,
+  collectingBonusPoints: 0,
+  rankMovementByPlayer: {},
+  collectingAnswerCorrectByPlayer: {},
+  resultsDisplaySnapshot: null,
+  calculationStatus: null,
+  testMode: {
+    autoAnswerEnabled: false,
+    slowResultsEnabled: false,
+    slowResultsDelayMs: 15000,
+  },
+  activePackageId: "default",
+  activePackageName: "المسابقة الحالية",
+  categoryVotingEnabled: false,
+  categoryVote: null,
+  usedQuestionIds: {},
+});
 
 function sameId(left, right) {
   return String(left || "") === String(right || "");
@@ -40,6 +75,30 @@ function createSecureWriteHandlers({
   runId = () => crypto.randomUUID(),
 }) {
   const serverTimestamp = timestampFactory(now);
+
+  const initializeQuiz = async (request) => {
+    requireAdmin(request.auth);
+    const data = exactInput(request.data, ["roomId"]);
+    const roomId = safeId(data.roomId, "roomId");
+    const roomRef = db.doc(`rooms/${roomId}`);
+    return db.runTransaction(async (transaction) => {
+      const roomSnapshot = await transaction.get(roomRef);
+      transaction.set(
+        roomRef,
+        {
+          ...QUIZ_INITIALIZATION,
+          ...(roomSnapshot.exists ? {} : { createdAt: serverTimestamp() }),
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true },
+      );
+      return {
+        success: true,
+        status: roomSnapshot.exists ? "initialized" : "created",
+        roomId,
+      };
+    });
+  };
 
   const registerPlayer = async (request) => {
     const uid = requireAuthenticated(request.auth);
@@ -1121,6 +1180,7 @@ function createSecureWriteHandlers({
     controlQuestion,
     deletePlayer,
     getPlayerPrivateDetails,
+    initializeQuiz,
     prepareQuestion,
     recoverPlayer,
     registerPlayer,
@@ -1132,4 +1192,4 @@ function createSecureWriteHandlers({
   };
 }
 
-module.exports = { createSecureWriteHandlers, MAX_PLAYERS };
+module.exports = { createSecureWriteHandlers, MAX_PLAYERS, QUIZ_INITIALIZATION };

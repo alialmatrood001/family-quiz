@@ -30,6 +30,7 @@ exports.adjustPlayerScore = onCall(asFirebaseCallable(operations.adjustPlayerSco
 exports.getPlayerPrivateDetails = onCall(
   asFirebaseCallable(operations.getPlayerPrivateDetails)
 );
+exports.initializeQuiz = onCall(asFirebaseCallable(operations.initializeQuiz));
 exports.updatePlayerProfile = onCall(asFirebaseCallable(operations.updatePlayerProfile));
 exports.deletePlayer = onCall(asFirebaseCallable(operations.deletePlayer));
 exports.resetPracticeScores = onCall(asFirebaseCallable(operations.resetPracticeScores));

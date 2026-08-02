@@ -4,6 +4,7 @@ export default createActionEndpoint({
   actions: [
     "adjustPlayerScore",
     "getPlayerPrivateDetails",
+    "initializeQuiz",
     "updatePlayerProfile",
     "deletePlayer",
     "resetPracticeScores",

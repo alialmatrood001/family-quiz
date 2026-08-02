@@ -10,6 +10,10 @@ const getPrivateDetails = createSingleFlightCallable(
   "getPlayerPrivateDetails",
   "تعذر قراءة بيانات المتسابق الخاصة.",
 );
+const initialize = createSingleFlightCallable(
+  "initializeQuiz",
+  "تعذر إنشاء المسابقة. حاول مرة أخرى.",
+);
 const deletePlayer = createSingleFlightCallable("deletePlayer", "تعذر حذف المتسابق.");
 
 export const adjustPlayerScoreSecurely = (data) =>
@@ -20,5 +24,7 @@ export const resetQuizDataSecurely = (data) =>
   resetQuiz(data, `quiz-reset/${data.roomId}/${data.mode}`);
 export const getPlayerPrivateDetailsSecurely = (data) =>
   getPrivateDetails(data, `private/${data.roomId}/${data.playerId}`);
+export const initializeQuizSecurely = (data) =>
+  initialize(data, `quiz-initialize/${data.roomId}`);
 export const deletePlayerSecurely = (data) =>
   deletePlayer(data, `delete/${data.roomId}/${data.playerId}`);

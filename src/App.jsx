@@ -35,9 +35,11 @@ import {
 import {
   adjustPlayerScoreSecurely,
   getPlayerPrivateDetailsSecurely,
+  initializeQuizSecurely,
   resetQuizDataSecurely,
   resetPracticeScoresSecurely,
 } from "./admin-player-actions-client.js";
+import { runQuizInitialization } from "./quiz-initialization-flow.js";
 import { ensureAnonymousPlayerAuth } from "./player-auth.js";
 import "./App.css";
 
@@ -812,46 +814,7 @@ function isVisitorRecord(item) {
 /* Firebase actions */
 
 async function createOrResetRoom() {
-  await setDoc(
-    doc(db, "rooms", ROOM_ID),
-    {
-      title: QUIZ_TITLE,
-      subtitle: QUIZ_SUBTITLE,
-      stage: "home",
-      currentQuestion: null,
-      currentQuestionIndex: -1,
-      questionSentAt: null,
-      audioStartedAt: null,
-      audioEndedAt: null,
-      mediaStartedAt: null,
-      mediaEndedAt: null,
-      questionIgnored: false,
-      ignoredQuestionIds: {},
-      processedQuestionId: null,
-      resultsCalculated: false,
-      resultsCalculatedQuestionId: null,
-      collectingBonusByPlayer: {},
-      collectingBonusJokerByPlayer: {},
-      collectingBonusPlayerId: null,
-      collectingBonusPoints: 0,
-      rankMovementByPlayer: {},
-      collectingAnswerCorrectByPlayer: {},
-      resultsDisplaySnapshot: null,
-      calculationStatus: null,
-      testMode: {
-        autoAnswerEnabled: false,
-        slowResultsEnabled: false,
-        slowResultsDelayMs: 15000,
-      },
-      activePackageId: DEFAULT_PACKAGE_ID,
-      activePackageName: DEFAULT_PACKAGE_NAME,
-      categoryVotingEnabled: false,
-      categoryVote: null,
-      usedQuestionIds: {},
-      updatedAt: serverTimestamp(),
-    },
-    { merge: true }
-  );
+  return initializeQuizSecurely({ roomId: ROOM_ID });
 }
 
 async function resetPlayersAnswersMessages() {
@@ -5797,6 +5760,8 @@ function AdminPanel({ initialView = "control", adminSession }) {
   const answers = useAnswers(room?.currentQuestion?.questionId);
   const allAnswers = useAllAnswers();
   const visitors = useVisitors(canReadQuestionBank);
+  const [roomCreationBusy, setRoomCreationBusy] = useState(false);
+  const [roomCreationError, setRoomCreationError] = useState("");
   const finalization = useQuestionFinalization({
     room,
     canFinalize: adminSession?.isAdmin === true,
@@ -5804,6 +5769,16 @@ function AdminPanel({ initialView = "control", adminSession }) {
   const gameHistory = [...(room?.gameHistory || [])].sort(
     (a, b) => Number(b.savedAtMs || 0) - Number(a.savedAtMs || 0)
   );
+
+  const handleCreateRoom = () => {
+    if (roomCreationBusy) return;
+    void runQuizInitialization({
+      execute: createOrResetRoom,
+      setBusy: setRoomCreationBusy,
+      setError: setRoomCreationError,
+      onSuccess: () => window.location.assign("/?view=control"),
+    });
+  };
 
   // Mutating automations live only behind the authenticated Admin route.
   const alwaysOnAutomations = (
@@ -5834,7 +5809,10 @@ function AdminPanel({ initialView = "control", adminSession }) {
             صفحة العرض
           </a>
 
-          <button onClick={createOrResetRoom}>تهيئة المسابقة</button>
+          <button onClick={handleCreateRoom} disabled={roomCreationBusy}>
+            {roomCreationBusy ? "جاري إنشاء المسابقة..." : "تهيئة المسابقة"}
+          </button>
+          {roomCreationError && <p className="error">{roomCreationError}</p>}
         </div>
 
         <QuestionSettings questions={questions} room={room} questionPackages={questionPackages} allQuestions={allQuestions} />
@@ -5873,7 +5851,10 @@ function AdminPanel({ initialView = "control", adminSession }) {
         <div className="card center-card">
           <h2>تهيئة المسابقة</h2>
           <p className="muted">اضغط الزر لإنشاء غرفة المسابقة لأول مرة.</p>
-          <button onClick={createOrResetRoom}>إنشاء المسابقة</button>
+          <button onClick={handleCreateRoom} disabled={roomCreationBusy}>
+            {roomCreationBusy ? "جاري إنشاء المسابقة..." : "إنشاء المسابقة"}
+          </button>
+          {roomCreationError && <p className="error">{roomCreationError}</p>}
         </div>
       </>
     );

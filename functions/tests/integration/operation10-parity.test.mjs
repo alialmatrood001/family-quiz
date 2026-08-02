@@ -17,7 +17,7 @@ function normalizedCallableCode(error) {
     .replaceAll("_", "-");
 }
 
-test("all fifteen operations share stable error semantics across callable and Vercel", { timeout: 120_000 }, async (t) => {
+test("all sixteen operations share stable error semantics across callable and Vercel", { timeout: 120_000 }, async (t) => {
   const [admin, player] = await Promise.all([
     createEmulatorIdentity({ admin: true, label: "operation10-parity-admin" }),
     createEmulatorIdentity({ label: "operation10-parity-player" }),
@@ -51,7 +51,7 @@ test("all fifteen operations share stable error semantics across callable and Ve
     assert.equal(vercelCode, callableCode, operation);
     rows.push({ operation, callable: callableCode, vercel: vercelCode });
   }
-  assert.equal(rows.length, 15);
+  assert.equal(rows.length, 16);
   console.log(`OPERATION10_PARITY ${JSON.stringify(rows)}`);
 });
 
@@ -96,6 +96,10 @@ async function runSuccessScenario(transport, { adminToken, playerToken }) {
     );
 
   const statuses = {};
+  statuses.initializeQuiz = (
+    await call("initializeQuiz", { roomId }, "admin")
+  ).status;
+  await room.set({ stage: "registration" }, { merge: true });
   const registration = await call("registerPlayer", {
     roomId,
     name: "Parity Player",
@@ -201,7 +205,7 @@ async function runSuccessScenario(transport, { adminToken, playerToken }) {
   };
 }
 
-test("all fifteen operations complete the same logical success scenario on both transports", { timeout: 180_000 }, async (t) => {
+test("all sixteen operations complete the same logical success scenario on both transports", { timeout: 180_000 }, async (t) => {
   const [admin, player] = await Promise.all([
     createEmulatorIdentity({ admin: true, label: "operation10-success-admin" }),
     createEmulatorIdentity({ label: "operation10-success-player" }),
@@ -220,7 +224,7 @@ test("all fifteen operations complete the same logical success scenario on both 
   assert.ok(callable.score >= 110 && callable.score <= 1010);
   assert.ok(vercel.score >= 110 && vercel.score <= 1010);
   assert.ok(Math.abs(callable.score - vercel.score) <= 50);
-  assert.equal(Object.keys(callable.statuses).length, 15);
+  assert.equal(Object.keys(callable.statuses).length, 16);
   assert.deepEqual(callable.publicPrivateFields, []);
   assert.equal(callable.privateHasIdentity, true);
   assert.equal(callable.deletedAfterScenario, true);

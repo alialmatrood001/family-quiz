@@ -15,6 +15,7 @@ export const SERVER_OPERATIONS = Object.freeze({
   finalizeQuestion: { endpoint: "quiz", timeoutMs: FINALIZE_TIMEOUT_MS },
   adjustPlayerScore: { endpoint: "admin" },
   getPlayerPrivateDetails: { endpoint: "admin" },
+  initializeQuiz: { endpoint: "admin" },
   deletePlayer: { endpoint: "admin" },
   resetPracticeScores: { endpoint: "admin" },
   resetQuizData: { endpoint: "admin" },

@@ -171,6 +171,62 @@ test("Vercel API uses the shared server operations safely", { timeout: 90_000 },
     assert.equal(response.body.error.code, "permission-denied");
   });
 
+  await t.test("unauthenticated user cannot initialize the quiz", async () => {
+    const response = await invoke(adminHandler, {
+      action: "initializeQuiz",
+      data: { roomId },
+    });
+    assert.equal(response.statusCode, 401);
+    assert.equal(response.body.error.code, "missing-token");
+  });
+
+  await t.test("non-admin cannot initialize the quiz", async () => {
+    const response = await invoke(adminHandler, {
+      token: playerToken,
+      action: "initializeQuiz",
+      data: { roomId },
+    });
+    assert.equal(response.statusCode, 403);
+    assert.equal(response.body.error.code, "permission-denied");
+  });
+
+  await t.test("admin initializes one room idempotently through Vercel", async () => {
+    await deleteRoom(roomId);
+    const first = await invoke(adminHandler, {
+      token: adminToken,
+      action: "initializeQuiz",
+      data: { roomId },
+    });
+    assert.equal(first.statusCode, 200);
+    assert.equal(first.body.data.status, "created");
+    const firstSnapshot = await roomRef(roomId).get();
+    assert.equal(firstSnapshot.exists, true);
+    assert.equal(firstSnapshot.data().stage, "home");
+    assert.equal(firstSnapshot.data().activePackageId, "default");
+
+    const repeated = await invoke(adminHandler, {
+      token: adminToken,
+      action: "initializeQuiz",
+      data: { roomId },
+    });
+    assert.equal(repeated.statusCode, 200);
+    assert.equal(repeated.body.data.status, "initialized");
+    assert.equal(repeated.body.data.roomId, roomId);
+    const repeatedSnapshot = await roomRef(roomId).get();
+    assert.equal(repeatedSnapshot.exists, true);
+    assert.equal(repeatedSnapshot.data().createdAt.isEqual(firstSnapshot.data().createdAt), true);
+  });
+
+  await t.test("initialization rejects untrusted identity and project fields", async () => {
+    const response = await invoke(adminHandler, {
+      token: adminToken,
+      action: "initializeQuiz",
+      data: { roomId, uid: "forged", projectId: "production" },
+    });
+    assert.equal(response.statusCode, 400);
+    assert.equal(response.body.error.code, "invalid-argument");
+  });
+
   const room = roomRef(roomId);
   await room.set({
     stage: "registration",

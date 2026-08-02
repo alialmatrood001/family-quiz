@@ -53,6 +53,7 @@ export const adjustPlayerScore = (data, options) =>
   serverApiClient.adjustPlayerScore(data, options);
 export const getPlayerPrivateDetails = (data, options) =>
   serverApiClient.getPlayerPrivateDetails(data, options);
+export const initializeQuiz = (data, options) => serverApiClient.initializeQuiz(data, options);
 export const deletePlayer = (data, options) => serverApiClient.deletePlayer(data, options);
 export const resetPracticeScores = (data, options) =>
   serverApiClient.resetPracticeScores(data, options);
