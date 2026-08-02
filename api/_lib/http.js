@@ -27,8 +27,12 @@ const SAFE_MESSAGES = {
   internal: "The operation could not be completed",
   "invalid-token": "Authentication token is invalid",
   "missing-token": "Authentication is required",
+  "server-authentication-unavailable": "Server authentication is temporarily unavailable",
+  "server-configuration-error": "Server authentication configuration is invalid",
   "unknown-action": "The requested action is not supported",
 };
+
+const STAGING_FIREBASE_PROJECT_ID = "family-quiz-staging";
 
 function configuredOrigins() {
   const configured = String(process.env.VERCEL_ALLOWED_ORIGINS || "")
@@ -137,21 +141,147 @@ function parseProtocolBody(req) {
 
 function bearerToken(req) {
   const authorization = String(req.headers?.authorization || "");
+  if (!authorization) {
+    throw httpError(401, "missing-token", SAFE_MESSAGES["missing-token"]);
+  }
   const match = authorization.match(/^Bearer ([^\s]+)$/i);
   if (!match) {
-    throw httpError(401, "missing-token", SAFE_MESSAGES["missing-token"]);
+    throw httpError(401, "invalid-token", SAFE_MESSAGES["invalid-token"]);
   }
   return match[1];
 }
 
-async function verifiedAuth(req) {
-  const token = bearerToken(req);
-  try {
-    const claims = await serverRuntime().auth.verifyIdToken(token);
-    return { uid: claims.uid || claims.sub, token: claims };
-  } catch {
+export function inspectFirebaseIdToken(token, nowSeconds = Math.floor(Date.now() / 1000)) {
+  const parts = typeof token === "string" ? token.split(".") : [];
+  let claims = null;
+  if (parts.length === 3 && parts[0] && parts[1]) {
+    try {
+      claims = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+    } catch {
+      claims = null;
+    }
+  }
+  return Object.freeze({
+    present: typeof token === "string" && token.length > 0,
+    partCount: parts.length,
+    payloadReadable: Boolean(claims && typeof claims === "object" && !Array.isArray(claims)),
+    aud: typeof claims?.aud === "string" ? claims.aud : null,
+    iss: typeof claims?.iss === "string" ? claims.iss : null,
+    subPresent: typeof claims?.sub === "string" && claims.sub.length > 0,
+    adminClaimPresent: claims?.admin === true,
+    expValid: Number.isFinite(claims?.exp) && claims.exp > nowSeconds,
+  });
+}
+
+function expectedFirebaseProjectId(env) {
+  const emulatorMode = Boolean(
+    env.FIRESTORE_EMULATOR_HOST ||
+      env.FIREBASE_AUTH_EMULATOR_HOST ||
+      env.FIREBASE_DATABASE_EMULATOR_HOST,
+  );
+  if (emulatorMode) {
+    return (
+      env.GCLOUD_PROJECT ||
+      env.GOOGLE_CLOUD_PROJECT ||
+      env.FIREBASE_ADMIN_PROJECT_ID ||
+      "demo-family-quiz"
+    );
+  }
+  if (env.APP_ENVIRONMENT === "staging") {
+    if (env.FIREBASE_ADMIN_PROJECT_ID !== STAGING_FIREBASE_PROJECT_ID) {
+      throw httpError(
+        500,
+        "server-configuration-error",
+        SAFE_MESSAGES["server-configuration-error"],
+      );
+    }
+    return STAGING_FIREBASE_PROJECT_ID;
+  }
+  const projectId =
+    env.FIREBASE_ADMIN_PROJECT_ID || env.GCLOUD_PROJECT || env.GOOGLE_CLOUD_PROJECT;
+  if (!projectId) {
+    throw httpError(
+      500,
+      "server-configuration-error",
+      SAFE_MESSAGES["server-configuration-error"],
+    );
+  }
+  return projectId;
+}
+
+function assertFirebaseTokenEnvelope(token, projectId, { allowUnsigned = false } = {}) {
+  const diagnostic = inspectFirebaseIdToken(token);
+  const signaturePresent = typeof token === "string" && Boolean(token.split(".")[2]);
+  if (
+    diagnostic.partCount !== 3 ||
+    !diagnostic.payloadReadable ||
+    (!allowUnsigned && !signaturePresent) ||
+    diagnostic.aud !== projectId ||
+    diagnostic.iss !== `https://securetoken.google.com/${projectId}` ||
+    !diagnostic.subPresent ||
+    !diagnostic.expValid
+  ) {
     throw httpError(401, "invalid-token", SAFE_MESSAGES["invalid-token"]);
   }
+  return diagnostic;
+}
+
+function tokenVerificationError(error) {
+  const code = String(error?.code || "");
+  if (!code || (code.startsWith("auth/") && code !== "auth/internal-error")) {
+    return httpError(401, "invalid-token", SAFE_MESSAGES["invalid-token"]);
+  }
+  return httpError(
+    503,
+    "server-authentication-unavailable",
+    SAFE_MESSAGES["server-authentication-unavailable"],
+  );
+}
+
+export async function verifiedAuth(
+  req,
+  { runtimeFactory = serverRuntime, env = process.env } = {},
+) {
+  const token = bearerToken(req);
+  const emulatorMode = Boolean(
+    env.FIRESTORE_EMULATOR_HOST ||
+      env.FIREBASE_AUTH_EMULATOR_HOST ||
+      env.FIREBASE_DATABASE_EMULATOR_HOST,
+  );
+  const projectId = expectedFirebaseProjectId(env);
+  assertFirebaseTokenEnvelope(token, projectId, { allowUnsigned: emulatorMode });
+  let runtime;
+  try {
+    runtime = runtimeFactory();
+  } catch {
+    throw httpError(
+      500,
+      "server-configuration-error",
+      SAFE_MESSAGES["server-configuration-error"],
+    );
+  }
+  if (runtime?.projectId !== projectId || typeof runtime?.auth?.verifyIdToken !== "function") {
+    throw httpError(
+      500,
+      "server-configuration-error",
+      SAFE_MESSAGES["server-configuration-error"],
+    );
+  }
+  let claims;
+  try {
+    claims = await runtime.auth.verifyIdToken(token);
+  } catch (error) {
+    throw tokenVerificationError(error);
+  }
+  if (
+    claims?.aud !== projectId ||
+    claims?.iss !== `https://securetoken.google.com/${projectId}` ||
+    typeof claims?.sub !== "string" ||
+    !claims.sub
+  ) {
+    throw httpError(401, "invalid-token", SAFE_MESSAGES["invalid-token"]);
+  }
+  return { uid: claims.uid || claims.sub, token: claims };
 }
 
 function normalizeError(error) {

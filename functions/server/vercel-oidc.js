@@ -116,9 +116,20 @@ function createWifCredential(
 
   return Object.freeze({
     async getAccessToken() {
-      const response = await authClient.getAccessToken();
+      let response;
+      try {
+        response = await authClient.getAccessToken();
+      } catch {
+        const error = new Error("Server identity provider is unavailable");
+        error.httpStatus = 503;
+        error.stableCode = "server-authentication-unavailable";
+        throw error;
+      }
       if (!response?.token) {
-        throw new Error("Google Workload Identity Federation returned no access token");
+        const error = new Error("Server identity provider returned no credential");
+        error.httpStatus = 503;
+        error.stableCode = "server-authentication-unavailable";
+        throw error;
       }
       const expiryDate = Number(authClient.credentials?.expiry_date);
       const expiresIn = Number.isFinite(expiryDate)

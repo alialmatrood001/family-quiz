@@ -83,6 +83,16 @@ class FakeIdentityPoolClient {
   }
 }
 
+class FailingIdentityPoolClient {
+  constructor() {
+    this.credentials = {};
+  }
+
+  async getAccessToken() {
+    throw new Error("test-only STS failure");
+  }
+}
+
 test("emulator configuration remains credential-free and demo-only", () => {
   const result = emulatorConfiguration({
     FIRESTORE_EMULATOR_HOST: "127.0.0.1:8080",
@@ -181,6 +191,22 @@ test("Firebase Admin receives a temporary credential through request-local memor
   assert.equal(JSON.stringify(FakeIdentityPoolClient.instances[0].options).includes(token), false);
 });
 
+test("STS or IAM failure becomes a safe server authentication error", async () => {
+  const credential = createWifCredential(oidcEnvironment(), {
+    IdentityPoolClientClass: FailingIdentityPoolClient,
+  });
+  await assert.rejects(
+    runWithVercelOidcRequest(
+      { headers: { "x-vercel-oidc-token": testToken() } },
+      () => credential.getAccessToken(),
+    ),
+    (error) =>
+      error.stableCode === "server-authentication-unavailable" &&
+      error.httpStatus === 503 &&
+      !error.message.includes("STS"),
+  );
+});
+
 test("OIDC token material is never logged and missing request context fails", async () => {
   const token = testToken();
   const output = [];
@@ -192,7 +218,12 @@ test("OIDC token material is never logged and missing request context fails", as
     const credential = createWifCredential(oidcEnvironment(), {
       IdentityPoolClientClass: FakeIdentityPoolClient,
     });
-    await assert.rejects(credential.getAccessToken(), /missing or malformed/);
+    await assert.rejects(
+      credential.getAccessToken(),
+      (error) =>
+        error.stableCode === "server-authentication-unavailable" &&
+        error.httpStatus === 503,
+    );
     assert.throws(
       () =>
         runWithVercelOidcRequest(
