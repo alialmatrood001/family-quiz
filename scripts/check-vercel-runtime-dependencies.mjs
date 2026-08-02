@@ -12,6 +12,8 @@ const requiredModules = [
   "firebase-admin/auth",
   "firebase-admin/database",
   "firebase-admin/firestore",
+  "firebase-functions",
+  "firebase-functions/v2/https",
   "google-auth-library",
 ];
 
@@ -28,7 +30,11 @@ const rootPackage = JSON.parse(await readFile(path.join(root, "package.json"), "
 const functionsPackage = JSON.parse(
   await readFile(path.join(root, "functions", "package.json"), "utf8"),
 );
-for (const dependency of ["firebase-admin", "google-auth-library"]) {
+for (const dependency of [
+  "firebase-admin",
+  "firebase-functions",
+  "google-auth-library",
+]) {
   assert.equal(
     rootPackage.dependencies?.[dependency],
     functionsPackage.dependencies?.[dependency],

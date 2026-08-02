@@ -52,6 +52,7 @@
   "dependencies": {
     "firebase-admin": "^13.6.0",
     "firebase": "^12.13.0",
+    "firebase-functions": "^7.0.0",
     "framer-motion": "^12.40.0",
     "google-auth-library": "^10.7.0",
     "react": "^19.2.6",

@@ -13,7 +13,8 @@ const SERVER_ONLY_MARKERS = [
   "GCP_SERVICE_ACCOUNT_EMAIL",
   "VERCEL_OIDC_TOKEN",
   "BEGIN PRIVATE KEY",
-  "firebase-admin/app",
+  "firebase-admin",
+  "firebase-functions",
   "google-auth-library",
 ];
 
