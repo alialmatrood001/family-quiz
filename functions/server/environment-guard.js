@@ -15,88 +15,210 @@ const EXPECTED_VERCEL_AUDIENCE =
 const EXPECTED_VERCEL_SUBJECT =
   "owner:ali-almatrood-s-projects:project:family-quiz-staging:environment:production";
 
+const SENSITIVE_VARIABLES = new Set([
+  "FIREBASE_ADMIN_PRIVATE_KEY",
+  "GOOGLE_APPLICATION_CREDENTIALS",
+]);
+
+function normalized(value) {
+  return String(value ?? "").trim();
+}
+
+function safeActualValue(name, value) {
+  if (value === undefined) return "absent";
+  if (value === null) return "null";
+  const text = normalized(value);
+  if (!text) return "empty";
+  if (SENSITIVE_VARIABLES.has(name)) return "present";
+  return text;
+}
+
+function guardFailure({
+  message,
+  failedCheck,
+  configurationVariable,
+  expectedValue,
+  actualValue,
+}) {
+  const error = new Error(message);
+  error.diagnosticStage = "environment-guard";
+  error.failedCheck = failedCheck;
+  error.configurationVariable = configurationVariable;
+  error.expectedValue = expectedValue;
+  error.actualValue = actualValue;
+  return error;
+}
+
+function fail(env, name, failedCheck, expectedValue, message, actualValue) {
+  throw guardFailure({
+    message,
+    failedCheck,
+    configurationVariable: name,
+    expectedValue,
+    actualValue: actualValue ?? safeActualValue(name, env[name]),
+  });
+}
+
 function splitList(value) {
-  return String(value || "")
+  return normalized(value)
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
 }
 
-function required(env, name) {
-  const value = String(env[name] || "").trim();
+function required(env, name, { sensitive = false } = {}) {
+  const value = normalized(env[name]);
   if (!value || PLACEHOLDER_PATTERN.test(value)) {
-    throw new Error(`Staging configuration requires ${name}`);
+    fail(
+      env,
+      name,
+      "required-variable",
+      "non-empty, non-placeholder value",
+      `Staging configuration requires ${name}`,
+      sensitive ? (value ? "present-placeholder" : safeActualValue(name, env[name])) : undefined,
+    );
   }
   return value;
 }
 
-function assertHttpsOrigin(value, name) {
+function assertExact(env, name, expectedValue, failedCheck, message) {
+  const value = normalized(env[name]);
+  if (value !== expectedValue) {
+    fail(env, name, failedCheck, expectedValue, message);
+  }
+  return value;
+}
+
+function assertAbsent(env, name, failedCheck, message) {
+  if (normalized(env[name])) {
+    fail(env, name, failedCheck, "absent", message);
+  }
+}
+
+function assertHttpsOrigin(env, name) {
+  const value = required(env, name);
   let parsed;
   try {
     parsed = new URL(value);
   } catch {
-    throw new Error(`${name} must be an absolute HTTPS origin`);
+    fail(
+      env,
+      name,
+      "https-origin",
+      "exact absolute HTTPS origin without wildcard or path",
+      `${name} must be an absolute HTTPS origin`,
+    );
   }
   if (parsed.protocol !== "https:" || parsed.origin !== value || value.includes("*")) {
-    throw new Error(`${name} must be an exact HTTPS origin without wildcards or paths`);
+    fail(
+      env,
+      name,
+      "https-origin",
+      "exact absolute HTTPS origin without wildcard or path",
+      `${name} must be an exact HTTPS origin without wildcards or paths`,
+    );
   }
   return value;
 }
 
 function validateStagingServerEnvironment(env = process.env) {
-  if (String(env.APP_ENVIRONMENT || "").trim() !== "staging") {
-    throw new Error("APP_ENVIRONMENT must be staging");
-  }
-  if (String(env.SERVER_TRANSPORT || "").trim() !== "vercel") {
-    throw new Error("SERVER_TRANSPORT must be vercel in staging");
-  }
-  if (String(env.VERCEL_ENV || "").trim() !== "production") {
-    throw new Error(
-      "VERCEL_ENV must be production for the isolated Vercel staging project",
-    );
-  }
-  if (env.GOOGLE_APPLICATION_CREDENTIALS) {
-    throw new Error("Service-account files are forbidden in Vercel staging");
-  }
+  assertExact(
+    env,
+    "APP_ENVIRONMENT",
+    "staging",
+    "staging-environment",
+    "APP_ENVIRONMENT must be staging",
+  );
+  assertExact(
+    env,
+    "SERVER_TRANSPORT",
+    "vercel",
+    "vercel-transport",
+    "SERVER_TRANSPORT must be vercel in staging",
+  );
+  assertExact(
+    env,
+    "VERCEL_ENV",
+    "production",
+    "isolated-vercel-production-environment",
+    "VERCEL_ENV must be production for the isolated Vercel staging project",
+  );
+  assertAbsent(
+    env,
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "no-service-account-file",
+    "Service-account files are forbidden in Vercel staging",
+  );
 
   const projectId = required(env, "FIREBASE_ADMIN_PROJECT_ID");
   const confirmation = required(env, "CONFIRM_STAGING_PROJECT");
   const productionProjectId = required(env, "FIREBASE_PRODUCTION_PROJECT_ID");
   if (projectId !== EXPECTED_STAGING_PROJECT_ID) {
-    throw new Error(`Staging project must be ${EXPECTED_STAGING_PROJECT_ID}`);
+    fail(
+      env,
+      "FIREBASE_ADMIN_PROJECT_ID",
+      "approved-staging-project",
+      EXPECTED_STAGING_PROJECT_ID,
+      `Staging project must be ${EXPECTED_STAGING_PROJECT_ID}`,
+    );
   }
   if (productionProjectId !== EXPECTED_PRODUCTION_PROJECT_ID) {
-    throw new Error("The known production project guard is invalid");
+    fail(
+      env,
+      "FIREBASE_PRODUCTION_PROJECT_ID",
+      "known-production-project",
+      EXPECTED_PRODUCTION_PROJECT_ID,
+      "The known production project guard is invalid",
+    );
   }
   if (confirmation !== projectId) {
-    throw new Error("CONFIRM_STAGING_PROJECT must exactly match FIREBASE_ADMIN_PROJECT_ID");
+    fail(
+      env,
+      "CONFIRM_STAGING_PROJECT",
+      "confirmed-staging-project",
+      projectId,
+      "CONFIRM_STAGING_PROJECT must exactly match FIREBASE_ADMIN_PROJECT_ID",
+    );
   }
-  if (projectId === productionProjectId) {
-    throw new Error("Staging Firebase project must not equal the production project");
-  }
-  const allowlist = splitList(env.STAGING_PROJECT_ALLOWLIST);
-  if (!projectId.toLowerCase().includes("staging") && !allowlist.includes(projectId)) {
-    throw new Error("Staging project must contain staging or be explicitly allowlisted");
-  }
-
   const databaseURL = required(env, "FIREBASE_DATABASE_URL");
-  const databaseHost = new URL(databaseURL).hostname;
+  let databaseHost;
+  try {
+    databaseHost = new URL(databaseURL).hostname;
+  } catch {
+    fail(
+      env,
+      "FIREBASE_DATABASE_URL",
+      "staging-database-url",
+      "valid Realtime Database URL belonging to family-quiz-staging",
+      "Realtime Database URL is invalid",
+    );
+  }
   const knownDatabaseHost =
     databaseHost === `${projectId}.firebaseio.com` ||
     databaseHost === `${projectId}-default-rtdb.firebaseio.com` ||
     databaseHost === `${projectId}-default-rtdb.firebasedatabase.app` ||
     databaseHost === `${projectId}-default-rtdb.us-central1.firebasedatabase.app`;
   if (!knownDatabaseHost) {
-    throw new Error("Realtime Database URL does not belong to the staging project");
+    fail(
+      env,
+      "FIREBASE_DATABASE_URL",
+      "staging-database-host",
+      `Realtime Database host belonging to ${projectId}`,
+      "Realtime Database URL does not belong to the staging project",
+      databaseHost,
+    );
   }
 
-  const stagingOrigin = assertHttpsOrigin(required(env, "STAGING_ORIGIN"), "STAGING_ORIGIN");
-  const productionOrigin = assertHttpsOrigin(
-    required(env, "PRODUCTION_ORIGIN"),
-    "PRODUCTION_ORIGIN",
-  );
+  const stagingOrigin = assertHttpsOrigin(env, "STAGING_ORIGIN");
+  const productionOrigin = assertHttpsOrigin(env, "PRODUCTION_ORIGIN");
   if (stagingOrigin === productionOrigin) {
-    throw new Error("Staging and production origins must be different");
+    fail(
+      env,
+      "PRODUCTION_ORIGIN",
+      "staging-production-origin-separation",
+      `different from ${stagingOrigin}`,
+      "Staging and production origins must be different",
+    );
   }
   const configuredOrigins = splitList(env.VERCEL_ALLOWED_ORIGINS);
   if (
@@ -104,17 +226,28 @@ function validateStagingServerEnvironment(env = process.env) {
     configuredOrigins[0] !== stagingOrigin ||
     configuredOrigins.includes(productionOrigin)
   ) {
-    throw new Error("VERCEL_ALLOWED_ORIGINS must contain only STAGING_ORIGIN");
+    fail(
+      env,
+      "VERCEL_ALLOWED_ORIGINS",
+      "staging-origin-only",
+      stagingOrigin,
+      "VERCEL_ALLOWED_ORIGINS must contain only STAGING_ORIGIN",
+      configuredOrigins.join(",") || "empty",
+    );
   }
 
   const authMode = required(env, "FIREBASE_ADMIN_AUTH_MODE");
   if (!["oidc", "legacy-key"].includes(authMode)) {
-    throw new Error("FIREBASE_ADMIN_AUTH_MODE must be oidc or legacy-key");
+    fail(
+      env,
+      "FIREBASE_ADMIN_AUTH_MODE",
+      "supported-admin-auth-mode",
+      "oidc or legacy-key",
+      "FIREBASE_ADMIN_AUTH_MODE must be oidc or legacy-key",
+    );
   }
-  const hasLegacyCredential =
-    Boolean(env.FIREBASE_ADMIN_CLIENT_EMAIL) ||
-    Boolean(env.FIREBASE_ADMIN_PRIVATE_KEY);
-  const hasOidcConfiguration = [
+
+  const oidcVariables = [
     "GCP_PROJECT_NUMBER",
     "GCP_WORKLOAD_IDENTITY_POOL_ID",
     "GCP_WORKLOAD_IDENTITY_PROVIDER_ID",
@@ -122,44 +255,86 @@ function validateStagingServerEnvironment(env = process.env) {
     "VERCEL_OIDC_ISSUER",
     "VERCEL_OIDC_AUDIENCE",
     "VERCEL_OIDC_SUBJECT",
-  ].some((name) => Boolean(env[name]));
-  if (hasLegacyCredential && hasOidcConfiguration) {
-    throw new Error("OIDC and legacy Firebase Admin credentials cannot be configured together");
-  }
+  ];
 
   if (authMode === "legacy-key") {
+    for (const name of oidcVariables) {
+      assertAbsent(
+        env,
+        name,
+        "no-mixed-admin-credentials",
+        "OIDC and legacy Firebase Admin credentials cannot be configured together",
+      );
+    }
     const clientEmail = required(env, "FIREBASE_ADMIN_CLIENT_EMAIL");
-    const privateKey = required(env, "FIREBASE_ADMIN_PRIVATE_KEY");
+    const privateKey = required(env, "FIREBASE_ADMIN_PRIVATE_KEY", { sensitive: true });
     if (!clientEmail.endsWith(`@${projectId}.iam.gserviceaccount.com`)) {
-      throw new Error("Firebase Admin client email does not belong to the staging project");
+      fail(
+        env,
+        "FIREBASE_ADMIN_CLIENT_EMAIL",
+        "staging-service-account-domain",
+        `email ending @${projectId}.iam.gserviceaccount.com`,
+        "Firebase Admin client email does not belong to the staging project",
+      );
     }
     if (!privateKey.includes("BEGIN PRIVATE KEY")) {
-      throw new Error("Firebase Admin private key format is invalid");
+      fail(
+        env,
+        "FIREBASE_ADMIN_PRIVATE_KEY",
+        "private-key-format",
+        "valid private-key format",
+        "Firebase Admin private key format is invalid",
+        "present-invalid-format",
+      );
     }
   } else {
-    if (hasLegacyCredential) {
-      throw new Error("Private-key credentials are forbidden in OIDC mode");
-    }
-    const googleProject = required(env, "GOOGLE_CLOUD_PROJECT");
-    if (googleProject !== EXPECTED_STAGING_PROJECT_ID) {
-      throw new Error("GOOGLE_CLOUD_PROJECT must target the staging project");
-    }
-    const projectNumber = required(env, "GCP_PROJECT_NUMBER");
-    if (projectNumber !== EXPECTED_GCP_PROJECT_NUMBER) {
-      throw new Error("GCP_PROJECT_NUMBER does not match the staging project");
-    }
-    const poolId = required(env, "GCP_WORKLOAD_IDENTITY_POOL_ID");
-    if (poolId !== EXPECTED_WIF_POOL_ID) {
-      throw new Error("GCP_WORKLOAD_IDENTITY_POOL_ID does not match staging");
-    }
-    const providerId = required(env, "GCP_WORKLOAD_IDENTITY_PROVIDER_ID");
-    if (providerId !== EXPECTED_WIF_PROVIDER_ID) {
-      throw new Error("GCP_WORKLOAD_IDENTITY_PROVIDER_ID does not match staging");
-    }
-    const serviceAccountEmail = required(env, "GCP_SERVICE_ACCOUNT_EMAIL");
-    if (serviceAccountEmail !== EXPECTED_SERVICE_ACCOUNT_EMAIL) {
-      throw new Error("GCP_SERVICE_ACCOUNT_EMAIL does not match the staging service account");
-    }
+    assertAbsent(
+      env,
+      "FIREBASE_ADMIN_CLIENT_EMAIL",
+      "no-legacy-client-email-in-oidc",
+      "OIDC and legacy Firebase Admin credentials cannot be configured together; private-key credentials are forbidden in OIDC mode",
+    );
+    assertAbsent(
+      env,
+      "FIREBASE_ADMIN_PRIVATE_KEY",
+      "no-legacy-private-key-in-oidc",
+      "OIDC and legacy Firebase Admin credentials cannot be configured together; private-key credentials are forbidden in OIDC mode",
+    );
+    assertExact(
+      env,
+      "GOOGLE_CLOUD_PROJECT",
+      EXPECTED_STAGING_PROJECT_ID,
+      "oidc-google-project",
+      "GOOGLE_CLOUD_PROJECT must target the staging project",
+    );
+    const projectNumber = assertExact(
+      env,
+      "GCP_PROJECT_NUMBER",
+      EXPECTED_GCP_PROJECT_NUMBER,
+      "oidc-project-number",
+      "GCP_PROJECT_NUMBER does not match the staging project",
+    );
+    const poolId = assertExact(
+      env,
+      "GCP_WORKLOAD_IDENTITY_POOL_ID",
+      EXPECTED_WIF_POOL_ID,
+      "oidc-pool-id",
+      "GCP_WORKLOAD_IDENTITY_POOL_ID does not match staging",
+    );
+    const providerId = assertExact(
+      env,
+      "GCP_WORKLOAD_IDENTITY_PROVIDER_ID",
+      EXPECTED_WIF_PROVIDER_ID,
+      "oidc-provider-id",
+      "GCP_WORKLOAD_IDENTITY_PROVIDER_ID does not match staging",
+    );
+    const serviceAccountEmail = assertExact(
+      env,
+      "GCP_SERVICE_ACCOUNT_EMAIL",
+      EXPECTED_SERVICE_ACCOUNT_EMAIL,
+      "oidc-service-account",
+      "GCP_SERVICE_ACCOUNT_EMAIL does not match the staging service account",
+    );
     const oidcClaims = {
       VERCEL_OIDC_ISSUER: EXPECTED_VERCEL_ISSUER,
       VERCEL_OIDC_AUDIENCE: EXPECTED_VERCEL_AUDIENCE,
@@ -168,19 +343,38 @@ function validateStagingServerEnvironment(env = process.env) {
     for (const [name, expected] of Object.entries(oidcClaims)) {
       const value = required(env, name);
       if (value.includes("*") || value !== expected) {
-        throw new Error(`${name} does not match the approved Vercel staging identity`);
+        fail(
+          env,
+          name,
+          "approved-vercel-oidc-identity",
+          expected,
+          `${name} does not match the approved Vercel staging identity`,
+        );
       }
     }
+
+    return Object.freeze({
+      environment: "staging",
+      transport: "vercel",
+      projectId,
+      projectNumber,
+      poolId,
+      providerId,
+      serviceAccountEmail,
+      databaseURL,
+      stagingOrigin,
+      authMode,
+    });
   }
 
   return Object.freeze({
     environment: "staging",
     transport: "vercel",
     projectId,
-    projectNumber: String(env.GCP_PROJECT_NUMBER || "").trim() || null,
-    poolId: String(env.GCP_WORKLOAD_IDENTITY_POOL_ID || "").trim() || null,
-    providerId: String(env.GCP_WORKLOAD_IDENTITY_PROVIDER_ID || "").trim() || null,
-    serviceAccountEmail: String(env.GCP_SERVICE_ACCOUNT_EMAIL || "").trim() || null,
+    projectNumber: null,
+    poolId: null,
+    providerId: null,
+    serviceAccountEmail: null,
     databaseURL,
     stagingOrigin,
     authMode,

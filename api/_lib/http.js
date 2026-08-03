@@ -69,12 +69,27 @@ function safeOidcMetadata(req) {
   };
 }
 
+export function environmentGuardDiagnostic(error) {
+  if (error?.diagnosticStage !== "environment-guard") return null;
+  return Object.freeze({
+    failedCheck: String(error.failedCheck || "unknown-environment-check"),
+    configurationVariable: String(error.configurationVariable || "unknown"),
+    expectedValue: String(error.expectedValue || "unspecified"),
+    actualValue: String(error.actualValue || "unspecified"),
+  });
+}
+
 function logSafeServerFailure(req, error, normalized) {
   if (
     process.env.APP_ENVIRONMENT !== "staging" ||
     process.env.STAGING_AUTH_DIAGNOSTICS === "false" ||
     normalized.status < 500
   ) return;
+  const guardDiagnostic = environmentGuardDiagnostic(error);
+  if (guardDiagnostic) {
+    console.error("staging-server-environment-guard", guardDiagnostic);
+    return;
+  }
   console.error("staging-server-auth-diagnostic", {
     authMode: String(process.env.FIREBASE_ADMIN_AUTH_MODE || "unset"),
     appEnvironment: String(process.env.APP_ENVIRONMENT || "unset"),
