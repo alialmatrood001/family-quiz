@@ -5,7 +5,7 @@ const { getAuth } = require("firebase-admin/auth");
 const { getDatabase } = require("firebase-admin/database");
 const { getFirestore } = require("firebase-admin/firestore");
 const { validateStagingServerEnvironment } = require("./environment-guard");
-const { getWifCredential } = require("./vercel-oidc");
+const { getRequestFirestore } = require("./wif-firestore");
 
 const DEMO_PROJECT_ID = "demo-family-quiz";
 const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
@@ -50,10 +50,7 @@ function emulatorConfiguration(env = process.env) {
   return { projectId, mode: "emulator" };
 }
 
-function productionConfiguration(
-  env = process.env,
-  { oidcCredentialFactory = getWifCredential } = {},
-) {
+function productionConfiguration(env = process.env) {
   const projectId =
     env.FIREBASE_ADMIN_PROJECT_ID ||
     env.GCLOUD_PROJECT ||
@@ -85,7 +82,6 @@ function productionConfiguration(
   if (staging.authMode === "oidc") {
     return {
       projectId,
-      credential: oidcCredentialFactory(env),
       databaseURL: env.FIREBASE_DATABASE_URL,
       mode: "vercel-oidc",
     };
@@ -122,8 +118,13 @@ function getServerFirebase() {
   return {
     app,
     auth: getAuth(app),
-    db: getFirestore(app),
-    getRealtimeDatabase: () => getDatabase(app),
+    db: config.mode === "vercel-oidc" ? getRequestFirestore() : getFirestore(app),
+    getRealtimeDatabase: () => {
+      if (config.mode === "vercel-oidc") {
+        throw new Error("Realtime Database is not configured for request-local Vercel WIF");
+      }
+      return getDatabase(app);
+    },
     mode: config.mode,
     projectId: config.projectId,
   };

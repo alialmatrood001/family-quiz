@@ -4,7 +4,7 @@ const { createFinalizeQuestionHandler } = require("../finalize-question/handler"
 const { createSecureWriteHandlers } = require("../secure-writes/handlers");
 const { getServerFirebase } = require("./firebase-admin");
 
-let cachedOperations;
+const operationsByDatabase = new WeakMap();
 
 function createServerOperations({ db }) {
   const secureWrites = createSecureWriteHandlers({ db });
@@ -15,10 +15,13 @@ function createServerOperations({ db }) {
 }
 
 function getServerOperations() {
-  if (!cachedOperations) {
-    cachedOperations = createServerOperations({ db: getServerFirebase().db });
+  const db = getServerFirebase().db;
+  let operations = operationsByDatabase.get(db);
+  if (!operations) {
+    operations = createServerOperations({ db });
+    operationsByDatabase.set(db, operations);
   }
-  return cachedOperations;
+  return operations;
 }
 
 module.exports = {

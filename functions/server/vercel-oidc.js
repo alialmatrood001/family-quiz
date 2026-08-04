@@ -1,7 +1,6 @@
 "use strict";
 
 const { AsyncLocalStorage } = require("node:async_hooks");
-const { IdentityPoolClient } = require("google-auth-library");
 const {
   EXPECTED_VERCEL_AUDIENCE,
   EXPECTED_VERCEL_ISSUER,
@@ -16,7 +15,6 @@ const GOOGLE_SCOPES = Object.freeze([
   "https://www.googleapis.com/auth/userinfo.email",
 ]);
 const requestTokenStorage = new AsyncLocalStorage();
-let cachedCredential;
 
 function identityError(message, diagnosticStage, {
   stableCode = "server-configuration-error",
@@ -83,7 +81,13 @@ function oidcTokenFromRequest(req) {
 function runWithVercelOidcRequest(req, callback) {
   const token = oidcTokenFromRequest(req);
   validateVercelOidcToken(token);
-  return requestTokenStorage.run(token, callback);
+  return requestTokenStorage.run(Object.freeze({ token }), callback);
+}
+
+function currentVercelOidcToken() {
+  const token = requestTokenStorage.getStore()?.token;
+  validateVercelOidcToken(token);
+  return token;
 }
 
 function externalAccountOptions(env) {
@@ -107,73 +111,12 @@ function externalAccountOptions(env) {
   });
 }
 
-function createWifCredential(
-  env = process.env,
-  { IdentityPoolClientClass = IdentityPoolClient } = {},
-) {
-  const options = externalAccountOptions(env);
-  const authClient = new IdentityPoolClientClass({
-    ...options,
-    subject_token_supplier: {
-      async getSubjectToken(context) {
-        if (
-          context.audience !== options.audience ||
-          context.subjectTokenType !== SUBJECT_TOKEN_TYPE
-        ) {
-          throw new Error("Google external account requested an unexpected token contract");
-        }
-        const token = requestTokenStorage.getStore();
-        validateVercelOidcToken(token);
-        return token;
-      },
-    },
-  });
-
-  return Object.freeze({
-    async getAccessToken() {
-      let response;
-      try {
-        response = await authClient.getAccessToken();
-      } catch {
-        throw identityError("Server identity provider is unavailable", "sts", {
-          httpStatus: 503,
-          stableCode: "server-authentication-unavailable",
-        });
-      }
-      if (!response?.token) {
-        throw identityError("Server identity provider returned no credential", "impersonation", {
-          httpStatus: 503,
-          stableCode: "server-authentication-unavailable",
-        });
-      }
-      const expiryDate = Number(authClient.credentials?.expiry_date);
-      const expiresIn = Number.isFinite(expiryDate)
-        ? Math.max(1, Math.floor((expiryDate - Date.now()) / 1000))
-        : 300;
-      return { access_token: response.token, expires_in: expiresIn };
-    },
-  });
-}
-
-function getWifCredential(env = process.env, dependencies) {
-  if (!cachedCredential) {
-    cachedCredential = createWifCredential(env, dependencies);
-  }
-  return cachedCredential;
-}
-
-function resetWifCredentialForTests() {
-  cachedCredential = undefined;
-}
-
 module.exports = {
   GOOGLE_SCOPES,
   SUBJECT_TOKEN_TYPE,
-  createWifCredential,
+  currentVercelOidcToken,
   externalAccountOptions,
-  getWifCredential,
   oidcTokenFromRequest,
-  resetWifCredentialForTests,
   runWithVercelOidcRequest,
   validateVercelOidcToken,
 };

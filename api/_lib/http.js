@@ -33,42 +33,6 @@ const SAFE_MESSAGES = {
 };
 
 const STAGING_FIREBASE_PROJECT_ID = "family-quiz-staging";
-const CONFIGURATION_VARIABLES = Object.freeze([
-  "APP_ENVIRONMENT",
-  "SERVER_TRANSPORT",
-  "VERCEL_ENV",
-  "FIREBASE_ADMIN_AUTH_MODE",
-  "FIREBASE_ADMIN_PROJECT_ID",
-  "FIREBASE_PRODUCTION_PROJECT_ID",
-  "CONFIRM_STAGING_PROJECT",
-  "FIREBASE_DATABASE_URL",
-  "STAGING_ORIGIN",
-  "PRODUCTION_ORIGIN",
-  "VERCEL_ALLOWED_ORIGINS",
-  "GOOGLE_CLOUD_PROJECT",
-  "GCP_PROJECT_NUMBER",
-  "GCP_WORKLOAD_IDENTITY_POOL_ID",
-  "GCP_WORKLOAD_IDENTITY_PROVIDER_ID",
-  "GCP_SERVICE_ACCOUNT_EMAIL",
-  "VERCEL_OIDC_ISSUER",
-  "VERCEL_OIDC_AUDIENCE",
-  "VERCEL_OIDC_SUBJECT",
-]);
-
-function safeConfigurationVariable(error) {
-  const message = String(error?.message || "");
-  return CONFIGURATION_VARIABLES.find((name) => message.includes(name)) || null;
-}
-
-function safeOidcMetadata(req) {
-  const value = req?.headers?.["x-vercel-oidc-token"];
-  const token = typeof value === "string" ? value : "";
-  return {
-    headerPresent: token.length > 0,
-    jwtPartCount: token ? token.split(".").length : 0,
-  };
-}
-
 export function environmentGuardDiagnostic(error) {
   if (error?.diagnosticStage !== "environment-guard") return null;
   return Object.freeze({
@@ -79,32 +43,70 @@ export function environmentGuardDiagnostic(error) {
   });
 }
 
-function logSafeServerFailure(req, error, normalized) {
+function copySafeDiagnostic(source, target) {
+  for (const name of [
+    "diagnosticStage",
+    "failedCheck",
+    "configurationVariable",
+    "expectedValue",
+    "actualValue",
+  ]) {
+    if (typeof source?.[name] === "string" && source[name]) {
+      target[name] = source[name];
+    }
+  }
+  return target;
+}
+
+function runtimeInitializationDiagnostic(error) {
+  const code = String(error?.code || "");
+  if (code === "firestore/invalid-credential") {
+    return Object.freeze({
+      diagnosticStage: "firebase-admin-initialization",
+      failedCheck: "firebase-admin-firestore-credential-compatibility",
+      configurationVariable: "FIREBASE_ADMIN_AUTH_MODE",
+      expectedValue: "Firebase Admin credential compatible with Firestore",
+      actualValue: "firestore/invalid-credential",
+    });
+  }
+  return Object.freeze({
+    diagnosticStage: "firebase-admin-initialization",
+    failedCheck: "firebase-admin-runtime-initialization",
+    configurationVariable: "FIREBASE_ADMIN_AUTH_MODE",
+    expectedValue: "successful Firebase Admin initialization",
+    actualValue: code || "initialization-failed",
+  });
+}
+
+export function safeServerFailureDiagnostic(error, normalized) {
+  const guardDiagnostic = environmentGuardDiagnostic(error);
+  if (guardDiagnostic) {
+    return Object.freeze({
+      failedStage: "environment-guard",
+      ...guardDiagnostic,
+      errorCode: normalized.code,
+    });
+  }
+  return Object.freeze({
+    failedStage: String(error?.diagnosticStage || "unknown"),
+    failedCheck: String(error?.failedCheck || "server-runtime-failure"),
+    configurationVariable: String(error?.configurationVariable || "not-applicable"),
+    expectedValue: String(error?.expectedValue || "successful server request"),
+    actualValue: String(error?.actualValue || "failed"),
+    errorCode: normalized.code,
+  });
+}
+
+function logSafeServerFailure(error, normalized) {
   if (
     process.env.APP_ENVIRONMENT !== "staging" ||
     process.env.STAGING_AUTH_DIAGNOSTICS === "false" ||
     normalized.status < 500
   ) return;
-  const guardDiagnostic = environmentGuardDiagnostic(error);
-  if (guardDiagnostic) {
-    console.error("staging-server-environment-guard", guardDiagnostic);
-    return;
-  }
-  console.error("staging-server-auth-diagnostic", {
-    authMode: String(process.env.FIREBASE_ADMIN_AUTH_MODE || "unset"),
-    appEnvironment: String(process.env.APP_ENVIRONMENT || "unset"),
-    firebaseProjectId: String(process.env.FIREBASE_ADMIN_PROJECT_ID || "unset"),
-    projectNumber: String(process.env.GCP_PROJECT_NUMBER || "unset"),
-    poolId: String(process.env.GCP_WORKLOAD_IDENTITY_POOL_ID || "unset"),
-    providerId: String(process.env.GCP_WORKLOAD_IDENTITY_PROVIDER_ID || "unset"),
-    serviceAccountDomain: String(process.env.GCP_SERVICE_ACCOUNT_EMAIL || "").split("@")[1] || "unset",
-    ...safeOidcMetadata(req),
-    failedStage:
-      error?.diagnosticStage ||
-      (normalized.code === "server-configuration-error" ? "environment-guard" : "unknown"),
-    configurationVariable: safeConfigurationVariable(error),
-    errorCode: normalized.code,
-  });
+  console.error(
+    "staging-server-auth-diagnostic",
+    safeServerFailureDiagnostic(error, normalized),
+  );
 }
 
 function configuredOrigins() {
@@ -333,8 +335,11 @@ export async function verifiedAuth(
       SAFE_MESSAGES["server-configuration-error"],
     );
     wrapped.cause = error;
-    wrapped.diagnosticStage = error?.diagnosticStage || "environment-guard";
-    wrapped.configurationVariable = safeConfigurationVariable(error);
+    if (error?.diagnosticStage === "environment-guard") {
+      copySafeDiagnostic(error, wrapped);
+    } else {
+      copySafeDiagnostic(runtimeInitializationDiagnostic(error), wrapped);
+    }
     throw wrapped;
   }
   if (runtime?.projectId !== projectId || typeof runtime?.auth?.verifyIdToken !== "function") {
@@ -362,6 +367,13 @@ export async function verifiedAuth(
 }
 
 function normalizeError(error) {
+  if (error?.diagnosticStage === "environment-guard") {
+    return {
+      status: 500,
+      code: "server-configuration-error",
+      message: SAFE_MESSAGES["server-configuration-error"],
+    };
+  }
   if (error?.stableCode && error?.httpStatus) {
     return {
       status: error.httpStatus,
@@ -378,7 +390,12 @@ function normalizeError(error) {
   };
 }
 
-export function createActionEndpoint({ actions, adminOnly = false }) {
+export function createActionEndpoint({
+  actions,
+  adminOnly = false,
+  runtimeFactory = serverRuntime,
+  requestIdentity = withServerRequestIdentity,
+}) {
   const allowed = new Set(actions);
   return async function actionEndpoint(req, res) {
     try {
@@ -395,12 +412,12 @@ export function createActionEndpoint({ actions, adminOnly = false }) {
       if (!allowed.has(action)) {
         throw httpError(404, "unknown-action", SAFE_MESSAGES["unknown-action"]);
       }
-      const result = await withServerRequestIdentity(req, async () => {
-        const auth = await verifiedAuth(req);
+      const result = await requestIdentity(req, async () => {
+        const auth = await verifiedAuth(req, { runtimeFactory });
         if (adminOnly && auth.token?.admin !== true) {
           throw httpError(403, "permission-denied", "Admin permission is required");
         }
-        const operation = serverRuntime().operations[action];
+        const operation = runtimeFactory().operations[action];
         if (typeof operation !== "function") {
           throw httpError(404, "unknown-action", SAFE_MESSAGES["unknown-action"]);
         }
@@ -409,7 +426,7 @@ export function createActionEndpoint({ actions, adminOnly = false }) {
       send(res, 200, { ok: true, data: result ?? {} });
     } catch (error) {
       const normalized = normalizeError(error);
-      logSafeServerFailure(req, error?.cause || error, normalized);
+      logSafeServerFailure(error, normalized);
       send(res, normalized.status, {
         ok: false,
         error: {

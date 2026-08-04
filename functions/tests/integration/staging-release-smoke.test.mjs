@@ -1,15 +1,31 @@
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { verifiedAuth } from "../../../api/_lib/http.js";
 import { SERVER_OPERATIONS } from "../../../src/server-api-core.js";
 import {
   createEmulatorIdentity,
+  db,
   deleteEmulatorIdentity,
   deleteRoom,
   roomRef,
   signInEmulatorIdentity,
 } from "../helpers/emulator.mjs";
 import { invokeApi } from "../helpers/local-vercel-api.mjs";
+
+const require = createRequire(import.meta.url);
+const { createServerOperations } = require("../../server/operations.js");
+const {
+  EXPECTED_VERCEL_AUDIENCE,
+  EXPECTED_VERCEL_ISSUER,
+  EXPECTED_VERCEL_SUBJECT,
+} = require("../../server/environment-guard.js");
+const { runWithVercelOidcRequest } = require("../../server/vercel-oidc.js");
+const {
+  getRequestFirestore,
+  runWithWifFirestoreRequest,
+} = require("../../server/wif-firestore.js");
 
 async function call(operation, data, token) {
   const response = await invokeApi(SERVER_OPERATIONS[operation].endpoint, {
@@ -25,6 +41,140 @@ async function call(operation, data, token) {
   }
   return response.body.data;
 }
+
+function stagingEnvironment() {
+  return {
+    APP_ENVIRONMENT: "staging",
+    SERVER_TRANSPORT: "vercel",
+    VERCEL_ENV: "production",
+    FIREBASE_ADMIN_AUTH_MODE: "oidc",
+    FIREBASE_ADMIN_PROJECT_ID: "family-quiz-staging",
+    FIREBASE_PRODUCTION_PROJECT_ID: "family-quiz-b7960",
+    CONFIRM_STAGING_PROJECT: "family-quiz-staging",
+    FIREBASE_DATABASE_URL:
+      "https://family-quiz-staging-default-rtdb.firebaseio.com",
+    STAGING_ORIGIN: "https://family-quiz-staging.vercel.app",
+    VERCEL_ALLOWED_ORIGINS: "https://family-quiz-staging.vercel.app",
+    PRODUCTION_ORIGIN: "https://family-quiz-psi.vercel.app",
+    GOOGLE_CLOUD_PROJECT: "family-quiz-staging",
+    GCP_PROJECT_NUMBER: "110839511131",
+    GCP_WORKLOAD_IDENTITY_POOL_ID: "vercel-staging",
+    GCP_WORKLOAD_IDENTITY_PROVIDER_ID: "vercel-staging",
+    GCP_SERVICE_ACCOUNT_EMAIL:
+      "vercel-staging-firebase-admin@family-quiz-staging.iam.gserviceaccount.com",
+    VERCEL_OIDC_ISSUER: EXPECTED_VERCEL_ISSUER,
+    VERCEL_OIDC_AUDIENCE: EXPECTED_VERCEL_AUDIENCE,
+    VERCEL_OIDC_SUBJECT: EXPECTED_VERCEL_SUBJECT,
+  };
+}
+
+function jwt(payload, signature = "test-signature") {
+  const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url");
+  const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  return `${header}.${body}.${signature}`;
+}
+
+class MockedWifFirestore {
+  constructor(settings) {
+    this.settings = settings;
+  }
+  doc(...args) {
+    return db.doc(...args);
+  }
+  runTransaction(...args) {
+    return db.runTransaction(...args);
+  }
+  bulkWriter(...args) {
+    return db.bulkWriter(...args);
+  }
+  async terminate() {}
+}
+
+test("mocked request-local WIF completes Auth, initialize, answer, finalize, and finish", { timeout: 120_000 }, async (t) => {
+  const roomId = "staging-wif-smoke";
+  const questionId = "staging-wif-question";
+  t.after(() => deleteRoom(roomId));
+  const now = Math.floor(Date.now() / 1000);
+  const adminClaims = {
+    aud: "family-quiz-staging",
+    iss: "https://securetoken.google.com/family-quiz-staging",
+    sub: "wif-smoke-admin",
+    uid: "wif-smoke-admin",
+    admin: true,
+    iat: now - 30,
+    exp: now + 600,
+  };
+  const firebaseToken = jwt(adminClaims);
+  const vercelToken = jwt({
+    iss: EXPECTED_VERCEL_ISSUER,
+    aud: EXPECTED_VERCEL_AUDIENCE,
+    sub: EXPECTED_VERCEL_SUBJECT,
+    iat: now - 30,
+    exp: now + 600,
+  }, "vercel-test-signature");
+  const env = stagingEnvironment();
+
+  await runWithVercelOidcRequest(
+    { headers: { "x-vercel-oidc-token": vercelToken } },
+    () => runWithWifFirestoreRequest(
+      env,
+      async () => {
+        const requestDb = getRequestFirestore();
+        assert.ok(requestDb instanceof MockedWifFirestore);
+        assert.equal(requestDb.settings.projectId, "family-quiz-staging");
+        const adminAuth = await verifiedAuth(
+          { headers: { authorization: `Bearer ${firebaseToken}` } },
+          {
+            env,
+            runtimeFactory: () => ({
+              projectId: "family-quiz-staging",
+              auth: { verifyIdToken: async () => adminClaims },
+            }),
+          },
+        );
+        assert.equal(adminAuth.token.admin, true);
+        const playerAuth = { uid: "wif-smoke-player", token: { sub: "wif-smoke-player" } };
+        const operations = createServerOperations({ db: requestDb });
+        const admin = (action, data) => operations[action]({ auth: adminAuth, data });
+        const player = (action, data) => operations[action]({ auth: playerAuth, data });
+
+        assert.equal((await admin("initializeQuiz", { roomId })).status, "created");
+        await admin("controlQuizLifecycle", { roomId, action: "open-registration" });
+        await db.doc(`rooms/${roomId}/questions/${questionId}`).set({
+          text: "Mocked WIF question",
+          options: ["A", "B"],
+          correctIndex: 0,
+          maxPoints: 1000,
+          minPoints: 100,
+          seconds: 30,
+          answerRevealDelaySeconds: 0,
+        });
+        const registration = await player("registerPlayer", {
+          roomId,
+          name: "WIF Player",
+          emoji: "W",
+          fullName: "WIF Private Player",
+          phone: "0500000992",
+        });
+        await admin("controlQuizLifecycle", { roomId, action: "start-competition" });
+        await admin("prepareQuestion", { roomId, questionId, questionIndex: 0 });
+        await admin("startQuestion", { roomId, questionId });
+        assert.equal((await player("submitAnswer", {
+          roomId,
+          questionId,
+          playerId: registration.playerId,
+          selectedIndex: 0,
+        })).status, "received");
+        await admin("controlQuestion", { roomId, questionId, action: "reveal" });
+        assert.equal((await admin("finalizeQuestion", { roomId, questionId })).status, "finalized");
+        assert.equal((await admin("finishQuiz", { roomId })).status, "finished");
+      },
+      { FirestoreClass: MockedWifFirestore },
+    ),
+  );
+
+  assert.equal((await roomRef(roomId).get()).data().stage, "finished");
+});
 
 test("mocked Staging release completes the admin and player contest lifecycle", { timeout: 120_000 }, async (t) => {
   const roomId = "staging-release-smoke";

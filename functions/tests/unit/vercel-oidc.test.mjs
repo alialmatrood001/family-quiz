@@ -16,10 +16,7 @@ const {
 const {
   GOOGLE_SCOPES,
   SUBJECT_TOKEN_TYPE,
-  createWifCredential,
   externalAccountOptions,
-  getWifCredential,
-  resetWifCredentialForTests,
   runWithVercelOidcRequest,
   validateVercelOidcToken,
 } = require("../../server/vercel-oidc.js");
@@ -64,34 +61,6 @@ function testToken(overrides = {}) {
     }),
   ).toString("base64url");
   return `${header}.${payload}.test-signature`;
-}
-
-class FakeIdentityPoolClient {
-  static instances = [];
-
-  constructor(options) {
-    this.options = options;
-    this.credentials = { expiry_date: Date.now() + 600_000 };
-    FakeIdentityPoolClient.instances.push(this);
-  }
-
-  async getAccessToken() {
-    await this.options.subject_token_supplier.getSubjectToken({
-      audience: this.options.audience,
-      subjectTokenType: this.options.subject_token_type,
-    });
-    return { token: "test-temporary-google-access-token" };
-  }
-}
-
-class FailingIdentityPoolClient {
-  constructor() {
-    this.credentials = {};
-  }
-
-  async getAccessToken() {
-    throw new Error("test-only STS failure");
-  }
 }
 
 test("emulator configuration remains credential-free and demo-only", () => {
@@ -180,43 +149,7 @@ test("Vercel token claims are preflight checked without trusting another project
   );
 });
 
-test("Firebase Admin receives a temporary credential through request-local memory only", async () => {
-  FakeIdentityPoolClient.instances = [];
-  const credential = createWifCredential(oidcEnvironment(), {
-    IdentityPoolClientClass: FakeIdentityPoolClient,
-  });
-  const token = testToken();
-  const access = await runWithVercelOidcRequest(
-    { headers: { "x-vercel-oidc-token": token } },
-    () => credential.getAccessToken(),
-  );
-  assert.equal(access.access_token, "test-temporary-google-access-token");
-  assert.ok(access.expires_in > 0 && access.expires_in <= 600);
-  assert.equal(FakeIdentityPoolClient.instances.length, 1);
-  assert.equal(
-    FakeIdentityPoolClient.instances[0].options.subject_token_supplier !== undefined,
-    true,
-  );
-  assert.equal(JSON.stringify(FakeIdentityPoolClient.instances[0].options).includes(token), false);
-});
-
-test("STS or IAM failure becomes a safe server authentication error", async () => {
-  const credential = createWifCredential(oidcEnvironment(), {
-    IdentityPoolClientClass: FailingIdentityPoolClient,
-  });
-  await assert.rejects(
-    runWithVercelOidcRequest(
-      { headers: { "x-vercel-oidc-token": testToken() } },
-      () => credential.getAccessToken(),
-    ),
-    (error) =>
-      error.stableCode === "server-authentication-unavailable" &&
-      error.httpStatus === 503 &&
-      !error.message.includes("STS"),
-  );
-});
-
-test("OIDC token material is never logged and missing request context fails", async () => {
+test("OIDC token material is never logged", () => {
   const token = testToken();
   const output = [];
   const originalLog = console.log;
@@ -224,15 +157,6 @@ test("OIDC token material is never logged and missing request context fails", as
   console.log = (...values) => output.push(values.join(" "));
   console.error = (...values) => output.push(values.join(" "));
   try {
-    const credential = createWifCredential(oidcEnvironment(), {
-      IdentityPoolClientClass: FakeIdentityPoolClient,
-    });
-    await assert.rejects(
-      credential.getAccessToken(),
-      (error) =>
-        error.stableCode === "server-authentication-unavailable" &&
-        error.httpStatus === 503,
-    );
     assert.throws(
       () =>
         runWithVercelOidcRequest(
@@ -248,24 +172,9 @@ test("OIDC token material is never logged and missing request context fails", as
   assert.doesNotMatch(output.join("\n"), new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });
 
-test("OIDC credential and Firebase initializer configuration remain singleton and network-free", () => {
-  resetWifCredentialForTests();
-  FakeIdentityPoolClient.instances = [];
-  const first = getWifCredential(oidcEnvironment(), {
-    IdentityPoolClientClass: FakeIdentityPoolClient,
-  });
-  const second = getWifCredential(oidcEnvironment(), {
-    IdentityPoolClientClass: FakeIdentityPoolClient,
-  });
-  assert.equal(first, second);
-  assert.equal(FakeIdentityPoolClient.instances.length, 1);
-
-  const firebaseCredential = { getAccessToken: async () => assert.fail("network not allowed") };
-  const config = productionConfiguration(oidcEnvironment(), {
-    oidcCredentialFactory: () => firebaseCredential,
-  });
+test("Firebase Auth initializer stays keyless and does not receive the unsupported custom credential", () => {
+  const config = productionConfiguration(oidcEnvironment());
   assert.equal(config.mode, "vercel-oidc");
   assert.equal(config.projectId, "family-quiz-staging");
-  assert.equal(config.credential, firebaseCredential);
-  resetWifCredentialForTests();
+  assert.equal(Object.hasOwn(config, "credential"), false);
 });

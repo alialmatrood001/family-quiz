@@ -7,6 +7,9 @@ const { getServerOperations } = require("../../functions/server/operations.js");
 const {
   runWithVercelOidcRequest,
 } = require("../../functions/server/vercel-oidc.js");
+const {
+  runWithWifFirestoreRequest,
+} = require("../../functions/server/wif-firestore.js");
 
 export function serverRuntime() {
   const firebase = getServerFirebase();
@@ -27,7 +30,9 @@ export function withServerRequestIdentity(req, callback) {
     process.env.APP_ENVIRONMENT === "staging" &&
     process.env.FIREBASE_ADMIN_AUTH_MODE === "oidc"
   ) {
-    return runWithVercelOidcRequest(req, callback);
+    return runWithVercelOidcRequest(req, () =>
+      runWithWifFirestoreRequest(process.env, callback),
+    );
   }
   return callback();
 }

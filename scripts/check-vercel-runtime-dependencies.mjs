@@ -8,6 +8,7 @@ import process from "node:process";
 const root = path.resolve(import.meta.dirname, "..");
 const rootRequire = createRequire(path.join(root, "package.json"));
 const requiredModules = [
+  "@google-cloud/firestore",
   "firebase-admin/app",
   "firebase-admin/auth",
   "firebase-admin/database",
@@ -33,6 +34,7 @@ const functionsPackage = JSON.parse(
 assert.equal(rootPackage.engines?.node, "24.x", "Vercel runtime must be pinned to Node 24.x");
 assert.equal(functionsPackage.engines?.node, "24", "Callable runtime must remain on Node 24");
 for (const dependency of [
+  "@google-cloud/firestore",
   "firebase-admin",
   "firebase-functions",
   "google-auth-library",
