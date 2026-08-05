@@ -48,6 +48,11 @@ import {
   startFirestoreListener,
 } from "./firestore-read-boundary.js";
 import { ensureAnonymousPlayerAuth } from "./player-auth.js";
+import {
+  readStoredPlayerSession,
+  restoreAuthenticatedPlayerSession,
+  writeStoredPlayerSession,
+} from "./player-session.js";
 import "./App.css";
 
 const ROOM_ID = "family-quiz-001";
@@ -5984,6 +5989,7 @@ function JoinForm({ onJoined, room }) {
     setError("");
 
     try {
+      const authenticatedUser = await ensureAnonymousPlayerAuth();
       const result = await registerPlayerSecurely({
         roomId: ROOM_ID,
         name: cleanNickname,
@@ -5992,7 +5998,10 @@ function JoinForm({ onJoined, room }) {
         phone: cleanPhone,
       });
 
-      localStorage.setItem("familyQuizPlayerId", result.playerId);
+      writeStoredPlayerSession(localStorage, {
+        playerId: result.playerId,
+        authUid: authenticatedUser.uid,
+      });
       localStorage.removeItem("familyQuizPlayerName");
       localStorage.removeItem("familyQuizPlayerEmoji");
       localStorage.removeItem("familyQuizPlayerFullName");
@@ -6542,10 +6551,12 @@ function PlayerPanel() {
   const answers = useAnswers(room?.currentQuestion?.questionId);
 
   const [playerId, setPlayerId] = useState(() =>
-    localStorage.getItem("familyQuizPlayerId")
+    readStoredPlayerSession(localStorage).playerId || null
   );
 
   const [playerName, setPlayerName] = useState("");
+  const [playerRecovery, setPlayerRecovery] = useState({ status: "checking", message: "" });
+  const [playerRecoveryAttempt, setPlayerRecoveryAttempt] = useState(0);
 
   const [answeredQuestionId, setAnsweredQuestionId] = useState(null);
   const [selectedIndex, setSelectedIndex] = useState(null);
@@ -6586,27 +6597,54 @@ function PlayerPanel() {
 
   useEffect(() => {
     let cancelled = false;
+    const storedSession = readStoredPlayerSession(localStorage);
     localStorage.removeItem("familyQuizPlayerName");
     localStorage.removeItem("familyQuizPlayerEmoji");
     localStorage.removeItem("familyQuizPlayerFullName");
     localStorage.removeItem("familyQuizPlayerPhone");
+    setPlayerRecovery({ status: "checking", message: "" });
     ensureAnonymousPlayerAuth()
-      .then(() => recoverPlayerSecurely({ roomId: ROOM_ID }))
-      .then((result) => {
+      .then(async (authenticatedUser) => ({
+        authenticatedUser,
+        result: await restoreAuthenticatedPlayerSession({
+          authenticatedUser,
+          storedSession,
+          readPublicPlayer: async (storedPlayerId) => {
+            const snapshot = await getDoc(doc(db, "rooms", ROOM_ID, "players", storedPlayerId));
+            return snapshot.exists() ? { id: snapshot.id, ...snapshot.data() } : null;
+          },
+          recoverPlayer: () => recoverPlayerSecurely({ roomId: ROOM_ID }),
+        }),
+      }))
+      .then(({ authenticatedUser, result }) => {
         if (cancelled || !result?.playerId) return;
-        localStorage.setItem("familyQuizPlayerId", result.playerId);
+        writeStoredPlayerSession(localStorage, {
+          playerId: result.playerId,
+          authUid: authenticatedUser.uid,
+        });
         setPlayerId(result.playerId);
         setPlayerName(result.player?.name || "");
+        setPlayerRecovery({ status: "ready", message: "" });
       })
       .catch((error) => {
+        if (cancelled) return;
         if (error?.code !== "not-found" && import.meta.env.DEV) {
           console.error("Same-device player recovery failed.", error?.code);
+        }
+        if (storedSession.playerId) {
+          setPlayerId(null);
+          setPlayerRecovery({
+            status: "error",
+            message: "تعذر التحقق من ارتباط هذا الجهاز بالمتسابق. أعد محاولة الربط الآمن.",
+          });
+        } else {
+          setPlayerRecovery({ status: "new-player", message: "" });
         }
       });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [playerRecoveryAttempt]);
 
   useEffect(() => {
     if (player?.name) setPlayerName(player.name);
@@ -6792,6 +6830,30 @@ function PlayerPanel() {
   }
 
   if (!playerId || !player) {
+    if (playerRecovery.status === "checking") {
+      return (
+        <div className="player-guest-page">
+          <PlayerJoinHero />
+          <div className="join-card card">
+            <h2>جاري استعادة جلسة المتسابق...</h2>
+          </div>
+        </div>
+      );
+    }
+    if (playerRecovery.status === "error") {
+      return (
+        <div className="player-guest-page">
+          <PlayerJoinHero />
+          <div className="join-card card">
+            <h2>تعذر استعادة المتسابق</h2>
+            <p className="display-start-error" role="alert">{playerRecovery.message}</p>
+            <button type="button" onClick={() => setPlayerRecoveryAttempt((value) => value + 1)}>
+              إعادة محاولة الربط الآمن
+            </button>
+          </div>
+        </div>
+      );
+    }
     return (
       (stage === "registration" || room?.registrationOverrideOpen) ? (
         <>
@@ -6801,6 +6863,7 @@ function PlayerPanel() {
             onJoined={(id, name) => {
               setPlayerId(id);
               setPlayerName(name);
+              setPlayerRecovery({ status: "ready", message: "" });
             }}
           />
         </>

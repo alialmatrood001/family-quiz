@@ -10,6 +10,7 @@ const checks = [
   npmCheck("test:oidc"),
   npmCheck("test:firebase-token-boundary"),
   npmCheck("test:firestore-read-ui"),
+  npmCheck("test:player-session"),
   npmCheck("test:firestore-rules"),
   npmCheck("test:operation11"),
   npmCheck("test:operation10:all"),

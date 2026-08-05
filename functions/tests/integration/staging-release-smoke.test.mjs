@@ -179,6 +179,7 @@ test("mocked request-local WIF completes Auth, initialize, answer, finalize, and
 test("mocked Staging release completes the admin and player contest lifecycle", { timeout: 120_000 }, async (t) => {
   const roomId = "staging-release-smoke";
   const questionId = "staging-release-question";
+  const secondQuestionId = "staging-release-question-2";
   const [admin, player, nonAdmin] = await Promise.all([
     createEmulatorIdentity({ admin: true, label: "release-smoke-admin" }),
     createEmulatorIdentity({ label: "release-smoke-player" }),
@@ -213,6 +214,15 @@ test("mocked Staging release completes the admin and player contest lifecycle", 
     text: "Staging release smoke",
     options: ["A", "B"],
     correctIndex: 0,
+    maxPoints: 1000,
+    minPoints: 100,
+    seconds: 30,
+    answerRevealDelaySeconds: 0,
+  });
+  await room.collection("questions").doc(secondQuestionId).set({
+    text: "Staging release follow-up",
+    options: ["A", "B"],
+    correctIndex: 1,
     maxPoints: 1000,
     minPoints: 100,
     seconds: 30,
@@ -259,6 +269,31 @@ test("mocked Staging release completes the admin and player contest lifecycle", 
     (await call("finalizeQuestion", { roomId, questionId }, adminToken)).status,
     "already-finalized",
   );
+  assert.equal((await call("recoverPlayer", { roomId }, playerToken)).playerId, playerId);
+  await assert.rejects(
+    call("recoverPlayer", { roomId }, nonAdminToken),
+    (error) => error.status === 404 && error.code === "not-found",
+  );
+  await call("prepareQuestion", { roomId, questionId: secondQuestionId, questionIndex: 1 }, adminToken);
+  await call("startQuestion", { roomId, questionId: secondQuestionId }, adminToken);
+  assert.equal(
+    (await call("submitAnswer", {
+      roomId,
+      questionId: secondQuestionId,
+      playerId,
+      selectedIndex: 1,
+    }, playerToken)).status,
+    "received",
+  );
+  await call(
+    "controlQuestion",
+    { roomId, questionId: secondQuestionId, action: "reveal" },
+    adminToken,
+  );
+  assert.equal(
+    (await call("finalizeQuestion", { roomId, questionId: secondQuestionId }, adminToken)).status,
+    "finalized",
+  );
   await call(
     "controlQuizLifecycle",
     { roomId, action: "begin-final-countdown" },
@@ -278,7 +313,7 @@ test("mocked Staging release completes the admin and player contest lifecycle", 
   assert.equal(finishedRoom.data().gameHistory[0].answers[0].isCorrect, true);
   assert.ok(finishedRoom.data().gameHistory[0].answers[0].points > 0);
   assert.deepEqual(finishedRoom.data().gameHistory[0].questions[0].options, ["A", "B"]);
-  assert.equal(answers.size, 1);
+  assert.equal(answers.size, 2);
   const publicText = JSON.stringify({
     player: publicPlayer.data(),
     history: finishedRoom.data().gameHistory,

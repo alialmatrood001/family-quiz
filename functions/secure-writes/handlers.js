@@ -204,22 +204,35 @@ function createSecureWriteHandlers({
     const data = exactInput(request.data, ["roomId"]);
     const roomId = safeId(data.roomId, "roomId");
     const roomRef = db.doc(`rooms/${roomId}`);
-    const privateSnapshot = await roomRef
-      .collection("playerPrivate")
-      .where("authUid", "==", uid)
-      .limit(2)
+    const ownerKeySnapshot = await roomRef
+      .collection("playerRegistrationKeys")
+      .doc(registrationKeyId("uid", uid))
       .get();
-    if (privateSnapshot.empty) {
-      throw new HttpsError("not-found", "No player is linked to this authenticated device");
+    let playerId = ownerKeySnapshot.exists
+      ? safeId(ownerKeySnapshot.data().playerId, "playerId")
+      : null;
+    if (!playerId) {
+      const legacyPrivateSnapshot = await roomRef
+        .collection("playerPrivate")
+        .where("authUid", "==", uid)
+        .limit(2)
+        .get();
+      if (legacyPrivateSnapshot.empty) {
+        throw new HttpsError("not-found", "No player is linked to this authenticated device");
+      }
+      if (legacyPrivateSnapshot.size !== 1) {
+        throw new HttpsError("failed-precondition", "Multiple players are linked to this identity");
+      }
+      playerId = legacyPrivateSnapshot.docs[0].id;
     }
-    if (privateSnapshot.size !== 1) {
-      throw new HttpsError("failed-precondition", "Multiple players are linked to this identity");
-    }
-    const playerId = privateSnapshot.docs[0].id;
-    const publicSnapshot = await roomRef.collection("players").doc(playerId).get();
-    if (!publicSnapshot.exists) {
+    const [publicSnapshot, privateSnapshot] = await Promise.all([
+      roomRef.collection("players").doc(playerId).get(),
+      roomRef.collection("playerPrivate").doc(playerId).get(),
+    ]);
+    if (!publicSnapshot.exists || !privateSnapshot.exists) {
       throw new HttpsError("failed-precondition", "Player registration is incomplete");
     }
+    requirePlayerOwner(privateSnapshot.data(), request.auth);
     const player = publicSnapshot.data();
     return {
       success: true,

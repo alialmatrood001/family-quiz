@@ -272,6 +272,26 @@ test("Vercel API uses the shared server operations safely", { timeout: 90_000 },
   assert.equal(otherRegistration.statusCode, 200);
   const otherPlayerId = otherRegistration.body.data.playerId;
 
+  await t.test("registration stores the verified UID and recovery is owner-only", async () => {
+    const privatePlayer = await room.collection("playerPrivate").doc(playerId).get();
+    assert.equal(privatePlayer.data().authUid, playerIdentity.uid);
+    const recovered = await invoke(playerHandler, {
+      token: playerToken,
+      action: "recoverPlayer",
+      data: { roomId },
+    });
+    assert.equal(recovered.statusCode, 200);
+    assert.equal(recovered.body.data.playerId, playerId);
+    const denied = await invoke(playerHandler, {
+      token: adminToken,
+      action: "recoverPlayer",
+      data: { roomId },
+    });
+    assert.equal(denied.statusCode, 404);
+    assert.equal(denied.body.error.code, "not-found");
+    assert.equal(JSON.stringify(recovered.body).includes(playerIdentity.uid), false);
+  });
+
   await t.test("public player data excludes private identity fields", async () => {
     const publicPlayer = (await room.collection("players").doc(playerId).get()).data();
     for (const field of ["phone", "phoneNormalized", "fullName", "authUid"]) {
