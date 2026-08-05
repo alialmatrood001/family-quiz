@@ -21,7 +21,7 @@ const stagingFirebaseConfig = {
   messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
   appId: import.meta.env.VITE_FIREBASE_APP_ID,
 };
-const firebaseConfig = stagingFirebaseConfig.projectId
+const firebaseConfig = import.meta.env.VITE_APP_ENV === "staging"
   ? stagingFirebaseConfig
   : defaultFirebaseConfig;
 

@@ -39,6 +39,25 @@ test("server failure becomes visible state without an unhandled rejection", asyn
   assert.deepEqual(errors, ["", "Admin permission is required"]);
 });
 
+test("post-initialization room confirmation is awaited and failures remain handled", async () => {
+  const busy = [];
+  const errors = [];
+  let navigationAttempted = false;
+  const result = await runQuizInitialization({
+    execute: async () => ({ status: "created" }),
+    setBusy: (value) => busy.push(value),
+    setError: (value) => errors.push(value),
+    onSuccess: async () => {
+      navigationAttempted = true;
+      throw new Error("Firestore read permission is missing");
+    },
+  });
+  assert.equal(navigationAttempted, true);
+  assert.equal(result.ok, false);
+  assert.deepEqual(busy, [true, false]);
+  assert.deepEqual(errors, ["", "Firestore read permission is missing"]);
+});
+
 test("create competition no longer writes to Firestore from the browser", async () => {
   const source = await readFile(path.join(root, "src", "App.jsx"), "utf8");
   const start = source.indexOf("async function createOrResetRoom()");
@@ -50,5 +69,6 @@ test("create competition no longer writes to Firestore from the browser", async 
   assert.match(source, /disabled=\{roomCreationBusy\}/);
   assert.match(source, /جاري إنشاء المسابقة/);
   assert.match(source, /roomCreationError/);
+  assert.match(source, /confirmFirestoreDocumentReadable/);
   assert.match(source, /window\.location\.assign\("\/\?view=control"\)/);
 });

@@ -54,6 +54,9 @@ for (const mode of ["staging", "callable", "vercel"]) {
   if (mode === "staging" && !containsBanner) {
     throw new Error("Staging build does not contain the required visual banner");
   }
+  if (mode === "staging" && output.includes("family-quiz-b7960")) {
+    throw new Error("Staging client bundle contains the Production Firebase project");
+  }
   if (mode !== "staging" && containsBanner) {
     throw new Error(`${mode} build unexpectedly contains the staging banner`);
   }

@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import test from "node:test";
 import {
   REQUIRED_BROWSER_VARIABLES,
+  requiresStagingBuildGuard,
   validateStagingBuildEnvironment,
 } from "../../../scripts/staging-build-guard.mjs";
 import { resolveClientEnvironment } from "../../../src/client-environment.js";
@@ -132,6 +133,19 @@ test("browser build guard blocks Production, missing values, and invalid transpo
         productionProjectId: "family-quiz-production",
       }),
     /Vercel|vercel/,
+  );
+});
+
+test("Vercel server-side staging identity always activates the browser build guard", () => {
+  assert.equal(requiresStagingBuildGuard({}, "staging"), true);
+  assert.equal(requiresStagingBuildGuard({ VITE_APP_ENV: "staging" }, "production"), true);
+  assert.equal(requiresStagingBuildGuard({ APP_ENVIRONMENT: "staging" }, "production"), true);
+  assert.equal(
+    requiresStagingBuildGuard(
+      { APP_ENVIRONMENT: "production", VITE_APP_ENV: "production" },
+      "production",
+    ),
+    false,
   );
 });
 

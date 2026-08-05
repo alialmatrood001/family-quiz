@@ -5,7 +5,7 @@ export async function runQuizInitialization({ execute, setBusy, setError, onSucc
   setError("");
   try {
     const result = await execute();
-    onSuccess?.(result);
+    await onSuccess?.(result);
     return { ok: true, result };
   } catch (error) {
     setError(String(error?.message || INITIALIZATION_ERROR_MESSAGE));

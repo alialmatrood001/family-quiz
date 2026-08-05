@@ -42,4 +42,12 @@ export function validateStagingBuildEnvironment(env, { productionProjectId } = {
   return Object.freeze({ environment: "staging", transport: "vercel", projectId });
 }
 
+export function requiresStagingBuildGuard(env, mode) {
+  return (
+    mode === "staging" ||
+    env.VITE_APP_ENV === "staging" ||
+    env.APP_ENVIRONMENT === "staging"
+  );
+}
+
 export { REQUIRED_BROWSER_VARIABLES };

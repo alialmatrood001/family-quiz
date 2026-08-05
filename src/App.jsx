@@ -1,4 +1,5 @@
 ﻿import { Fragment, useEffect, useRef, useState } from "react";
+import { useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   doc,
@@ -41,6 +42,11 @@ import {
   resetPracticeScoresSecurely,
 } from "./admin-player-actions-client.js";
 import { runQuizInitialization } from "./quiz-initialization-flow.js";
+import {
+  adminFirestoreListenersReady,
+  confirmFirestoreDocumentReadable,
+  startFirestoreListener,
+} from "./firestore-read-boundary.js";
 import { ensureAnonymousPlayerAuth } from "./player-auth.js";
 import "./App.css";
 
@@ -522,11 +528,28 @@ function useRevealProgressValue(value = 0, active = false, duration = 1050) {
 
 /* Hooks */
 
-function useRoom() {
+function subscribeToFirestoreRead(source, path, onData, onError, enabled = true) {
+  return startFirestoreListener({
+    enabled,
+    path,
+    subscribe: (next, error) => onSnapshot(source, next, error),
+    onData,
+    onError,
+  });
+}
+
+function useRoom(enabled = true, onError) {
   const [room, setRoom] = useState(null);
 
   useEffect(() => {
-    const unsub = onSnapshot(doc(db, "rooms", ROOM_ID), (snap) => {
+    if (!enabled) {
+      setRoom(null);
+      return undefined;
+    }
+    const unsub = subscribeToFirestoreRead(
+      doc(db, "rooms", ROOM_ID),
+      `rooms/${ROOM_ID}`,
+      (snap) => {
       if (!snap.exists()) {
         setRoom(null);
         return;
@@ -546,20 +569,28 @@ function useRoom() {
         ...data,
         __serverOffsetMs: serverOffsetMs,
       });
-    });
+      },
+      onError,
+      enabled,
+    );
 
     return () => unsub();
-  }, []);
+  }, [enabled, onError]);
 
   return room;
 }
 
-function usePlayers() {
+function usePlayers(enabled = true, onError) {
   const [players, setPlayers] = useState([]);
 
   useEffect(() => {
-    const unsub = onSnapshot(
+    if (!enabled) {
+      setPlayers([]);
+      return undefined;
+    }
+    const unsub = subscribeToFirestoreRead(
       collection(db, "rooms", ROOM_ID, "players"),
+      `rooms/${ROOM_ID}/players`,
       (snap) => {
         const list = snap.docs
           .map((d) => ({
@@ -570,16 +601,18 @@ function usePlayers() {
 
         list.sort((a, b) => (b.score || 0) - (a.score || 0));
         setPlayers(list);
-      }
+      },
+      onError,
+      enabled,
     );
 
     return () => unsub();
-  }, []);
+  }, [enabled, onError]);
 
   return players;
 }
 
-function useQuestions(activePackageId = DEFAULT_PACKAGE_ID, enabled = true) {
+function useQuestions(activePackageId = DEFAULT_PACKAGE_ID, enabled = true, onError) {
   const [questions, setQuestions] = useState([]);
 
   useEffect(() => {
@@ -594,8 +627,9 @@ function useQuestions(activePackageId = DEFAULT_PACKAGE_ID, enabled = true) {
         ? questionsRef
         : query(questionsRef, where("packageId", "==", packageId));
 
-    const unsub = onSnapshot(
+    const unsub = subscribeToFirestoreRead(
       questionsSource,
+      `rooms/${ROOM_ID}/questions`,
       (snap) => {
         const list = snap.docs.map((d) => ({
           id: d.id,
@@ -609,20 +643,29 @@ function useQuestions(activePackageId = DEFAULT_PACKAGE_ID, enabled = true) {
 
         filtered.sort((a, b) => (a.order || 0) - (b.order || 0));
         setQuestions(filtered);
-      }
+      },
+      onError,
+      enabled,
     );
 
     return () => unsub();
-  }, [activePackageId, enabled]);
+  }, [activePackageId, enabled, onError]);
 
   return questions;
 }
 
-function useQuestionPackages() {
+function useQuestionPackages(enabled = true, onError) {
   const [packages, setPackages] = useState([]);
 
   useEffect(() => {
-    const unsub = onSnapshot(doc(db, "rooms", ROOM_ID), (snap) => {
+    if (!enabled) {
+      setPackages([]);
+      return undefined;
+    }
+    const unsub = subscribeToFirestoreRead(
+      doc(db, "rooms", ROOM_ID),
+      `rooms/${ROOM_ID}`,
+      (snap) => {
       const data = snap.exists() ? snap.data() : {};
       const savedPackages = Array.isArray(data.questionPackages) ? data.questionPackages : [];
       const cleanedPackages = savedPackages
@@ -634,19 +677,22 @@ function useQuestionPackages() {
         }))
         .sort((a, b) => Number(a.createdAtMs || 0) - Number(b.createdAtMs || 0));
 
-      setPackages([
-        { id: DEFAULT_PACKAGE_ID, name: DEFAULT_PACKAGE_NAME, createdAtMs: 0 },
-        ...cleanedPackages,
-      ]);
-    });
+        setPackages([
+          { id: DEFAULT_PACKAGE_ID, name: DEFAULT_PACKAGE_NAME, createdAtMs: 0 },
+          ...cleanedPackages,
+        ]);
+      },
+      onError,
+      enabled,
+    );
 
     return () => unsub();
-  }, []);
+  }, [enabled, onError]);
 
   return packages;
 }
 
-function useAllQuestions(enabled = true) {
+function useAllQuestions(enabled = true, onError) {
   const [questions, setQuestions] = useState([]);
 
   useEffect(() => {
@@ -654,8 +700,9 @@ function useAllQuestions(enabled = true) {
       setQuestions([]);
       return undefined;
     }
-    const unsub = onSnapshot(
+    const unsub = subscribeToFirestoreRead(
       collection(db, "rooms", ROOM_ID, "questions"),
+      `rooms/${ROOM_ID}/questions`,
       (snap) => {
         const list = snap.docs.map((d) => ({
           id: d.id,
@@ -664,21 +711,23 @@ function useAllQuestions(enabled = true) {
 
         list.sort((a, b) => (a.order || 0) - (b.order || 0));
         setQuestions(list);
-      }
+      },
+      onError,
+      enabled,
     );
 
     return () => unsub();
-  }, [enabled]);
+  }, [enabled, onError]);
 
   return questions;
 }
 
-function useAnswers(questionId) {
+function useAnswers(questionId, enabled = true, onError) {
   const [answers, setAnswers] = useState([]);
   const [officialResult, setOfficialResult] = useState(null);
 
   useEffect(() => {
-    if (!questionId) {
+    if (!enabled || !questionId) {
       setAnswers([]);
       setOfficialResult(null);
       return;
@@ -689,24 +738,33 @@ function useAnswers(questionId) {
       where("questionId", "==", questionId)
     );
 
-    const unsub = onSnapshot(answersQuery, (snap) => {
-      setAnswers(
-        snap.docs.map((d) => ({
-          id: d.id,
-          ...d.data(),
-        }))
-      );
-    });
-    const unsubResult = onSnapshot(
+    const unsub = subscribeToFirestoreRead(
+      answersQuery,
+      `rooms/${ROOM_ID}/answers`,
+      (snap) => {
+        setAnswers(
+          snap.docs.map((d) => ({
+            id: d.id,
+            ...d.data(),
+          }))
+        );
+      },
+      onError,
+      enabled,
+    );
+    const unsubResult = subscribeToFirestoreRead(
       doc(db, "rooms", ROOM_ID, "questionResults", questionId),
+      `rooms/${ROOM_ID}/questionResults/${questionId}`,
       (snapshot) => setOfficialResult(snapshot.exists() ? snapshot.data() : null),
+      onError,
+      enabled,
     );
 
     return () => {
       unsub();
       unsubResult();
     };
-  }, [questionId]);
+  }, [enabled, onError, questionId]);
 
   const officialByPlayer = new Map(
     (officialResult?.results || []).map((item) => [item.playerId, item]),
@@ -717,13 +775,19 @@ function useAnswers(questionId) {
   }));
 }
 
-function useAllAnswers() {
+function useAllAnswers(enabled = true, onError) {
   const [answers, setAnswers] = useState([]);
   const [officialResults, setOfficialResults] = useState([]);
 
   useEffect(() => {
-    const unsub = onSnapshot(
+    if (!enabled) {
+      setAnswers([]);
+      setOfficialResults([]);
+      return undefined;
+    }
+    const unsub = subscribeToFirestoreRead(
       collection(db, "rooms", ROOM_ID, "answers"),
+      `rooms/${ROOM_ID}/answers`,
       (snap) => {
         setAnswers(
           snap.docs.map((d) => ({
@@ -731,20 +795,25 @@ function useAllAnswers() {
             ...d.data(),
           }))
         );
-      }
+      },
+      onError,
+      enabled,
     );
-    const unsubResults = onSnapshot(
+    const unsubResults = subscribeToFirestoreRead(
       collection(db, "rooms", ROOM_ID, "questionResults"),
+      `rooms/${ROOM_ID}/questionResults`,
       (snapshot) => {
         setOfficialResults(snapshot.docs.map((item) => item.data()));
       },
+      onError,
+      enabled,
     );
 
     return () => {
       unsub();
       unsubResults();
     };
-  }, []);
+  }, [enabled, onError]);
 
   const officialByAnswer = new Map();
   officialResults.forEach((result) => {
@@ -758,12 +827,17 @@ function useAllAnswers() {
   }));
 }
 
-function useMessages() {
+function useMessages(enabled = true, onError) {
   const [messages, setMessages] = useState([]);
 
   useEffect(() => {
-    const unsub = onSnapshot(
+    if (!enabled) {
+      setMessages([]);
+      return undefined;
+    }
+    const unsub = subscribeToFirestoreRead(
       collection(db, "rooms", ROOM_ID, "messages"),
+      `rooms/${ROOM_ID}/messages`,
       (snap) => {
         const list = snap.docs.map((d) => ({
           id: d.id,
@@ -772,16 +846,18 @@ function useMessages() {
 
         list.sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0));
         setMessages(list.slice(0, 20));
-      }
+      },
+      onError,
+      enabled,
     );
 
     return () => unsub();
-  }, []);
+  }, [enabled, onError]);
 
   return messages;
 }
 
-function useVisitors(enabled = true) {
+function useVisitors(enabled = true, onError) {
   const [visitors, setVisitors] = useState([]);
 
   useEffect(() => {
@@ -789,8 +865,9 @@ function useVisitors(enabled = true) {
       setVisitors([]);
       return undefined;
     }
-    const unsub = onSnapshot(
+    const unsub = subscribeToFirestoreRead(
       collection(db, "rooms", ROOM_ID, "visitors"),
+      `rooms/${ROOM_ID}/visitors`,
       (snap) => {
         setVisitors(
           snap.docs
@@ -799,11 +876,13 @@ function useVisitors(enabled = true) {
               ...d.data(),
             }))
         );
-      }
+      },
+      onError,
+      enabled,
     );
 
     return () => unsub();
-  }, [enabled]);
+  }, [enabled, onError]);
 
   return visitors;
 }
@@ -5562,22 +5641,33 @@ function LastGamePanel({ room, gameHistory = [], embedded = false }) {
 }
 
 function AdminPanel({ initialView = "control", adminSession }) {
-  const room = useRoom();
-  const players = usePlayers();
-  const canReadQuestionBank = initialView !== "display";
+  const [firestoreReadError, setFirestoreReadError] = useState("");
+  const reportFirestoreReadError = useCallback((failure) => {
+    setFirestoreReadError(`${failure.message} (${failure.path})`);
+  }, []);
+  const listenersReady =
+    initialView === "display" || adminFirestoreListenersReady(adminSession);
+  const room = useRoom(listenersReady, reportFirestoreReadError);
+  const players = usePlayers(listenersReady, reportFirestoreReadError);
+  const canReadQuestionBank = listenersReady && initialView !== "display";
   const storedQuestions = useQuestions(
     room?.activePackageId || DEFAULT_PACKAGE_ID,
     canReadQuestionBank,
+    reportFirestoreReadError,
   );
-  const storedAllQuestions = useAllQuestions(canReadQuestionBank);
+  const storedAllQuestions = useAllQuestions(canReadQuestionBank, reportFirestoreReadError);
   const questions =
     canReadQuestionBank || !room?.currentQuestion ? storedQuestions : [room.currentQuestion];
   const allQuestions = canReadQuestionBank ? storedAllQuestions : questions;
-  const questionPackages = useQuestionPackages();
-  const messages = useMessages();
-  const answers = useAnswers(room?.currentQuestion?.questionId);
-  const allAnswers = useAllAnswers();
-  const visitors = useVisitors(canReadQuestionBank);
+  const questionPackages = useQuestionPackages(listenersReady, reportFirestoreReadError);
+  const messages = useMessages(listenersReady, reportFirestoreReadError);
+  const answers = useAnswers(
+    room?.currentQuestion?.questionId,
+    listenersReady,
+    reportFirestoreReadError,
+  );
+  const allAnswers = useAllAnswers(listenersReady, reportFirestoreReadError);
+  const visitors = useVisitors(canReadQuestionBank, reportFirestoreReadError);
   const [roomCreationBusy, setRoomCreationBusy] = useState(false);
   const [roomCreationError, setRoomCreationError] = useState("");
   const finalization = useQuestionFinalization({
@@ -5594,9 +5684,19 @@ function AdminPanel({ initialView = "control", adminSession }) {
       execute: createOrResetRoom,
       setBusy: setRoomCreationBusy,
       setError: setRoomCreationError,
-      onSuccess: () => window.location.assign("/?view=control"),
+      onSuccess: async () => {
+        await confirmFirestoreDocumentReadable({
+          path: `rooms/${ROOM_ID}`,
+          read: () => getDoc(doc(db, "rooms", ROOM_ID)),
+        });
+        window.location.assign("/?view=control");
+      },
     });
   };
+
+  const firestoreReadErrorBanner = firestoreReadError
+    ? <p className="display-start-error" role="alert">{firestoreReadError}</p>
+    : null;
 
   // Mutating automations live only behind the authenticated Admin route.
   const alwaysOnAutomations = (
@@ -5613,6 +5713,7 @@ function AdminPanel({ initialView = "control", adminSession }) {
     return (
       <>
         {alwaysOnAutomations}
+        {firestoreReadErrorBanner}
         <div className="admin-toolbar card">
           <a className="link-button" href="/?view=control">
             لوحة التحكم
@@ -5642,6 +5743,7 @@ function AdminPanel({ initialView = "control", adminSession }) {
     return (
       <>
         {alwaysOnAutomations}
+        {firestoreReadErrorBanner}
         <LastGamePanel room={room} gameHistory={gameHistory} />
       </>
     );
@@ -5650,7 +5752,9 @@ function AdminPanel({ initialView = "control", adminSession }) {
   if (initialView === "display") {
     // Display page renders its own set of automation components internally.
     return (
-      <DisplayScreen
+      <>
+        {firestoreReadErrorBanner}
+        <DisplayScreen
         room={room}
         players={players}
         questions={questions}
@@ -5658,7 +5762,8 @@ function AdminPanel({ initialView = "control", adminSession }) {
         messages={messages}
         answers={answers}
         allAnswers={allAnswers}
-      />
+        />
+      </>
     );
   }
 
@@ -5666,6 +5771,7 @@ function AdminPanel({ initialView = "control", adminSession }) {
     return (
       <>
         {alwaysOnAutomations}
+        {firestoreReadErrorBanner}
         <div className="card center-card">
           <h2>تهيئة المسابقة</h2>
           <p className="muted">اضغط الزر لإنشاء غرفة المسابقة لأول مرة.</p>
@@ -5681,6 +5787,7 @@ function AdminPanel({ initialView = "control", adminSession }) {
   return (
     <>
       {alwaysOnAutomations}
+      {firestoreReadErrorBanner}
       <AdminControl
         room={room}
         players={players}
