@@ -1,8 +1,14 @@
-import { doc, onSnapshot } from "firebase/firestore";
+import { doc, getDoc, onSnapshot } from "firebase/firestore";
 import { db } from "./firebase.js";
 import { normalizeServerError, serverApiClient } from "./server-api-client.js";
 
-const RESULT_WAIT_TIMEOUT_MS = 25_000;
+const RESULT_WAIT_TIMEOUT_MS = 35_000;
+const RECOVERABLE_REQUEST_CODES = new Set([
+  "aborted",
+  "already-exists",
+  "deadline-exceeded",
+  "request-timeout",
+]);
 
 export function normalizeFinalizeError(error) {
   return normalizeServerError(error, "تعذر إنهاء السؤال.");
@@ -48,14 +54,22 @@ export function waitForOfficialQuestionResult(
   });
 }
 
+export async function readOfficialQuestionResult(firestore, { roomId, questionId } = {}) {
+  const snapshot = await getDoc(doc(firestore, "rooms", roomId, "questionResults", questionId));
+  return snapshot.exists() ? { id: snapshot.id, ...snapshot.data() } : null;
+}
+
 export function createQuestionFinalizationClient({
   firestore,
   finalizeOperation = serverApiClient.finalizeQuestion,
   resultTimeoutMs = RESULT_WAIT_TIMEOUT_MS,
+  waitForResult = waitForOfficialQuestionResult,
+  readResult = readOfficialQuestionResult,
+  maxRecoveryAttempts = 1,
 }) {
   const inFlight = new Map();
 
-  async function finalizeAndWait({ roomId, questionId, signal, onAccepted } = {}) {
+  async function finalizeAndWait({ roomId, questionId, signal, onAccepted, onRecovering } = {}) {
     const safeRoomId = String(roomId || "").trim();
     const safeQuestionId = String(questionId || "").trim();
     if (!safeRoomId || !safeQuestionId) {
@@ -68,27 +82,51 @@ export function createQuestionFinalizationClient({
     }
 
     const operation = (async () => {
-      try {
-        const response = await finalizeOperation(
-          { roomId: safeRoomId, questionId: safeQuestionId },
-          { signal },
-        );
-        onAccepted?.(response);
-      } catch (error) {
-        const normalized = normalizeFinalizeError(error);
-        if (normalized.code !== "aborted" && normalized.code !== "already-exists") {
-          throw normalized;
+      const requestFinalization = async () => {
+        try {
+          const response = await finalizeOperation(
+            { roomId: safeRoomId, questionId: safeQuestionId },
+            { signal },
+          );
+          onAccepted?.(response);
+          return response;
+        } catch (error) {
+          const normalized = normalizeFinalizeError(error);
+          if (!RECOVERABLE_REQUEST_CODES.has(normalized.code)) {
+            throw normalized;
+          }
+          onAccepted?.({ status: "processing" });
+          return { status: "processing", uncertain: true };
         }
-        onAccepted?.({ status: "processing" });
-      }
+      };
 
-      const officialResult = await waitForOfficialQuestionResult(firestore, {
-        roomId: safeRoomId,
-        questionId: safeQuestionId,
-        timeoutMs: resultTimeoutMs,
-        signal,
-      });
-      return { officialResult };
+      await requestFinalization();
+      let recoveryAttempt = 0;
+      while (true) {
+        try {
+          const officialResult = await waitForResult(firestore, {
+            roomId: safeRoomId,
+            questionId: safeQuestionId,
+            timeoutMs: resultTimeoutMs,
+            signal,
+          });
+          return { officialResult };
+        } catch (error) {
+          const normalized = normalizeFinalizeError(error);
+          if (normalized.code !== "deadline-exceeded") throw normalized;
+
+          const existingResult = await readResult(firestore, {
+            roomId: safeRoomId,
+            questionId: safeQuestionId,
+          });
+          if (existingResult) return { officialResult: existingResult };
+          if (recoveryAttempt >= maxRecoveryAttempts) throw normalized;
+
+          recoveryAttempt += 1;
+          onRecovering?.({ attempt: recoveryAttempt });
+          await requestFinalization();
+        }
+      }
     })().finally(() => {
       inFlight.delete(key);
     });

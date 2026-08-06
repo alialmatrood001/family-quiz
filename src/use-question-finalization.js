@@ -21,6 +21,7 @@ export function getFinalizeErrorMessage(code) {
 
 export function useQuestionFinalization({ room, canFinalize }) {
   const [state, setState] = useState(INITIAL_STATE);
+  const [requestActive, setRequestActive] = useState(false);
   const abortRef = useRef(null);
   const requestRef = useRef(null);
   const questionId = room?.currentQuestion?.questionId || room?.currentQuestion?.id || "";
@@ -29,6 +30,7 @@ export function useQuestionFinalization({ room, canFinalize }) {
     abortRef.current?.abort();
     abortRef.current = null;
     requestRef.current = null;
+    setRequestActive(false);
     setState(INITIAL_STATE);
   }, [questionId]);
 
@@ -70,6 +72,7 @@ export function useQuestionFinalization({ room, canFinalize }) {
 
     const controller = new AbortController();
     abortRef.current = controller;
+    setRequestActive(true);
     setState({ status: "requesting", error: null, result: null });
 
     const operation = (async () => {
@@ -79,6 +82,7 @@ export function useQuestionFinalization({ room, canFinalize }) {
           questionId,
           signal: controller.signal,
           onAccepted: () => setState({ status: "processing", error: null, result: null }),
+          onRecovering: () => setState({ status: "recovering", error: null, result: null }),
         });
         setState({ status: "completed", error: null, result: result.officialResult });
         return result;
@@ -94,6 +98,7 @@ export function useQuestionFinalization({ room, canFinalize }) {
         if (requestRef.current === operation) {
           requestRef.current = null;
         }
+        setRequestActive(false);
       }
     })();
     requestRef.current = operation;
@@ -102,7 +107,8 @@ export function useQuestionFinalization({ room, canFinalize }) {
 
   return {
     ...state,
-    isBusy: state.status === "requesting" || state.status === "processing",
+    hasActiveRequest: requestActive,
+    isBusy: ["requesting", "processing", "recovering"].includes(state.status),
     message: state.error ? getFinalizeErrorMessage(state.error.code) : "",
     requestFinalization,
   };

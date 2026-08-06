@@ -43,6 +43,11 @@ import {
 } from "./admin-player-actions-client.js";
 import { runQuizInitialization } from "./quiz-initialization-flow.js";
 import {
+  ACTIVE_QUESTION_RESET_MESSAGE,
+  isQuizResetBlocked,
+  runQuizResetAction,
+} from "./admin-reset-flow.js";
+import {
   adminFirestoreListenersReady,
   confirmFirestoreDocumentReadable,
   startFirestoreListener,
@@ -1324,6 +1329,7 @@ function AutoActivateReadyQuestion({ room }) {
 }
 
 function AutoFinalizeQuestion({ room, finalization }) {
+  const resumedQuestionRef = useRef(null);
   useEffect(() => {
     const questionId = room?.currentQuestion?.questionId || room?.currentQuestion?.id;
     const serverIsProcessing =
@@ -1333,8 +1339,13 @@ function AutoFinalizeQuestion({ room, finalization }) {
       !!questionId &&
       !isSameId(room?.processedQuestionId, questionId) &&
       (room?.stage === "results" || serverIsProcessing);
-    if (!needsResume || finalization.status !== "idle") return;
+    if (
+      !needsResume ||
+      finalization.hasActiveRequest ||
+      isSameId(resumedQuestionRef.current, questionId)
+    ) return;
 
+    resumedQuestionRef.current = questionId;
     finalization.requestFinalization().catch((error) => {
       if (error?.code !== "cancelled" && import.meta.env.DEV) {
         console.error("Automatic finalization resume failed.", error?.code);
@@ -3830,6 +3841,8 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
   const [activeAdminSection, setActiveAdminSection] = useState("live");
   const [previousAdminSection, setPreviousAdminSection] = useState(null);
   const [adminAdvancing, setAdminAdvancing] = useState(false);
+  const [setupActionBusy, setSetupActionBusy] = useState(false);
+  const [setupActionError, setSetupActionError] = useState("");
   const adminAdvancingRef = useRef(false);
   const [quickControlsOpen, setQuickControlsOpen] = useState(false);
   const [selectedPrizeWinnerByPrize, setSelectedPrizeWinnerByPrize] = useState({});
@@ -3885,6 +3898,24 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
     : null;
   const adminCurrentIsLastQuestion = currentQuestionIndex >= 0 && currentQuestionIndex >= adminQuestionList.length - 1;
   const adminNextQuestionIsLast = currentQuestionIndex + 1 >= adminQuestionList.length - 1;
+  const setupBlocked = isQuizResetBlocked({
+    stage,
+    finalizationStatus: finalization.status,
+    serverFinalizationStatus: room?.finalization?.status,
+  });
+
+  async function handleSetupReset(action) {
+    if (setupBlocked) {
+      setSetupActionError(ACTIVE_QUESTION_RESET_MESSAGE);
+      return false;
+    }
+    if (setupActionBusy) return false;
+    setSetupActionBusy(true);
+    setSetupActionError("");
+    const outcome = await runQuizResetAction(action, { onError: setSetupActionError });
+    setSetupActionBusy(false);
+    return outcome.ok;
+  }
 
   const prizeWheel = room?.prizeWheel || {};
   const prizeWinners = prizeWheel.winners || [];
@@ -4259,7 +4290,13 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
             <span>تجهيز</span>
             <button type="button" className={activeAdminSection === "questions" ? "active" : ""} onClick={() => openAdminSection("questions")}>الأسئلة</button>
             <button type="button" className={activeAdminSection === "displaySettings" ? "active" : ""} onClick={() => openAdminSection("displaySettings")}>العرض</button>
-            <button type="button" className={activeAdminSection === "setup" ? "active" : ""} onClick={() => openAdminSection("setup")}>تهيئة</button>
+            <button
+              type="button"
+              className={activeAdminSection === "setup" ? "active" : ""}
+              onClick={() => openAdminSection("setup")}
+              disabled={setupBlocked || setupActionBusy}
+              title={setupBlocked ? ACTIVE_QUESTION_RESET_MESSAGE : undefined}
+            >تهيئة</button>
           </div>
           <div className="dashboard-nav-group">
             <span>مراجعة</span>
@@ -4393,6 +4430,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
               <strong>
                 {finalization.status === "requesting" && "جاري إرسال طلب إنهاء السؤال..."}
                 {finalization.status === "processing" && "السيرفر يحتسب النتائج الرسمية..."}
+                {finalization.status === "recovering" && "جاري التحقق من النتيجة واستعادة عملية الاعتماد بأمان..."}
                 {finalization.status === "completed" && "تم اعتماد النتيجة الرسمية."}
                 {finalization.status === "error" && "تعذر اعتماد النتيجة."}
                 {finalization.status === "idle" && "النتائج لم تعتمد بعد."}
@@ -4746,6 +4784,8 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
           </div>
         </div>
 
+        {setupActionError && <p className="error" role="alert">{setupActionError}</p>}
+
         <div className="setup-section-card primary">
           <div className="setup-section-title">
             <strong>تجهيز البث</strong>
@@ -4779,11 +4819,11 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
           <div className="setup-action-list">
             <div className="setup-action-row">
               <div><strong>مسح الرسائل فقط</strong><span>يحذف رسائل المتسابقين دون التأثير على الأسماء أو النقاط أو الإجابات.</span></div>
-              <button className="warning-action" onClick={() => { if (window.confirm("مسح رسائل المتسابقين فقط؟")) clearMessagesOnly(); }}>مسح</button>
+              <button className="warning-action" disabled={setupBlocked || setupActionBusy} onClick={() => { if (window.confirm("مسح رسائل المتسابقين فقط؟")) void handleSetupReset(clearMessagesOnly); }}>مسح</button>
             </div>
             <div className="setup-action-row">
               <div><strong>مسح الإجابات والرسائل</strong><span>يبقي المتسابقين، ويمسح إجابات الجولة والرسائل ويعيد العرض للصفحة الرئيسية.</span></div>
-              <button className="warning-action" onClick={() => { if (window.confirm("مسح الإجابات والرسائل مع إبقاء المتسابقين؟")) clearAnswersAndMessages(); }}>مسح</button>
+              <button className="warning-action" disabled={setupBlocked || setupActionBusy} onClick={() => { if (window.confirm("مسح الإجابات والرسائل مع إبقاء المتسابقين؟")) void handleSetupReset(clearAnswersAndMessages); }}>مسح</button>
             </div>
           </div>
         </div>
@@ -4796,11 +4836,11 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
           <div className="setup-action-list">
             <div className="setup-action-row danger-row">
               <div><strong>فتح تسجيل جديد بالكامل</strong><span>يمسح المتسابقين والإجابات والرسائل، ثم يفتح التسجيل لجولة جديدة.</span></div>
-              <button className="danger" onClick={() => { if (window.confirm("مسح المتسابقين والإجابات والرسائل وفتح تسجيل جديد؟")) resetAndStartRegistration(); }}>فتح جديد</button>
+              <button className="danger" disabled={setupBlocked || setupActionBusy} onClick={() => { if (window.confirm("مسح المتسابقين والإجابات والرسائل وفتح تسجيل جديد؟")) void handleSetupReset(resetAndStartRegistration); }}>فتح جديد</button>
             </div>
             <div className="setup-action-row danger-row">
               <div><strong>تصفير كل شيء</strong><span>يمسح المتسابقين والإجابات والرسائل ويعيد المسابقة إلى الصفحة الرئيسية.</span></div>
-              <button className="danger" onClick={() => { if (window.confirm("تصفير الجولة بالكامل؟")) hardResetGame(); }}>تصفير</button>
+              <button className="danger" disabled={setupBlocked || setupActionBusy} onClick={() => { if (window.confirm("تصفير الجولة بالكامل؟")) void handleSetupReset(hardResetGame); }}>تصفير</button>
             </div>
           </div>
         </div>

@@ -41,6 +41,9 @@ function timestampMillis(value) {
 
 function validateQuestion(room, questionId) {
   const question = room.currentQuestion;
+  if (room.activeQuestionId && !sameId(room.activeQuestionId, questionId)) {
+    throw new HttpsError("failed-precondition", "The active question id does not match the requested question");
+  }
   if (!question || !sameId(question.questionId || question.id, questionId)) {
     throw new HttpsError("not-found", "The requested question is not the active room question");
   }

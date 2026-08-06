@@ -188,7 +188,7 @@ test("previous result documents and compatibility map entries are preserved", as
   assert.equal(state.results.length, 2);
 });
 
-test("fresh lock aborts and stale lock is recoverable", async (t) => {
+test("fresh duplicate reports processing and stale lock is recoverable", async (t) => {
   const scenario = buildScenario({ roomId: "edge-lock", playerCount: 1, correctCount: 0, wrongCount: 0 });
   t.after(() => deleteRoom(scenario.roomId));
   await writeScenario(scenario);
@@ -200,10 +200,9 @@ test("fresh lock aborts and stale lock is recoverable", async (t) => {
       runId: "fresh-run",
     },
   });
-  await expectCallableError(
-    () => callFinalizeQuestion({ roomId: scenario.roomId, questionId: scenario.questionId }),
-    "ABORTED"
-  );
+  const duplicate = await callFinalizeQuestion({ roomId: scenario.roomId, questionId: scenario.questionId });
+  assert.equal(duplicate.status, "processing");
+  assert.equal(duplicate.runId, "fresh-run");
   await roomRef(scenario.roomId).update({ "finalization.startedAtMs": Date.now() - 60_000 });
   const result = await callFinalizeQuestion({ roomId: scenario.roomId, questionId: scenario.questionId });
   assert.equal(result.status, "finalized");
@@ -230,6 +229,56 @@ test("post-claim failure records a recoverable failed state without partial scor
     state.players.map((player) => player.score).sort((a, b) => a - b),
     scenario.players.map((player) => player.score).sort((a, b) => a - b)
   );
+
+  const players = await roomRef(scenario.roomId).collection("players").get();
+  const batch = roomRef(scenario.roomId).firestore.batch();
+  players.docs.slice(1).forEach((document) => batch.delete(document.ref));
+  await batch.commit();
+  const recovered = await callFinalizeQuestion({
+    roomId: scenario.roomId,
+    questionId: scenario.questionId,
+  });
+  assert.equal(recovered.status, "finalized");
+  assert.equal((await readState(scenario.roomId)).results.length, 1);
+});
+
+test("first and second questions finalize without duplicating points", async (t) => {
+  const scenario = buildScenario({ roomId: "edge-two-questions", playerCount: 1, correctCount: 1, wrongCount: 0 });
+  t.after(() => deleteRoom(scenario.roomId));
+  await writeScenario(scenario);
+  await callFinalizeQuestion({ roomId: scenario.roomId, questionId: scenario.questionId });
+  const afterFirst = await readState(scenario.roomId);
+  const firstScore = afterFirst.players[0].score;
+  const secondQuestion = {
+    ...scenario.question,
+    id: "question-baseline-02",
+    questionId: "question-baseline-02",
+    answerStartAtMs: scenario.question.answerEndAtMs + 1_000,
+    answerEndAtMs: scenario.question.answerEndAtMs + 21_000,
+    resultsCalculated: false,
+  };
+  await roomRef(scenario.roomId).update({
+    stage: "question",
+    activeQuestionId: secondQuestion.questionId,
+    currentQuestion: secondQuestion,
+    currentQuestionIndex: 1,
+    processedQuestionId: null,
+    processingQuestionId: null,
+    resultsCalculated: false,
+  });
+  await roomRef(scenario.roomId).collection("answers").doc("answer-question-02").set({
+    playerId: afterFirst.players[0].id,
+    questionId: secondQuestion.questionId,
+    selectedIndex: secondQuestion.correctIndex,
+    createdAt: Timestamp.fromMillis(secondQuestion.answerStartAtMs + 1_000),
+  });
+  await callFinalizeQuestion({ roomId: scenario.roomId, questionId: secondQuestion.questionId });
+  const afterSecond = await readState(scenario.roomId);
+  assert.equal(afterSecond.results.length, 2);
+  assert.ok(afterSecond.players[0].score > firstScore);
+  const repeated = await callFinalizeQuestion({ roomId: scenario.roomId, questionId: secondQuestion.questionId });
+  assert.equal(repeated.status, "already-finalized");
+  assert.equal((await readState(scenario.roomId)).players[0].score, afterSecond.players[0].score);
 });
 
 test("answer without a server timestamp is ignored", async (t) => {

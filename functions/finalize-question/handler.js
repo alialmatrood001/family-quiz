@@ -17,6 +17,22 @@ const {
 const LOCK_STALE_MS = 30_000;
 const MAX_ATOMIC_PLAYERS = 400;
 
+function safeConflictReason(error) {
+  const reasons = new Map([
+    ["Question finalization lock ownership was lost", "operation-lock-lost"],
+    ["The active question id does not match the requested question", "active-question-id-mismatch"],
+    ["The requested question is not the active room question", "active-question-mismatch"],
+    ["The room state does not allow finalization", "room-stage-mismatch"],
+    ["The active question is missing trusted scoring fields", "incomplete-question-snapshot"],
+    ["Player state indicates a partial legacy finalization", "partial-legacy-finalization"],
+  ]);
+  if (reasons.has(error?.message)) return reasons.get(error.message);
+  if (/Atomic finalization supports at most/.test(String(error?.message || ""))) {
+    return "atomic-player-limit";
+  }
+  return String(error?.code || "internal").replace(/^functions\//, "");
+}
+
 function publicResult(result, status) {
   return {
     success: true,
@@ -27,7 +43,12 @@ function publicResult(result, status) {
   };
 }
 
-function createFinalizeQuestionHandler({ db, now = () => Date.now(), runId = () => crypto.randomUUID() }) {
+function createFinalizeQuestionHandler({
+  db,
+  now = () => Date.now(),
+  runId = () => crypto.randomUUID(),
+  logger = console,
+}) {
   return async (request) => {
     requireAdmin(request.auth);
     const { roomId, questionId } = validateInput(request.data);
@@ -36,6 +57,18 @@ function createFinalizeQuestionHandler({ db, now = () => Date.now(), runId = () 
     const resultRef = roomRef.collection("questionResults").doc(questionId);
     const secretRef = roomRef.collection("questionSecrets").doc(questionId);
     let claimed = false;
+
+    const logFinalization = (level, finalizationState, conflictReason = null, operationId = currentRunId) => {
+      const writer = typeof logger?.[level] === "function" ? logger[level].bind(logger) : null;
+      writer?.("quiz-finalization", {
+        action: "finalizeQuestion",
+        roomId,
+        questionId,
+        operationId: String(operationId || currentRunId),
+        finalizationState,
+        conflictReason,
+      });
+    };
 
     try {
       const existingResult = await db.runTransaction(async (transaction) => {
@@ -48,7 +81,7 @@ function createFinalizeQuestionHandler({ db, now = () => Date.now(), runId = () 
           transaction.get(resultRef),
           transaction.get(secretRef),
         ]);
-        if (resultSnapshot.exists) return resultSnapshot.data();
+        if (resultSnapshot.exists) return { type: "result", data: resultSnapshot.data() };
 
         const trustedRoom = secretSnapshot.exists
           ? {
@@ -68,7 +101,15 @@ function createFinalizeQuestionHandler({ db, now = () => Date.now(), runId = () 
           startedAtMs > 0 &&
           now() - startedAtMs <= LOCK_STALE_MS
         ) {
-          throw new HttpsError("aborted", "Question finalization is already in progress");
+          return {
+            type: "processing",
+            data: {
+              success: true,
+              status: "processing",
+              questionId,
+              runId: finalization.runId || null,
+            },
+          };
         }
         const claimedAtMs = now();
         transaction.set(
@@ -88,10 +129,22 @@ function createFinalizeQuestionHandler({ db, now = () => Date.now(), runId = () 
           },
           { merge: true }
         );
-        return null;
+        return { type: "claimed", staleLockReclaimed: finalization.status === "processing" };
       });
-      if (existingResult) return publicResult(existingResult, "already-finalized");
+      if (existingResult.type === "result") {
+        logFinalization("info", "completed", "already-finalized", existingResult.data.runId);
+        return publicResult(existingResult.data, "already-finalized");
+      }
+      if (existingResult.type === "processing") {
+        logFinalization("info", "processing", "duplicate-request", existingResult.data.runId);
+        return existingResult.data;
+      }
       claimed = true;
+      logFinalization(
+        "info",
+        "processing",
+        existingResult.staleLockReclaimed ? "stale-lock-reclaimed" : null,
+      );
 
       return await db.runTransaction(async (transaction) => {
         const roomSnapshot = await transaction.get(roomRef);
@@ -344,7 +397,9 @@ function createFinalizeQuestionHandler({ db, now = () => Date.now(), runId = () 
           },
           { merge: true }
         );
-        return publicResult({ questionId, runId: currentRunId, counts }, "finalized");
+        const response = publicResult({ questionId, runId: currentRunId, counts }, "finalized");
+        logFinalization("info", "completed");
+        return response;
       });
     } catch (error) {
       if (claimed) {
@@ -376,15 +431,20 @@ function createFinalizeQuestionHandler({ db, now = () => Date.now(), runId = () 
               { merge: true }
             );
           })
-          .catch(() => {});
+          .catch((cleanupError) => {
+            logFinalization(
+              "error",
+              "processing",
+              `cleanup-failed:${String(cleanupError?.code || "unknown")}`,
+            );
+          });
       }
+      logFinalization(
+        "error",
+        claimed ? "failed" : "rejected",
+        safeConflictReason(error),
+      );
       if (error instanceof HttpsError) throw error;
-      console.error("finalizeQuestion failed", {
-        roomId,
-        questionId,
-        runId: currentRunId,
-        stage: "transaction",
-      });
       throw new HttpsError("internal", "Question finalization failed");
     }
   };

@@ -31,6 +31,7 @@ test("concurrent and sequential repeats do not apply points twice", { timeout: 3
   assert.equal(fulfilled.filter((item) => item.status === "finalized").length, 1);
   assert.ok(
     fulfilled.some((item) => item.status === "already-finalized") ||
+      fulfilled.some((item) => item.status === "processing") ||
       rejected.some((error) => error.code === "ABORTED")
   );
 

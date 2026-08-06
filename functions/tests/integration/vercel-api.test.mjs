@@ -435,6 +435,20 @@ test("Vercel API uses the shared server operations safely", { timeout: 90_000 },
   });
   assert.equal(started.statusCode, 200);
 
+  await t.test("resetQuizData rejects an active question with the stable conflict", async () => {
+    const response = await invoke(adminHandler, {
+      token: adminToken,
+      action: "resetQuizData",
+      data: { roomId, mode: "full", reason: "active-question-guard-test" },
+    });
+    assert.equal(response.statusCode, 409);
+    assert.equal(response.body.error.code, "failed-precondition");
+    assert.equal(
+      response.body.error.message,
+      "Quiz data cannot be reset during an active question",
+    );
+  });
+
   await t.test("player cannot submit an answer for another player", async () => {
     const response = await invoke(playerHandler, {
       token: playerToken,

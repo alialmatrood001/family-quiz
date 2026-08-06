@@ -7,6 +7,7 @@ const {
   selectOfficialAnswers,
   sortLeaderboard,
   validateInput,
+  validateQuestion,
 } = require("../../finalize-question/domain");
 
 test("input accepts only safe roomId and questionId strings", () => {
@@ -24,6 +25,15 @@ test("admin claim is mandatory", () => {
   assert.throws(
     () => requireAdmin({ token: {} }),
     (error) => error.code === "permission-denied"
+  );
+});
+
+test("finalization rejects an activeQuestionId mismatch with a stable conflict", () => {
+  assert.throws(
+    () => validateQuestion({ activeQuestionId: "q2", currentQuestion: { questionId: "q1" } }, "q1"),
+    (error) =>
+      error.code === "failed-precondition" &&
+      error.message === "The active question id does not match the requested question",
   );
 });
 
