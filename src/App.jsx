@@ -19,6 +19,7 @@ import {
 import { db } from "./firebase.js";
 import { adminAuth } from "./admin-auth.js";
 import { useQuestionFinalization } from "./use-question-finalization.js";
+import { createStagingFinalizationResumeLogger } from "./finalization-resume.js";
 import {
   activateJokerSecurely,
   cancelJokerSecurely,
@@ -61,6 +62,7 @@ import {
 import "./App.css";
 
 const ROOM_ID = "family-quiz-001";
+const reportStagingFinalizationResume = createStagingFinalizationResumeLogger(import.meta.env);
 
 const QUIZ_TITLE = "مسابقة قروب العائلة العائلية";
 const QUIZ_SUBTITLE = "من تقديم الأستاذ إبراهيم ال مطرود";
@@ -5723,6 +5725,7 @@ function AdminPanel({ initialView = "control", adminSession }) {
     room,
     canFinalize: adminSession?.isAdmin === true,
     officialResultState,
+    onResumeDecision: reportStagingFinalizationResume,
   });
   const gameHistory = [...(room?.gameHistory || [])].sort(
     (a, b) => Number(b.savedAtMs || 0) - Number(a.savedAtMs || 0)

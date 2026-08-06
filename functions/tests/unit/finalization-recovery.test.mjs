@@ -10,6 +10,7 @@ import {
 } from "../../../src/admin-reset-flow.js";
 import {
   attemptFinalizationResume,
+  createStagingFinalizationResumeLogger,
   decideFinalizationResume,
   finalizationStartedAtMs,
   timestampToMillis,
@@ -118,7 +119,7 @@ test("a question arriving after the room snapshot triggers only after hook initi
     attemptedRef,
     request: async () => { requests += 1; },
   });
-  assert.equal(early.decision.reason, "question-not-ready");
+  assert.equal(early.decision.reason, "no-active-question");
   assert.equal(attemptedRef.current, null);
   const ready = attemptFinalizationResume({
     context: {
@@ -156,7 +157,7 @@ test("an active manual request delays reload resume without consuming its single
     attemptedRef,
     request: async () => { requests += 1; },
   });
-  assert.equal(busy.decision.reason, "request-active");
+  assert.equal(busy.decision.reason, "manual-request-active");
   assert.equal(attemptedRef.current, null);
   const resumed = attemptFinalizationResume({
     context: { ...context, requestActive: false },
@@ -186,7 +187,7 @@ test("an existing official result prevents a reload resume request", () => {
     request: async () => assert.fail("resume request must not be sent"),
   });
   assert.equal(outcome.promise, null);
-  assert.equal(outcome.decision.reason, "official-result-exists");
+  assert.equal(outcome.decision.reason, "result-exists");
 });
 
 test("failed finalization is eligible for one safe resume", () => {
@@ -203,7 +204,70 @@ test("failed finalization is eligible for one safe resume", () => {
     requestActive: false,
   });
   assert.equal(decision.shouldResume, true);
-  assert.equal(decision.reason, "resume-failed");
+  assert.equal(decision.reason, "resume-request-started");
+});
+
+test("an initial result listener cannot block an idempotent server resume forever", () => {
+  const base = {
+    room: {
+      stage: "reveal",
+      activeQuestionId: "q1",
+      currentQuestion: { questionId: "q1" },
+      finalization: { status: "processing", questionId: "q1" },
+    },
+    canFinalize: true,
+    hookReady: true,
+    officialResultLoading: true,
+    officialResultExists: false,
+    requestActive: false,
+  };
+  assert.equal(decideFinalizationResume(base).reason, "waiting-for-initial-result");
+  const afterBoundedWait = decideFinalizationResume({
+    ...base,
+    initialResultWaitExpired: true,
+  });
+  assert.equal(afterBoundedWait.shouldResume, true);
+  assert.equal(afterBoundedWait.reason, "resume-request-started");
+});
+
+test("Staging diagnostics expose every safe decision field without enabling other builds", () => {
+  const entries = [];
+  const productionLogger = createStagingFinalizationResumeLogger(
+    { VITE_APP_ENV: "production" },
+    { info: (...args) => entries.push(args) },
+  );
+  assert.equal(productionLogger, undefined);
+  const stagingLogger = createStagingFinalizationResumeLogger(
+    { VITE_APP_ENV: "staging" },
+    { info: (...args) => entries.push(args) },
+  );
+  stagingLogger(decideFinalizationResume({
+    room: {
+      stage: "reveal",
+      activeQuestionId: "q1",
+      currentQuestion: { questionId: "q1" },
+      finalization: { status: "processing" },
+    },
+    canFinalize: true,
+    hookReady: true,
+    officialResultLoading: false,
+    officialResultExists: false,
+    requestActive: false,
+  }));
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0][0], "[staging-finalization-resume]");
+  assert.deepEqual(Object.keys(entries[0][1]).sort(), [
+    "activeQuestionId",
+    "currentQuestionId",
+    "effectMounted",
+    "finalizationStatus",
+    "hookReady",
+    "reason",
+    "requestActive",
+    "resultExists",
+    "resultListenerInitialized",
+    "stage",
+  ]);
 });
 
 test("a direct result read after timeout avoids another finalization request", async () => {

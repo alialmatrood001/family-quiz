@@ -1,6 +1,8 @@
 const RESUMABLE_STAGES = new Set(["reveal", "finalizing", "results"]);
 const RESUMABLE_STATES = new Set(["processing", "failed"]);
 
+export const INITIAL_RESULT_WAIT_MS = 1_500;
+
 export function timestampToMillis(value) {
   if (
     (typeof value === "number" || (typeof value === "string" && value.trim())) &&
@@ -29,6 +31,7 @@ export function decideFinalizationResume({
   canFinalize,
   hookReady,
   officialResultLoading,
+  initialResultWaitExpired,
   officialResultExists,
   requestActive,
   attemptedQuestionId,
@@ -40,34 +43,66 @@ export function decideFinalizationResume({
       room?.activeQuestionId ||
       "",
   ).trim();
+  const stage = String(room?.stage || "");
   const finalizationState = String(room?.finalization?.status || "");
   const startedAtMs = finalizationStartedAtMs(room);
   const lockAgeMs = startedAtMs === null ? null : Math.max(0, nowMs - startedAtMs);
-  const base = { questionId, finalizationState, lockAgeMs };
+  const base = {
+    questionId,
+    activeQuestionId: String(room?.activeQuestionId || ""),
+    currentQuestionId: String(
+      room?.currentQuestion?.questionId || room?.currentQuestion?.id || "",
+    ),
+    stage,
+    finalizationState,
+    lockAgeMs,
+    hookReady: hookReady === true,
+    initialResultLoaded: officialResultLoading !== true,
+    officialResultExists: officialResultExists === true,
+    requestActive: requestActive === true,
+  };
 
-  if (!canFinalize) return { ...base, shouldResume: false, reason: "admin-not-ready" };
-  if (!questionId) return { ...base, shouldResume: false, reason: "question-not-ready" };
+  if (!canFinalize) return { ...base, shouldResume: false, reason: "auth-not-ready" };
+  if (!questionId) return { ...base, shouldResume: false, reason: "no-active-question" };
   if (!hookReady) return { ...base, shouldResume: false, reason: "hook-not-ready" };
-  if (!RESUMABLE_STAGES.has(String(room?.stage || ""))) {
-    return { ...base, shouldResume: false, reason: "stage-not-resumable" };
+  if (!RESUMABLE_STAGES.has(stage)) {
+    return { ...base, shouldResume: false, reason: "stage-not-finalizable" };
   }
   if (!RESUMABLE_STATES.has(finalizationState)) {
-    return { ...base, shouldResume: false, reason: "state-not-resumable" };
+    return { ...base, shouldResume: false, reason: "status-not-resumable" };
   }
-  if (officialResultLoading) {
-    return { ...base, shouldResume: false, reason: "official-result-loading" };
+  if (officialResultLoading && !initialResultWaitExpired) {
+    return { ...base, shouldResume: false, reason: "waiting-for-initial-result" };
   }
   if (officialResultExists || String(room?.processedQuestionId || "") === questionId) {
-    return { ...base, shouldResume: false, reason: "official-result-exists" };
+    return { ...base, shouldResume: false, reason: "result-exists" };
   }
-  if (requestActive) return { ...base, shouldResume: false, reason: "request-active" };
+  if (requestActive) return { ...base, shouldResume: false, reason: "manual-request-active" };
   if (String(attemptedQuestionId || "") === questionId) {
     return { ...base, shouldResume: false, reason: "already-attempted" };
   }
   return {
     ...base,
     shouldResume: true,
-    reason: finalizationState === "failed" ? "resume-failed" : "resume-processing",
+    reason: "resume-request-started",
+  };
+}
+
+export function createStagingFinalizationResumeLogger(environment, logger = console) {
+  if (String(environment?.VITE_APP_ENV || "") !== "staging") return undefined;
+  return (decision) => {
+    logger.info?.("[staging-finalization-resume]", {
+      reason: decision.reason,
+      activeQuestionId: decision.activeQuestionId || null,
+      currentQuestionId: decision.currentQuestionId || null,
+      stage: decision.stage || null,
+      finalizationStatus: decision.finalizationState || null,
+      resultListenerInitialized: decision.initialResultLoaded,
+      resultExists: decision.officialResultExists,
+      hookReady: decision.hookReady,
+      requestActive: decision.requestActive,
+      effectMounted: true,
+    });
   };
 }
 

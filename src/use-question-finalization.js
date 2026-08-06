@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { questionFinalizationClient } from "./finalize-question-client.js";
-import { attemptFinalizationResume } from "./finalization-resume.js";
+import {
+  INITIAL_RESULT_WAIT_MS,
+  attemptFinalizationResume,
+} from "./finalization-resume.js";
 
 const INITIAL_STATE = { status: "idle", error: null, result: null };
 
@@ -25,10 +28,13 @@ export function useQuestionFinalization({
   canFinalize,
   officialResultState,
   onResumeDecision,
+  finalizationClient = questionFinalizationClient,
+  initialResultWaitMs = INITIAL_RESULT_WAIT_MS,
 }) {
   const [state, setState] = useState(INITIAL_STATE);
   const [requestActive, setRequestActive] = useState(false);
   const [initializedQuestionId, setInitializedQuestionId] = useState("");
+  const [resultWaitExpiredQuestionId, setResultWaitExpiredQuestionId] = useState("");
   const abortRef = useRef(null);
   const requestRef = useRef(null);
   const attemptedResumeRef = useRef(null);
@@ -39,10 +45,30 @@ export function useQuestionFinalization({
     abortRef.current = null;
     requestRef.current = null;
     attemptedResumeRef.current = null;
+    setResultWaitExpiredQuestionId("");
     setRequestActive(false);
     setState(INITIAL_STATE);
     setInitializedQuestionId(questionId);
   }, [questionId]);
+
+  useEffect(() => {
+    const resultStateMatchesQuestion =
+      String(officialResultState?.questionId || "") === String(questionId);
+    if (
+      !questionId ||
+      (resultStateMatchesQuestion && officialResultState?.loading !== true)
+    ) return undefined;
+    const timer = setTimeout(
+      () => setResultWaitExpiredQuestionId(String(questionId)),
+      Math.max(0, Number(initialResultWaitMs) || 0),
+    );
+    return () => clearTimeout(timer);
+  }, [
+    initialResultWaitMs,
+    officialResultState?.loading,
+    officialResultState?.questionId,
+    questionId,
+  ]);
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
@@ -87,7 +113,7 @@ export function useQuestionFinalization({
 
     const operation = (async () => {
       try {
-        const result = await questionFinalizationClient.finalizeAndWait({
+        const result = await finalizationClient.finalizeAndWait({
           roomId: "family-quiz-001",
           questionId,
           signal: controller.signal,
@@ -113,7 +139,7 @@ export function useQuestionFinalization({
     })();
     requestRef.current = operation;
     return operation;
-  }, [canFinalize, questionId]);
+  }, [canFinalize, finalizationClient, questionId]);
 
   useEffect(() => {
     const resultStateMatchesQuestion =
@@ -125,6 +151,8 @@ export function useQuestionFinalization({
         hookReady: initializedQuestionId === questionId,
         officialResultLoading:
           !resultStateMatchesQuestion || officialResultState?.loading === true,
+        initialResultWaitExpired:
+          resultWaitExpiredQuestionId === String(questionId),
         officialResultExists:
           resultStateMatchesQuestion && officialResultState?.exists === true,
         requestActive,
@@ -148,6 +176,7 @@ export function useQuestionFinalization({
     questionId,
     requestActive,
     requestFinalization,
+    resultWaitExpiredQuestionId,
     room,
   ]);
 
