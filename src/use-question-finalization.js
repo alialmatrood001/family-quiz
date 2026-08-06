@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { questionFinalizationClient } from "./finalize-question-client.js";
+import { attemptFinalizationResume } from "./finalization-resume.js";
 
 const INITIAL_STATE = { status: "idle", error: null, result: null };
 
@@ -19,19 +20,28 @@ export function getFinalizeErrorMessage(code) {
   return messages[code] || "تعذر إنهاء السؤال. حاول مرة أخرى.";
 }
 
-export function useQuestionFinalization({ room, canFinalize }) {
+export function useQuestionFinalization({
+  room,
+  canFinalize,
+  officialResultState,
+  onResumeDecision,
+}) {
   const [state, setState] = useState(INITIAL_STATE);
   const [requestActive, setRequestActive] = useState(false);
+  const [initializedQuestionId, setInitializedQuestionId] = useState("");
   const abortRef = useRef(null);
   const requestRef = useRef(null);
+  const attemptedResumeRef = useRef(null);
   const questionId = room?.currentQuestion?.questionId || room?.currentQuestion?.id || "";
 
   useEffect(() => {
     abortRef.current?.abort();
     abortRef.current = null;
     requestRef.current = null;
+    attemptedResumeRef.current = null;
     setRequestActive(false);
     setState(INITIAL_STATE);
+    setInitializedQuestionId(questionId);
   }, [questionId]);
 
   useEffect(() => () => abortRef.current?.abort(), []);
@@ -104,6 +114,42 @@ export function useQuestionFinalization({ room, canFinalize }) {
     requestRef.current = operation;
     return operation;
   }, [canFinalize, questionId]);
+
+  useEffect(() => {
+    const resultStateMatchesQuestion =
+      String(officialResultState?.questionId || "") === String(questionId);
+    const { promise } = attemptFinalizationResume({
+      context: {
+        room,
+        canFinalize,
+        hookReady: initializedQuestionId === questionId,
+        officialResultLoading:
+          !resultStateMatchesQuestion || officialResultState?.loading === true,
+        officialResultExists:
+          resultStateMatchesQuestion && officialResultState?.exists === true,
+        requestActive,
+      },
+      attemptedRef: attemptedResumeRef,
+      request: requestFinalization,
+      onDecision: onResumeDecision,
+    });
+    promise?.catch((error) => {
+      if (error?.code !== "cancelled" && import.meta.env.DEV) {
+        console.error("Automatic finalization resume failed.", error?.code);
+      }
+    });
+  }, [
+    canFinalize,
+    initializedQuestionId,
+    officialResultState?.exists,
+    officialResultState?.loading,
+    officialResultState?.questionId,
+    onResumeDecision,
+    questionId,
+    requestActive,
+    requestFinalization,
+    room,
+  ]);
 
   return {
     ...state,

@@ -785,6 +785,41 @@ function useAnswers(questionId, enabled = true, onError) {
   }));
 }
 
+function useOfficialQuestionResult(questionId, enabled = true, onError) {
+  const safeQuestionId = String(questionId || "");
+  const [state, setState] = useState({
+    questionId: "",
+    loading: false,
+    exists: false,
+    result: null,
+  });
+
+  useEffect(() => {
+    if (!enabled || !safeQuestionId) {
+      setState({ questionId: safeQuestionId, loading: false, exists: false, result: null });
+      return undefined;
+    }
+
+    setState({ questionId: safeQuestionId, loading: true, exists: false, result: null });
+    return subscribeToFirestoreRead(
+      doc(db, "rooms", ROOM_ID, "questionResults", safeQuestionId),
+      `rooms/${ROOM_ID}/questionResults/${safeQuestionId}`,
+      (snapshot) => setState({
+        questionId: safeQuestionId,
+        loading: false,
+        exists: snapshot.exists(),
+        result: snapshot.exists() ? snapshot.data() : null,
+      }),
+      onError,
+      enabled,
+    );
+  }, [enabled, onError, safeQuestionId]);
+
+  return state.questionId === safeQuestionId
+    ? state
+    : { questionId: safeQuestionId, loading: true, exists: false, result: null };
+}
+
 function useAllAnswers(enabled = true, onError) {
   const [answers, setAnswers] = useState([]);
   const [officialResults, setOfficialResults] = useState([]);
@@ -1324,42 +1359,6 @@ function AutoActivateReadyQuestion({ room }) {
       console.error("AutoActivateReadyQuestion failed:", err)
     );
   }, [room, now]);
-
-  return null;
-}
-
-function AutoFinalizeQuestion({ room, finalization }) {
-  const resumedQuestionRef = useRef(null);
-  useEffect(() => {
-    const questionId = room?.currentQuestion?.questionId || room?.currentQuestion?.id;
-    const serverIsProcessing =
-      room?.finalization?.status === "processing" &&
-      isSameId(room?.finalization?.questionId, questionId);
-    const needsResume =
-      !!questionId &&
-      !isSameId(room?.processedQuestionId, questionId) &&
-      (room?.stage === "results" || serverIsProcessing);
-    if (
-      !needsResume ||
-      finalization.hasActiveRequest ||
-      isSameId(resumedQuestionRef.current, questionId)
-    ) return;
-
-    resumedQuestionRef.current = questionId;
-    finalization.requestFinalization().catch((error) => {
-      if (error?.code !== "cancelled" && import.meta.env.DEV) {
-        console.error("Automatic finalization resume failed.", error?.code);
-      }
-    });
-  }, [
-    room?.stage,
-    room?.processedQuestionId,
-    room?.currentQuestion?.questionId,
-    room?.currentQuestion?.id,
-    room?.finalization?.status,
-    room?.finalization?.questionId,
-    finalization,
-  ]);
 
   return null;
 }
@@ -5711,6 +5710,11 @@ function AdminPanel({ initialView = "control", adminSession }) {
     listenersReady,
     reportFirestoreReadError,
   );
+  const officialResultState = useOfficialQuestionResult(
+    room?.currentQuestion?.questionId || room?.currentQuestion?.id,
+    listenersReady,
+    reportFirestoreReadError,
+  );
   const allAnswers = useAllAnswers(listenersReady, reportFirestoreReadError);
   const visitors = useVisitors(canReadQuestionBank, reportFirestoreReadError);
   const [roomCreationBusy, setRoomCreationBusy] = useState(false);
@@ -5718,6 +5722,7 @@ function AdminPanel({ initialView = "control", adminSession }) {
   const finalization = useQuestionFinalization({
     room,
     canFinalize: adminSession?.isAdmin === true,
+    officialResultState,
   });
   const gameHistory = [...(room?.gameHistory || [])].sort(
     (a, b) => Number(b.savedAtMs || 0) - Number(a.savedAtMs || 0)
@@ -5749,7 +5754,6 @@ function AdminPanel({ initialView = "control", adminSession }) {
       <AutoRevealCorrectAnswer room={room} />
       <AutoEndQuestionOnTimer room={room} />
       <AutoActivateReadyQuestion room={room} />
-      <AutoFinalizeQuestion room={room} finalization={finalization} />
       <AutoFinishFinalCountdown room={room} players={players} questions={questions} allAnswers={allAnswers} messages={messages} />
     </>
   );

@@ -8,11 +8,18 @@ import {
   isQuizResetBlocked,
   runQuizResetAction,
 } from "../../../src/admin-reset-flow.js";
+import {
+  attemptFinalizationResume,
+  decideFinalizationResume,
+  finalizationStartedAtMs,
+  timestampToMillis,
+} from "../../../src/finalization-resume.js";
 import { createQuestionFinalizationClient } from "../../../src/finalize-question-client.js";
+import { SERVER_OPERATIONS } from "../../../src/server-api-core.js";
 
 const root = path.resolve(import.meta.dirname, "../../..");
 
-test("a missing result after a stale-lock window is read directly and finalized once more", async () => {
+test("recent processing is checked again after the result wait window", async () => {
   let finalizeCalls = 0;
   let waitCalls = 0;
   let recoveryCalls = 0;
@@ -40,6 +47,163 @@ test("a missing result after a stale-lock window is read directly and finalized 
   assert.equal(finalizeCalls, 2);
   assert.equal(waitCalls, 2);
   assert.equal(recoveryCalls, 1);
+});
+
+test("reload during processing starts exactly one finalize request on the quiz endpoint", async () => {
+  const attemptedRef = { current: null };
+  let requests = 0;
+  const context = {
+    room: {
+      stage: "reveal",
+      currentQuestion: { questionId: "q1" },
+      finalization: { status: "processing", questionId: "q1", startedAtMs: 1_000 },
+    },
+    canFinalize: true,
+    hookReady: true,
+    officialResultLoading: false,
+    officialResultExists: false,
+    requestActive: false,
+    nowMs: 2_000,
+  };
+  const first = attemptFinalizationResume({
+    context,
+    attemptedRef,
+    request: async () => { requests += 1; },
+  });
+  const second = attemptFinalizationResume({
+    context,
+    attemptedRef,
+    request: async () => { requests += 1; },
+  });
+  await first.promise;
+  assert.equal(second.promise, null);
+  assert.equal(requests, 1);
+  assert.equal(SERVER_OPERATIONS.finalizeQuestion.endpoint, "quiz");
+});
+
+test("Firestore Timestamp values produce the correct finalization age", () => {
+  const timestamp = { toMillis: () => 10_000 };
+  assert.equal(timestampToMillis(timestamp), 10_000);
+  assert.equal(timestampToMillis({ seconds: 10, nanoseconds: 500_000_000 }), 10_500);
+  assert.equal(finalizationStartedAtMs({ finalization: { startedAt: timestamp } }), 10_000);
+  assert.equal(
+    decideFinalizationResume({
+      room: {
+        stage: "reveal",
+        currentQuestion: { questionId: "q1" },
+        finalization: { status: "processing", startedAt: timestamp },
+      },
+      canFinalize: true,
+      hookReady: true,
+      officialResultLoading: false,
+      officialResultExists: false,
+      requestActive: false,
+      nowMs: 50_000,
+    }).lockAgeMs,
+    40_000,
+  );
+});
+
+test("a question arriving after the room snapshot triggers only after hook initialization", async () => {
+  const attemptedRef = { current: null };
+  let requests = 0;
+  const base = {
+    canFinalize: true,
+    officialResultLoading: false,
+    officialResultExists: false,
+    requestActive: false,
+  };
+  const early = attemptFinalizationResume({
+    context: { ...base, room: { stage: "reveal", finalization: { status: "processing" } }, hookReady: false },
+    attemptedRef,
+    request: async () => { requests += 1; },
+  });
+  assert.equal(early.decision.reason, "question-not-ready");
+  assert.equal(attemptedRef.current, null);
+  const ready = attemptFinalizationResume({
+    context: {
+      ...base,
+      room: {
+        stage: "reveal",
+        activeQuestionId: "q1",
+        finalization: { status: "processing" },
+      },
+      hookReady: true,
+    },
+    attemptedRef,
+    request: async () => { requests += 1; },
+  });
+  await ready.promise;
+  assert.equal(requests, 1);
+});
+
+test("an active manual request delays reload resume without consuming its single attempt", async () => {
+  const attemptedRef = { current: null };
+  let requests = 0;
+  const context = {
+    room: {
+      stage: "reveal",
+      currentQuestion: { questionId: "q1" },
+      finalization: { status: "processing" },
+    },
+    canFinalize: true,
+    hookReady: true,
+    officialResultLoading: false,
+    officialResultExists: false,
+  };
+  const busy = attemptFinalizationResume({
+    context: { ...context, requestActive: true },
+    attemptedRef,
+    request: async () => { requests += 1; },
+  });
+  assert.equal(busy.decision.reason, "request-active");
+  assert.equal(attemptedRef.current, null);
+  const resumed = attemptFinalizationResume({
+    context: { ...context, requestActive: false },
+    attemptedRef,
+    request: async () => { requests += 1; },
+  });
+  await resumed.promise;
+  assert.equal(requests, 1);
+});
+
+test("an existing official result prevents a reload resume request", () => {
+  const attemptedRef = { current: null };
+  const outcome = attemptFinalizationResume({
+    context: {
+      room: {
+        stage: "reveal",
+        currentQuestion: { questionId: "q1" },
+        finalization: { status: "processing" },
+      },
+      canFinalize: true,
+      hookReady: true,
+      officialResultLoading: false,
+      officialResultExists: true,
+      requestActive: false,
+    },
+    attemptedRef,
+    request: async () => assert.fail("resume request must not be sent"),
+  });
+  assert.equal(outcome.promise, null);
+  assert.equal(outcome.decision.reason, "official-result-exists");
+});
+
+test("failed finalization is eligible for one safe resume", () => {
+  const decision = decideFinalizationResume({
+    room: {
+      stage: "reveal",
+      currentQuestion: { questionId: "q1" },
+      finalization: { status: "failed" },
+    },
+    canFinalize: true,
+    hookReady: true,
+    officialResultLoading: false,
+    officialResultExists: false,
+    requestActive: false,
+  });
+  assert.equal(decision.shouldResume, true);
+  assert.equal(decision.reason, "resume-failed");
 });
 
 test("a direct result read after timeout avoids another finalization request", async () => {
