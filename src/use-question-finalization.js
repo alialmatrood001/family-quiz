@@ -19,6 +19,7 @@ export function getFinalizeErrorMessage(code) {
     aborted: "توجد عملية احتساب جارية؛ ننتظر نتيجتها.",
     internal: "حدث خطأ غير متوقع أثناء الاحتساب.",
     "deadline-exceeded": "تأخر وصول النتيجة الرسمية. يمكنك إعادة المحاولة بأمان.",
+    "data-loss": "تعذر استعادة وثيقة النتيجة الرسمية بأمان. راجع حالة السؤال قبل المتابعة.",
   };
   return messages[code] || "تعذر إنهاء السؤال. حاول مرة أخرى.";
 }
@@ -74,22 +75,45 @@ export function useQuestionFinalization({
 
   useEffect(() => {
     if (!questionId) return;
-    if (String(room?.processedQuestionId || "") === String(questionId)) {
+    const resultStateMatchesQuestion =
+      String(officialResultState?.questionId || "") === String(questionId);
+    if (resultStateMatchesQuestion && officialResultState?.exists === true) {
       setState((current) => (
         current.status === "completed"
           ? current
-          : { status: "completed", error: null, result: current.result }
+          : {
+              status: "completed",
+              error: null,
+              result: officialResultState?.result || current.result,
+            }
       ));
     } else if (
-      String(room?.processingQuestionId || room?.finalization?.questionId || "") === String(questionId)
+      String(room?.processingQuestionId || "") === String(questionId) ||
+      (
+        String(room?.finalization?.questionId || "") === String(questionId) &&
+        ["processing", "failed", "completed"].includes(room?.finalization?.status)
+      )
     ) {
       setState((current) => (
         current.status === "requesting"
           ? current
-          : { ...current, status: "processing", error: null }
+          : {
+              ...current,
+              status: room?.finalization?.status === "completed" ? "recovering" : "processing",
+              error: null,
+            }
       ));
     }
-  }, [questionId, room?.processedQuestionId, room?.processingQuestionId, room?.finalization?.questionId]);
+  }, [
+    officialResultState?.exists,
+    officialResultState?.questionId,
+    officialResultState?.result,
+    questionId,
+    room?.finalization?.questionId,
+    room?.finalization?.status,
+    room?.processedQuestionId,
+    room?.processingQuestionId,
+  ]);
 
   const requestFinalization = useCallback(() => {
     if (requestRef.current) {

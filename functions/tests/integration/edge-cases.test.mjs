@@ -208,6 +208,65 @@ test("fresh duplicate reports processing and stale lock is recoverable", async (
   assert.equal(result.status, "finalized");
 });
 
+test("completed state rebuilds a missing canonical result without duplicating points", async (t) => {
+  const scenario = buildScenario({
+    roomId: "edge-completed-missing-result",
+    playerCount: 2,
+    correctCount: 1,
+    wrongCount: 1,
+  });
+  t.after(() => deleteRoom(scenario.roomId));
+  await writeScenario(scenario);
+  await callFinalizeQuestion({ roomId: scenario.roomId, questionId: scenario.questionId });
+  const completed = await readState(scenario.roomId);
+  const scores = completed.players.map((player) => player.score);
+  await roomRef(scenario.roomId).collection("questionResults").doc(scenario.questionId).delete();
+  await roomRef(scenario.roomId).update({ stage: "reveal" });
+
+  const recovered = await callFinalizeQuestion({
+    roomId: scenario.roomId,
+    questionId: scenario.questionId,
+  });
+  assert.equal(recovered.status, "recovered-missing-result");
+  const afterRecovery = await readState(scenario.roomId);
+  assert.equal(afterRecovery.results.length, 1);
+  assert.equal(afterRecovery.room.stage, "results");
+  assert.deepEqual(afterRecovery.players.map((player) => player.score), scores);
+  const repeated = await callFinalizeQuestion({
+    roomId: scenario.roomId,
+    questionId: scenario.questionId,
+  });
+  assert.equal(repeated.status, "already-finalized");
+  assert.deepEqual((await readState(scenario.roomId)).players.map((player) => player.score), scores);
+});
+
+test("a completed result stored under the wrong document id is canonicalized once", async (t) => {
+  const scenario = buildScenario({
+    roomId: "edge-completed-wrong-result-id",
+    playerCount: 1,
+    correctCount: 1,
+    wrongCount: 0,
+  });
+  t.after(() => deleteRoom(scenario.roomId));
+  await writeScenario(scenario);
+  await callFinalizeQuestion({ roomId: scenario.roomId, questionId: scenario.questionId });
+  const results = roomRef(scenario.roomId).collection("questionResults");
+  const canonical = await results.doc(scenario.questionId).get();
+  const originalScore = (await readState(scenario.roomId)).players[0].score;
+  await results.doc("wrong-result-id").set(canonical.data());
+  await results.doc(scenario.questionId).delete();
+  await roomRef(scenario.roomId).update({ stage: "reveal" });
+
+  const recovered = await callFinalizeQuestion({
+    roomId: scenario.roomId,
+    questionId: scenario.questionId,
+  });
+  assert.equal(recovered.status, "recovered-result-id");
+  assert.equal((await results.doc(scenario.questionId).get()).exists, true);
+  assert.equal((await results.doc("wrong-result-id").get()).exists, false);
+  assert.equal((await readState(scenario.roomId)).players[0].score, originalScore);
+});
+
 test("post-claim failure records a recoverable failed state without partial scores", { timeout: 30_000 }, async (t) => {
   const scenario = buildScenario({
     roomId: "edge-atomic-limit",

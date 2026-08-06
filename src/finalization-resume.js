@@ -1,5 +1,5 @@
 const RESUMABLE_STAGES = new Set(["reveal", "finalizing", "results"]);
-const RESUMABLE_STATES = new Set(["processing", "failed"]);
+const RESUMABLE_STATES = new Set(["processing", "failed", "completed"]);
 
 export const INITIAL_RESULT_WAIT_MS = 1_500;
 
@@ -68,14 +68,18 @@ export function decideFinalizationResume({
   if (!RESUMABLE_STAGES.has(stage)) {
     return { ...base, shouldResume: false, reason: "stage-not-finalizable" };
   }
+  const completedRoomIsConsistent =
+    finalizationState === "completed" &&
+    stage === "results" &&
+    String(room?.processedQuestionId || "") === questionId;
+  if (officialResultExists && (finalizationState !== "completed" || completedRoomIsConsistent)) {
+    return { ...base, shouldResume: false, reason: "result-exists" };
+  }
   if (!RESUMABLE_STATES.has(finalizationState)) {
     return { ...base, shouldResume: false, reason: "status-not-resumable" };
   }
   if (officialResultLoading && !initialResultWaitExpired) {
     return { ...base, shouldResume: false, reason: "waiting-for-initial-result" };
-  }
-  if (officialResultExists || String(room?.processedQuestionId || "") === questionId) {
-    return { ...base, shouldResume: false, reason: "result-exists" };
   }
   if (requestActive) return { ...base, shouldResume: false, reason: "manual-request-active" };
   if (String(attemptedQuestionId || "") === questionId) {

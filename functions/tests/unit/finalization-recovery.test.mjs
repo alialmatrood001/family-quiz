@@ -190,6 +190,43 @@ test("an existing official result prevents a reload resume request", () => {
   assert.equal(outcome.decision.reason, "result-exists");
 });
 
+test("a consistent completed room with its official result sends no recovery request", () => {
+  const decision = decideFinalizationResume({
+    room: {
+      stage: "results",
+      activeQuestionId: "q1",
+      currentQuestion: { questionId: "q1" },
+      processedQuestionId: "q1",
+      finalization: { status: "completed", questionId: "q1" },
+    },
+    canFinalize: true,
+    hookReady: true,
+    officialResultLoading: false,
+    officialResultExists: true,
+    requestActive: false,
+  });
+  assert.equal(decision.shouldResume, false);
+  assert.equal(decision.reason, "result-exists");
+});
+
+test("completed without a canonical result requests idempotent server recovery", () => {
+  const decision = decideFinalizationResume({
+    room: {
+      stage: "reveal",
+      activeQuestionId: "q1",
+      currentQuestion: { questionId: "q1" },
+      finalization: { status: "completed", questionId: "q1" },
+    },
+    canFinalize: true,
+    hookReady: true,
+    officialResultLoading: false,
+    officialResultExists: false,
+    requestActive: false,
+  });
+  assert.equal(decision.shouldResume, true);
+  assert.equal(decision.reason, "resume-request-started");
+});
+
 test("failed finalization is eligible for one safe resume", () => {
   const decision = decideFinalizationResume({
     room: {

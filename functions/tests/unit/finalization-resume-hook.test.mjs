@@ -140,3 +140,38 @@ test("the real hook cannot remain blocked when the initial result snapshot never
   });
   await act(async () => renderer.unmount());
 });
+
+test("the real hook accepts the canonical result and leaves no completed wait state", async () => {
+  let requests = 0;
+  const client = {
+    finalizeAndWait: async () => {
+      requests += 1;
+      return { officialResult: { questionId: "q1" } };
+    },
+  };
+  const room = {
+    stage: "results",
+    activeQuestionId: "q1",
+    currentQuestion: { questionId: "q1" },
+    processedQuestionId: "q1",
+    finalization: { status: "completed", questionId: "q1" },
+  };
+  let renderer;
+  await act(async () => {
+    renderer = TestRenderer.create(React.createElement(FinalizationHarness, {
+      room,
+      resultState: {
+        questionId: "q1",
+        loading: false,
+        exists: true,
+        result: { questionId: "q1", runId: "official-run" },
+      },
+      client,
+      decisions: [],
+    }));
+  });
+  assert.equal(requests, 0);
+  assert.equal(renderer.toJSON().props["data-status"], "completed");
+  assert.doesNotMatch(renderer.toJSON().children.join(""), /جاري اعتماد النتائج/);
+  await act(async () => renderer.unmount());
+});

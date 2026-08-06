@@ -43,6 +43,129 @@ function publicResult(result, status) {
   };
 }
 
+function sameId(left, right) {
+  return String(left || "").trim() === String(right || "").trim();
+}
+
+function completedRoomPatch(room, questionId, result, resultRef, timestamp) {
+  const previousSummary = room.questionResultsById?.[questionId] || {};
+  return {
+    processedQuestionId: questionId,
+    resultsCalculated: true,
+    resultsCalculatedQuestionId: questionId,
+    currentQuestion: {
+      ...room.currentQuestion,
+      resultsCalculated: true,
+      resultsCalculatedAt: room.currentQuestion?.resultsCalculatedAt || timestamp,
+    },
+    questionResultsById: {
+      [questionId]: {
+        ...previousSummary,
+        questionId,
+        officialResultPath: resultRef.path,
+        runId: result.runId || room.finalization?.runId || null,
+      },
+    },
+    calculationStatus: room.calculationStatus || "calculated",
+    finalization: {
+      ...room.finalization,
+      status: "completed",
+      questionId,
+      runId: result.runId || room.finalization?.runId || null,
+      completedAt: room.finalization?.completedAt || timestamp,
+      completedAtMs: Number(
+        room.finalization?.completedAtMs || result.finalizedAtMs || Date.now()
+      ),
+    },
+    processingQuestionId: null,
+    processingStartedAtMs: null,
+    resultsError: null,
+    stage: "results",
+    updatedAt: timestamp,
+  };
+}
+
+function buildRecoveredResult({ room, players, answers, questionId, currentRunId, finalizedAtMs }) {
+  const display = room.resultsDisplaySnapshot;
+  const summary = room.questionResultsById?.[questionId] || {};
+  const before = Array.isArray(display?.leaderboardBefore) ? display.leaderboardBefore : [];
+  const after = Array.isArray(display?.leaderboardAfter) ? display.leaderboardAfter : [];
+  const beforeById = new Map(before.map((player, index) => [String(player.id), { ...player, rank: index + 1 }]));
+  const afterById = new Map(after.map((player, index) => [String(player.id), { ...player, rank: index + 1 }]));
+  const playerIds = new Set(players.map((player) => player.id));
+  const { selected: answerByPlayer, diagnostics } = selectOfficialAnswers(
+    answers,
+    questionId,
+    playerIds
+  );
+
+  if (
+    !sameId(room.finalization?.questionId, questionId) ||
+    room.finalization?.status !== "completed" ||
+    !sameId(room.processedQuestionId, questionId) ||
+    !sameId(room.resultsCalculatedQuestionId, questionId) ||
+    !sameId(display?.questionId, questionId) ||
+    players.some((player) => {
+      const finalPlayer = afterById.get(String(player.id));
+      return (
+        !finalPlayer ||
+        !sameId(player.lastQuestionId, questionId) ||
+        Number(player.score || 0) !== Number(finalPlayer.score || 0)
+      );
+    })
+  ) {
+    throw new HttpsError(
+      "data-loss",
+      "Completed finalization is missing authoritative result evidence"
+    );
+  }
+
+  const results = players.map((player) => {
+    const playerId = String(player.id);
+    const previous = beforeById.get(playerId);
+    const finalPlayer = afterById.get(playerId);
+    const answer = answerByPlayer.get(player.id) || null;
+    const answered = display.answeredByPlayer?.[player.id] === true;
+    const points = Number(display.bonusByPlayer?.[player.id] || 0);
+    const jokerLabel = String(room.collectingBonusJokerByPlayer?.[player.id] || "");
+    const jokerMultiplier = Number(jokerLabel.replace(/^x/, "")) || null;
+    return {
+      playerId: player.id,
+      answered,
+      selectedIndex: answered ? answer?.selectedIndex ?? null : null,
+      isCorrect: answered ? display.correctByPlayer?.[player.id] === true : null,
+      basePoints: jokerMultiplier ? points / jokerMultiplier : points,
+      points,
+      scoreBefore: Number(previous?.score ?? finalPlayer.score - points),
+      scoreAfter: Number(finalPlayer.score || 0),
+      rankBefore: Number(previous?.rank || 0) || null,
+      rankAfter: Number(finalPlayer.rank || 0) || null,
+      rankMovement: Number(display.rankMovementByPlayer?.[player.id] || 0),
+      jokerApplied: jokerMultiplier !== null,
+      jokerMultiplier,
+    };
+  }).sort((left, right) => String(left.playerId).localeCompare(String(right.playerId)));
+
+  return {
+    questionId,
+    runId: room.finalization.runId || currentRunId,
+    finalizedAt: room.finalization.completedAt || FieldValue.serverTimestamp(),
+    finalizedAtMs,
+    counts: {
+      players: players.length,
+      validAnswers: Number(summary.answersCount ?? results.filter((item) => item.answered).length),
+      correct: Number(summary.correctCount ?? results.filter((item) => item.isCorrect === true).length),
+      wrong: results.filter((item) => item.answered && item.isCorrect === false).length,
+      unanswered: results.filter((item) => !item.answered).length,
+      jokerApplied: Number(summary.jokerCount ?? results.filter((item) => item.jokerApplied).length),
+      invalidJoker: 0,
+      ...diagnostics,
+    },
+    results,
+    recoveredFromCompletedState: true,
+  };
+}
+
 function createFinalizeQuestionHandler({
   db,
   now = () => Date.now(),
@@ -55,6 +178,10 @@ function createFinalizeQuestionHandler({
     const currentRunId = runId();
     const roomRef = db.doc(`rooms/${roomId}`);
     const resultRef = roomRef.collection("questionResults").doc(questionId);
+    const matchingResultsQuery = roomRef
+      .collection("questionResults")
+      .where("questionId", "==", questionId)
+      .limit(2);
     const secretRef = roomRef.collection("questionSecrets").doc(questionId);
     let claimed = false;
 
@@ -70,6 +197,67 @@ function createFinalizeQuestionHandler({
       });
     };
 
+    const recoverCompletedResult = () => db.runTransaction(async (transaction) => {
+      const [roomSnapshot, resultSnapshot, matchingResults, playersSnapshot, answersSnapshot] =
+        await Promise.all([
+          transaction.get(roomRef),
+          transaction.get(resultRef),
+          transaction.get(matchingResultsQuery),
+          transaction.get(roomRef.collection("players")),
+          transaction.get(roomRef.collection("answers").where("questionId", "==", questionId)),
+        ]);
+      if (!roomSnapshot.exists) throw new HttpsError("not-found", "Room not found");
+      const room = roomSnapshot.data();
+      const timestamp = FieldValue.serverTimestamp();
+      if (resultSnapshot.exists) {
+        const result = resultSnapshot.data();
+        transaction.set(
+          roomRef,
+          completedRoomPatch(room, questionId, result, resultRef, timestamp),
+          { merge: true }
+        );
+        return { result, status: "already-finalized" };
+      }
+      const mismatched = matchingResults.docs.filter((document) => document.id !== questionId);
+      if (mismatched.length > 1) {
+        throw new HttpsError("data-loss", "Conflicting official result identifiers");
+      }
+      if (mismatched.length === 1) {
+        const result = mismatched[0].data();
+        transaction.create(resultRef, result);
+        transaction.delete(mismatched[0].ref);
+        transaction.set(
+          roomRef,
+          completedRoomPatch(room, questionId, result, resultRef, timestamp),
+          { merge: true }
+        );
+        return { result, status: "recovered-result-id" };
+      }
+      const players = playersSnapshot.docs
+        .map((document) => ({ id: document.id, ...document.data() }))
+        .filter((player) => !isVisitor(player));
+      const answers = answersSnapshot.docs.map((document) => ({
+        id: document.id,
+        ...document.data(),
+      }));
+      const finalizedAtMs = Number(room.finalization?.completedAtMs || now());
+      const result = buildRecoveredResult({
+        room,
+        players,
+        answers,
+        questionId,
+        currentRunId,
+        finalizedAtMs,
+      });
+      transaction.create(resultRef, result);
+      transaction.set(
+        roomRef,
+        completedRoomPatch(room, questionId, result, resultRef, timestamp),
+        { merge: true }
+      );
+      return { result, status: "recovered-missing-result" };
+    });
+
     try {
       const existingResult = await db.runTransaction(async (transaction) => {
         const roomSnapshot = await transaction.get(roomRef);
@@ -77,11 +265,45 @@ function createFinalizeQuestionHandler({
           throw new HttpsError("not-found", "Room not found");
         }
         const room = roomSnapshot.data();
-        const [resultSnapshot, secretSnapshot] = await Promise.all([
+        const [resultSnapshot, secretSnapshot, matchingResults] = await Promise.all([
           transaction.get(resultRef),
           transaction.get(secretRef),
+          transaction.get(matchingResultsQuery),
         ]);
-        if (resultSnapshot.exists) return { type: "result", data: resultSnapshot.data() };
+        if (resultSnapshot.exists) {
+          const result = resultSnapshot.data();
+          if (!sameId(result.questionId, questionId)) {
+            throw new HttpsError("data-loss", "Official result document id mismatch");
+          }
+          const roomNeedsReconciliation =
+            room.stage !== "results" ||
+            !sameId(room.processedQuestionId, questionId) ||
+            room.finalization?.status !== "completed";
+          if (roomNeedsReconciliation) {
+            transaction.set(
+              roomRef,
+              completedRoomPatch(
+                room,
+                questionId,
+                result,
+                resultRef,
+                FieldValue.serverTimestamp()
+              ),
+              { merge: true }
+            );
+          }
+          return {
+            type: "result",
+            data: result,
+            status: roomNeedsReconciliation ? "reconciled-completed-state" : "already-finalized",
+          };
+        }
+        const mismatched = matchingResults.docs.filter((document) => document.id !== questionId);
+        if (mismatched.length) return { type: "completed-missing" };
+        if (
+          room.finalization?.status === "completed" &&
+          sameId(room.finalization?.questionId, questionId)
+        ) return { type: "completed-missing" };
 
         const trustedRoom = secretSnapshot.exists
           ? {
@@ -132,8 +354,13 @@ function createFinalizeQuestionHandler({
         return { type: "claimed", staleLockReclaimed: finalization.status === "processing" };
       });
       if (existingResult.type === "result") {
-        logFinalization("info", "completed", "already-finalized", existingResult.data.runId);
-        return publicResult(existingResult.data, "already-finalized");
+        logFinalization("info", "completed", existingResult.status, existingResult.data.runId);
+        return publicResult(existingResult.data, existingResult.status);
+      }
+      if (existingResult.type === "completed-missing") {
+        const recovered = await recoverCompletedResult();
+        logFinalization("info", "completed", recovered.status, recovered.result.runId);
+        return publicResult(recovered.result, recovered.status);
       }
       if (existingResult.type === "processing") {
         logFinalization("info", "processing", "duplicate-request", existingResult.data.runId);
