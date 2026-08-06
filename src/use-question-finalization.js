@@ -25,6 +25,7 @@ export function getFinalizeErrorMessage(code) {
 }
 
 export function useQuestionFinalization({
+  enabled = true,
   room,
   canFinalize,
   officialResultState,
@@ -53,6 +54,7 @@ export function useQuestionFinalization({
   }, [questionId]);
 
   useEffect(() => {
+    if (!enabled) return undefined;
     const resultStateMatchesQuestion =
       String(officialResultState?.questionId || "") === String(questionId);
     if (
@@ -65,6 +67,7 @@ export function useQuestionFinalization({
     );
     return () => clearTimeout(timer);
   }, [
+    enabled,
     initialResultWaitMs,
     officialResultState?.loading,
     officialResultState?.questionId,
@@ -74,6 +77,7 @@ export function useQuestionFinalization({
   useEffect(() => () => abortRef.current?.abort(), []);
 
   useEffect(() => {
+    if (!enabled) return;
     if (!questionId) return;
     const resultStateMatchesQuestion =
       String(officialResultState?.questionId || "") === String(questionId);
@@ -105,6 +109,7 @@ export function useQuestionFinalization({
       ));
     }
   }, [
+    enabled,
     officialResultState?.exists,
     officialResultState?.questionId,
     officialResultState?.result,
@@ -119,7 +124,7 @@ export function useQuestionFinalization({
     if (requestRef.current) {
       return requestRef.current;
     }
-    if (!canFinalize) {
+    if (!enabled || !canFinalize) {
       const error = { code: "permission-denied" };
       setState({ status: "error", error, result: null });
       return Promise.reject(error);
@@ -163,9 +168,10 @@ export function useQuestionFinalization({
     })();
     requestRef.current = operation;
     return operation;
-  }, [canFinalize, finalizationClient, questionId]);
+  }, [canFinalize, enabled, finalizationClient, questionId]);
 
   useEffect(() => {
+    if (!enabled) return;
     const resultStateMatchesQuestion =
       String(officialResultState?.questionId || "") === String(questionId);
     const { promise } = attemptFinalizationResume({
@@ -192,6 +198,7 @@ export function useQuestionFinalization({
     });
   }, [
     canFinalize,
+    enabled,
     initializedQuestionId,
     officialResultState?.exists,
     officialResultState?.loading,

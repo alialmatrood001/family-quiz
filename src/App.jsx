@@ -21,6 +21,10 @@ import { adminAuth } from "./admin-auth.js";
 import { useQuestionFinalization } from "./use-question-finalization.js";
 import { createStagingFinalizationResumeLogger } from "./finalization-resume.js";
 import {
+  DisplayOfficialResultController,
+  resolveDisplayResult,
+} from "./display-official-result.js";
+import {
   activateJokerSecurely,
   cancelJokerSecurely,
   recoverPlayerSecurely,
@@ -820,6 +824,14 @@ function useOfficialQuestionResult(questionId, enabled = true, onError) {
   return state.questionId === safeQuestionId
     ? state
     : { questionId: safeQuestionId, loading: true, exists: false, result: null };
+}
+
+async function readOfficialQuestionResult(questionId) {
+  const snapshot = await getDoc(doc(db, "rooms", ROOM_ID, "questionResults", questionId));
+  return {
+    exists: snapshot.exists(),
+    result: snapshot.exists() ? snapshot.data() : null,
+  };
 }
 
 function useAllAnswers(enabled = true, onError) {
@@ -2420,7 +2432,7 @@ function QuestionScreen({
   );
 }
 
-function ResultsDisplay({ room, messages, answers = [] }) {
+function ResultsDisplay({ room, players = [], messages, answers = [], officialResultState }) {
   const currentQuestionId = room?.currentQuestion?.questionId || room?.currentQuestion?.id || null;
   const questionNumber = (room?.currentQuestionIndex ?? 0) + 1;
   const videoEnabled = !!room?.displayVideoSlotEnabled;
@@ -2430,7 +2442,8 @@ function ResultsDisplay({ room, messages, answers = [] }) {
       .map((answer) => [answer.playerId, true])
   );
 
-  const snapshot = room?.resultsDisplaySnapshot;
+  const displayResult = resolveDisplayResult({ room, players, officialResultState });
+  const snapshot = displayResult.snapshot;
 
   // hasValidSnapshot checks only the snapshot itself — NOT isCollecting/processedQuestionId.
   // Reason: snapshot.questionId matching currentQuestionId is the only condition we need.
@@ -2438,9 +2451,7 @@ function ResultsDisplay({ room, messages, answers = [] }) {
   const hasValidSnapshot =
     snapshot?.questionId === currentQuestionId &&
     Array.isArray(snapshot?.leaderboardBefore) &&
-    snapshot.leaderboardBefore.length > 0 &&
-    Array.isArray(snapshot?.leaderboardAfter) &&
-    snapshot.leaderboardAfter.length > 0;
+    Array.isArray(snapshot?.leaderboardAfter);
 
   // before      → leaderboardBefore, no badges         (immediate)
   // applyPoints → leaderboardBefore + bonus badges     (+400ms)
@@ -2490,7 +2501,9 @@ function ResultsDisplay({ room, messages, answers = [] }) {
     const wasSkipped = !isCollecting && room?.calculationStatus === "skipped";
     const wasIgnored = !isCollecting && !!room?.questionIgnored;
 
-    let statusMsg = "جاري احتساب النتائج...";
+    let statusMsg = displayResult.status === "missing"
+      ? "تعذر العثور على النتيجة الرسمية لهذا السؤال. اطلب من المقدم إعادة اعتماد النتيجة."
+      : "جاري احتساب النتائج...";
     if (wasSkipped) statusMsg = "تم تجاوز هذا السؤال بدون احتساب نقاط.";
     else if (wasIgnored) statusMsg = "تم تجاهل هذا السؤال، ولم تُحتسب أي نقاط.";
 
@@ -2498,7 +2511,7 @@ function ResultsDisplay({ room, messages, answers = [] }) {
       <div className="results-display-grid">
         <div className="results-main-area">
           <div className="results-collecting-card">
-            {isCollecting && (
+            {isCollecting && displayResult.status !== "missing" && (
               <div className="collecting-dots-row">
                 <span className="collecting-dot" />
                 <span className="collecting-dot" />
@@ -5118,7 +5131,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
   );
 }
 
-function DisplayScreen({ room, players, questions, messages, answers, allAnswers }) {
+function DisplayScreen({ room, players, questions, messages, answers, allAnswers, officialResultState }) {
   const [previewStage, setPreviewStage] = useState(null);
   const [previewQuestionIndex, setPreviewQuestionIndex] = useState(null);
   const [showFinalQuestionResults, setShowFinalQuestionResults] = useState(false);
@@ -5392,7 +5405,7 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
         )}
 
         {displayStage === "results" && (
-          <ResultsDisplay room={displayRoom} players={displayPlayers} messages={messages} answers={displayAnswers} />
+          <ResultsDisplay room={displayRoom} players={displayPlayers} messages={messages} answers={displayAnswers} officialResultState={officialResultState} />
         )}
 
         {displayStage === "prizeWheel" && (
@@ -5405,7 +5418,7 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
 
         {displayStage === "finished" && (
           showFinalQuestionResults
-            ? <ResultsDisplay room={finalQuestionRoom} players={finalQuestionPlayers} messages={messages} answers={finalQuestionAnswers} />
+            ? <ResultsDisplay room={finalQuestionRoom} players={finalQuestionPlayers} messages={messages} answers={finalQuestionAnswers} officialResultState={officialResultState} />
             : <FinishedDisplay players={players} messages={messages} />
         )}
       </div>
@@ -5722,10 +5735,11 @@ function AdminPanel({ initialView = "control", adminSession }) {
   const [roomCreationBusy, setRoomCreationBusy] = useState(false);
   const [roomCreationError, setRoomCreationError] = useState("");
   const finalization = useQuestionFinalization({
+    enabled: initialView !== "display",
     room,
     canFinalize: adminSession?.isAdmin === true,
     officialResultState,
-    onResumeDecision: reportStagingFinalizationResume,
+    onResumeDecision: initialView === "display" ? undefined : reportStagingFinalizationResume,
   });
   const gameHistory = [...(room?.gameHistory || [])].sort(
     (a, b) => Number(b.savedAtMs || 0) - Number(a.savedAtMs || 0)
@@ -5806,14 +5820,23 @@ function AdminPanel({ initialView = "control", adminSession }) {
     return (
       <>
         {firestoreReadErrorBanner}
-        <DisplayScreen
-        room={room}
-        players={players}
-        questions={questions}
-        allQuestions={allQuestions}
-        messages={messages}
-        answers={answers}
-        allAnswers={allAnswers}
+        <DisplayOfficialResultController
+          room={room}
+          players={players}
+          listenerState={officialResultState}
+          readResult={readOfficialQuestionResult}
+          render={({ officialResultState: displayOfficialResultState }) => (
+            <DisplayScreen
+              room={room}
+              players={players}
+              questions={questions}
+              allQuestions={allQuestions}
+              messages={messages}
+              answers={answers}
+              allAnswers={allAnswers}
+              officialResultState={displayOfficialResultState}
+            />
+          )}
         />
       </>
     );

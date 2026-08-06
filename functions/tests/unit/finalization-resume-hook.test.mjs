@@ -24,6 +24,43 @@ function FinalizationHarness({ room, resultState, client, decisions }) {
   );
 }
 
+function DisabledDisplayFinalizationHarness({ room, resultState, client, decisions }) {
+  const finalization = useQuestionFinalization({
+    enabled: false,
+    room,
+    canFinalize: false,
+    officialResultState: resultState,
+    onResumeDecision: (decision) => decisions.push(decision.reason),
+    finalizationClient: client,
+    initialResultWaitMs: 1,
+  });
+  return React.createElement("output", { "data-status": finalization.status }, finalization.status);
+}
+
+test("DisplayView does not run admin finalization recovery or its staging diagnostic", async () => {
+  let requests = 0;
+  const decisions = [];
+  let renderer;
+  await act(async () => {
+    renderer = TestRenderer.create(React.createElement(DisabledDisplayFinalizationHarness, {
+      room: {
+        stage: "results",
+        activeQuestionId: "q1",
+        currentQuestion: { questionId: "q1" },
+        finalization: { status: "completed", questionId: "q1" },
+      },
+      resultState: { questionId: "q1", loading: false, exists: false, result: null },
+      client: { finalizeAndWait: async () => { requests += 1; } },
+      decisions,
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  });
+  assert.equal(renderer.toJSON().props["data-status"], "idle");
+  assert.equal(requests, 0);
+  assert.deepEqual(decisions, []);
+  await act(async () => renderer.unmount());
+});
+
 test("the real hook resumes once after reload snapshots and POSTs to /api/quiz", async () => {
   const requests = [];
   const decisions = [];
