@@ -176,3 +176,13 @@ test("official results are adapted for display without private player fields", (
     result: officialResult,
   } }).status, "ready");
 });
+
+test("legacy public displayName remains visible when name is absent", () => {
+  const snapshot = buildDisplaySnapshotFromOfficialResult({
+    questionId: "q1",
+    officialResult,
+    players: [{ id: "p1", displayName: "Legacy Public Name", fullName: "Hidden" }],
+  });
+  assert.equal(snapshot.leaderboardAfter[0].name, "Legacy Public Name");
+  assert.equal(JSON.stringify(snapshot).includes("Hidden"), false);
+});

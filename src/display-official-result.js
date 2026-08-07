@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { publicPlayerDisplayName } from "./quiz-state-machine.js";
 
 export const DISPLAY_RESULT_FALLBACK_MS = 1_500;
 
@@ -32,7 +33,7 @@ export function buildDisplaySnapshotFromOfficialResult({
     const player = publicPlayers.get(String(result.playerId)) || {};
     return {
       id: result.playerId,
-      name: player.name || "",
+      name: publicPlayerDisplayName(player),
       emoji: player.emoji || "",
       score: Number(score || 0),
       jokerUsed: player.jokerUsed || result.jokerApplied || false,

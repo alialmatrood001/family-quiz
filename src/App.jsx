@@ -25,6 +25,12 @@ import {
   resolveDisplayResult,
 } from "./display-official-result.js";
 import {
+  nextDisplayPreview,
+  previousDisplayPreview,
+  QUIZ_STAGES,
+  runHandledUiAction,
+} from "./quiz-state-machine.js";
+import {
   activateJokerSecurely,
   cancelJokerSecurely,
   recoverPlayerSecurely,
@@ -3857,6 +3863,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
   const [adminAdvancing, setAdminAdvancing] = useState(false);
   const [setupActionBusy, setSetupActionBusy] = useState(false);
   const [setupActionError, setSetupActionError] = useState("");
+  const [liveActionError, setLiveActionError] = useState("");
   const adminAdvancingRef = useRef(false);
   const [quickControlsOpen, setQuickControlsOpen] = useState(false);
   const [selectedPrizeWinnerByPrize, setSelectedPrizeWinnerByPrize] = useState({});
@@ -4115,6 +4122,23 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
     }
   }
 
+  async function handleAdvanceFromDashboardClick() {
+    if (adminAdvancingRef.current) return;
+    setLiveActionError("");
+    await runHandledUiAction(
+      () => advanceFromDashboard(),
+      () => setLiveActionError("تعذر تجهيز السؤال التالي. تحقق من حالة المسابقة ثم حاول مرة أخرى."),
+    );
+  }
+
+  async function runLiveControl(action, message) {
+    setLiveActionError("");
+    return runHandledUiAction(
+      action,
+      () => setLiveActionError(message || "تعذر تنفيذ الإجراء. تحقق من حالة المسابقة ثم حاول مرة أخرى."),
+    );
+  }
+
   async function handleFinalizeQuestion({ announceWinners = false } = {}) {
     if (finalization.isBusy) return;
     try {
@@ -4139,7 +4163,10 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
         return;
       }
     }
-    await finishGame(players, questions, allAnswers || [], messages, room);
+    await runLiveControl(
+      () => finishGame(players, questions, allAnswers || [], messages, room),
+      "تعذر إنهاء المسابقة. تحقق من حالة النتائج ثم حاول مرة أخرى.",
+    );
   }
 
   async function startPracticeQuestions() {
@@ -4351,30 +4378,30 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
               </button>
               {quickControlsOpen && (
                 <div className="quick-control-actions">
-                  {stage === "home" && <button onClick={resetAndStartRegistration}>فتح التسجيل</button>}
-                  {stage === "instructions" && practiceQuestions.length > 0 && <button onClick={startPracticeQuestions} disabled={adminAdvancing || players.length === 0}>{adminAdvancing ? "استعدوا..." : "بدء التجربة"}</button>}
-                  {stage === "instructions" && <button onClick={startRealCompetition} disabled={adminAdvancing || competitionQuestions.length === 0 || players.length === 0}>{adminAdvancing ? "استعدوا..." : "ابدأ المسابقة"}</button>}
-                  {stage === "registration" && room?.practiceFinished && <button onClick={startRealCompetition} disabled={adminAdvancing || competitionQuestions.length === 0 || players.length === 0}>{adminAdvancing ? "استعدوا..." : "ابدأ المسابقة"}</button>}
-                  {stage === "practiceComplete" && <button onClick={startRealCompetition} disabled={adminAdvancing || competitionQuestions.length === 0 || players.length === 0}>{adminAdvancing ? "استعدوا..." : "ابدأ المسابقة"}</button>}
-                  {stage === "registration" && !room?.practiceFinished && <button onClick={showInstructionsPage} disabled={players.length === 0}>عرض معلومات المسابقة</button>}
-                  {stage === "question" && <button className="warning-action" onClick={() => extendQuestionTime(room, 10)}>+10 ثوانٍ</button>}
-                  {stage === "question" && isMediaQuestion(room?.currentQuestion) && !hasMediaEnded(room, room.currentQuestion) && <button className="warning-action" onClick={() => finishMediaQuestion(room.currentQuestion)}>تجاوز المقطع وإظهار الخيارات</button>}
-                  {stage === "question" && <button onClick={() => endQuestionAndReveal(room, { allowUndo: true })}>إنهاء السؤال وإظهار الإجابة</button>}
-                  {stage === "categoryVote" && liveVoteTieLabels.length === 0 && <button onClick={() => handleAdminCategoryVoteClose()} disabled={adminAdvancing}>إغلاق التصويت وتجهيز السؤال</button>}
+                  {stage === "home" && <button onClick={() => void runLiveControl(resetAndStartRegistration)}>فتح التسجيل</button>}
+                  {stage === "instructions" && practiceQuestions.length > 0 && <button onClick={() => void runLiveControl(startPracticeQuestions)} disabled={adminAdvancing || players.length === 0}>{adminAdvancing ? "استعدوا..." : "بدء التجربة"}</button>}
+                  {stage === "instructions" && <button onClick={() => void runLiveControl(startRealCompetition)} disabled={adminAdvancing || competitionQuestions.length === 0 || players.length === 0}>{adminAdvancing ? "استعدوا..." : "ابدأ المسابقة"}</button>}
+                  {stage === "registration" && room?.practiceFinished && <button onClick={() => void runLiveControl(startRealCompetition)} disabled={adminAdvancing || competitionQuestions.length === 0 || players.length === 0}>{adminAdvancing ? "استعدوا..." : "ابدأ المسابقة"}</button>}
+                  {stage === "practiceComplete" && <button onClick={() => void runLiveControl(startRealCompetition)} disabled={adminAdvancing || competitionQuestions.length === 0 || players.length === 0}>{adminAdvancing ? "استعدوا..." : "ابدأ المسابقة"}</button>}
+                  {stage === "registration" && !room?.practiceFinished && <button onClick={() => void runLiveControl(showInstructionsPage)} disabled={players.length === 0}>عرض معلومات المسابقة</button>}
+                  {stage === "question" && <button className="warning-action" onClick={() => void runLiveControl(() => extendQuestionTime(room, 10))}>+10 ثوانٍ</button>}
+                  {stage === "question" && isMediaQuestion(room?.currentQuestion) && !hasMediaEnded(room, room.currentQuestion) && <button className="warning-action" onClick={() => void runLiveControl(() => finishMediaQuestion(room.currentQuestion))}>تجاوز المقطع وإظهار الخيارات</button>}
+                  {stage === "question" && <button onClick={() => void runLiveControl(() => endQuestionAndReveal(room, { allowUndo: true }))}>إنهاء السؤال وإظهار الإجابة</button>}
+                  {stage === "categoryVote" && liveVoteTieLabels.length === 0 && <button onClick={() => void runLiveControl(() => handleAdminCategoryVoteClose())} disabled={adminAdvancing}>إغلاق التصويت وتجهيز السؤال</button>}
                   {stage === "categoryVote" && liveVoteTieLabels.length > 1 && (
                     <>
                       <span className="admin-vote-tie-label">التصويت متعادل</span>
-                      <button onClick={() => handleAdminCategoryVoteClose({ chooseRandomTie: true })} disabled={adminAdvancing}>اختيار عشوائي</button>
+                      <button onClick={() => void runLiveControl(() => handleAdminCategoryVoteClose({ chooseRandomTie: true }))} disabled={adminAdvancing}>اختيار عشوائي</button>
                       {liveVoteTieLabels.map((label) => (
-                        <button key={`quick-tie-${label}`} onClick={() => handleAdminCategoryVoteClose({ selectedCategory: label })} disabled={adminAdvancing}>اختيار {label}</button>
+                        <button key={`quick-tie-${label}`} onClick={() => void runLiveControl(() => handleAdminCategoryVoteClose({ selectedCategory: label }))} disabled={adminAdvancing}>اختيار {label}</button>
                       ))}
                     </>
                   )}
                   {stage === "reveal" && (!room?.practiceMode && adminCurrentIsLastQuestion ? <button onClick={() => handleFinalizeQuestion({ announceWinners: true })} disabled={finalization.isBusy}>{finalization.isBusy ? "جاري اعتماد النتائج..." : "إعلان الفائزين"}</button> : <button onClick={() => handleFinalizeQuestion()} disabled={finalization.isBusy}>{finalization.isBusy ? "جاري اعتماد النتائج..." : "إظهار النتائج"}</button>)}
-                  {stage === "results" && room?.practiceMode && <button className="secondary-action" onClick={launchInstructionsClarityPoll}>تصويت</button>}
-                  {stage === "results" && room?.practiceMode && <button className="warning-action" onClick={finishPracticeAndReturnToStart}>إنهاء التجربة</button>}
-                  {stage === "results" && (room?.practiceMode ? practiceQuestions[currentQuestionIndex + 1] : competitionQuestions[currentQuestionIndex + 1]) && <button onClick={advanceFromDashboard} disabled={adminAdvancing || !adminCurrentProcessed}>{!adminCurrentProcessed ? "جاري احتساب النتائج..." : adminAdvancing ? "استعدوا..." : (nextAdminQuestionNeedsVote ? "تصويت السؤال التالي" : (adminNextQuestionIsLast ? "السؤال الأخير" : "السؤال التالي"))}</button>}
-                  {stage !== "home" && stage !== "finished" && <button className="secondary-action" onClick={() => launchSystemCheck()}>استفتاء</button>}
+                  {stage === "results" && room?.practiceMode && <button className="secondary-action" onClick={() => void runLiveControl(launchInstructionsClarityPoll)}>تصويت</button>}
+                  {stage === "results" && room?.practiceMode && <button className="warning-action" onClick={() => void runLiveControl(finishPracticeAndReturnToStart)}>إنهاء التجربة</button>}
+                  {stage === "results" && (room?.practiceMode ? practiceQuestions[currentQuestionIndex + 1] : competitionQuestions[currentQuestionIndex + 1]) && <button onClick={handleAdvanceFromDashboardClick} disabled={adminAdvancing || !adminCurrentProcessed}>{!adminCurrentProcessed ? "جاري احتساب النتائج..." : adminAdvancing ? "استعدوا..." : (nextAdminQuestionNeedsVote ? "تصويت السؤال التالي" : (adminNextQuestionIsLast ? "السؤال الأخير" : "السؤال التالي"))}</button>}
+                  {stage !== "home" && stage !== "finished" && <button className="secondary-action" onClick={() => void runLiveControl(() => launchSystemCheck())}>استفتاء</button>}
                   {stage !== "home" && stage !== "finished" && <button className="danger" onClick={handleFinishGameNow} disabled={finalization.isBusy}>إنهاء المسابقة الآن</button>}
                 </div>
               )}
@@ -4411,30 +4438,31 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
               <small>{room?.practiceMode ? "جولة تجريبية" : "المسابقة الفعلية"}</small>
             </div>
             <div className="broadcast-primary-actions">
-            {stage === "home" && <button onClick={resetAndStartRegistration}>فتح التسجيل</button>}
-            {stage === "registration" && !room?.practiceFinished && <button onClick={showInstructionsPage} disabled={players.length === 0}>عرض معلومات المسابقة</button>}
-            {stage === "registration" && room?.practiceFinished && <button onClick={startRealCompetition} disabled={adminAdvancing || competitionQuestions.length === 0 || players.length === 0}>{adminAdvancing ? "جاري البدء..." : "ابدأ المسابقة"}</button>}
-            {stage === "instructions" && practiceQuestions.length > 0 && <button className="secondary-action" onClick={startPracticeQuestions} disabled={adminAdvancing || players.length === 0}>بدء التجربة</button>}
-            {stage === "instructions" && <button onClick={startRealCompetition} disabled={adminAdvancing || competitionQuestions.length === 0 || players.length === 0}>{adminAdvancing ? "جاري البدء..." : "ابدأ المسابقة"}</button>}
-            {stage === "practiceComplete" && <button onClick={startRealCompetition} disabled={adminAdvancing || competitionQuestions.length === 0 || players.length === 0}>ابدأ المسابقة الفعلية</button>}
-            {stage === "categoryVote" && liveVoteTieLabels.length === 0 && <button onClick={() => handleAdminCategoryVoteClose()} disabled={adminAdvancing}>{adminAdvancing ? "جاري تجهيز السؤال..." : "إغلاق التصويت وإظهار سؤال الفائز"}</button>}
+            {stage === "home" && <button onClick={() => void runLiveControl(resetAndStartRegistration)}>فتح التسجيل</button>}
+            {stage === "registration" && !room?.practiceFinished && <button onClick={() => void runLiveControl(showInstructionsPage)} disabled={players.length === 0}>عرض معلومات المسابقة</button>}
+            {stage === "registration" && room?.practiceFinished && <button onClick={() => void runLiveControl(startRealCompetition)} disabled={adminAdvancing || competitionQuestions.length === 0 || players.length === 0}>{adminAdvancing ? "جاري البدء..." : "ابدأ المسابقة"}</button>}
+            {stage === "instructions" && practiceQuestions.length > 0 && <button className="secondary-action" onClick={() => void runLiveControl(startPracticeQuestions)} disabled={adminAdvancing || players.length === 0}>بدء التجربة</button>}
+            {stage === "instructions" && <button onClick={() => void runLiveControl(startRealCompetition)} disabled={adminAdvancing || competitionQuestions.length === 0 || players.length === 0}>{adminAdvancing ? "جاري البدء..." : "ابدأ المسابقة"}</button>}
+            {stage === "practiceComplete" && <button onClick={() => void runLiveControl(startRealCompetition)} disabled={adminAdvancing || competitionQuestions.length === 0 || players.length === 0}>ابدأ المسابقة الفعلية</button>}
+            {stage === "categoryVote" && liveVoteTieLabels.length === 0 && <button onClick={() => void runLiveControl(() => handleAdminCategoryVoteClose())} disabled={adminAdvancing}>{adminAdvancing ? "جاري تجهيز السؤال..." : "إغلاق التصويت وإظهار سؤال الفائز"}</button>}
             {stage === "categoryVote" && liveVoteTieLabels.length > 1 && (
               <div className="broadcast-vote-tie-actions">
                 <strong>التصويت متعادل</strong>
-                <button type="button" className="tie-random-button" onClick={() => handleAdminCategoryVoteClose({ chooseRandomTie: true })} disabled={adminAdvancing}>اختيار عشوائي</button>
+                <button type="button" className="tie-random-button" onClick={() => void runLiveControl(() => handleAdminCategoryVoteClose({ chooseRandomTie: true }))} disabled={adminAdvancing}>اختيار عشوائي</button>
                 {liveVoteTieLabels.map((label) => (
-                  <button type="button" className="secondary-action" key={`admin-tie-${label}`} onClick={() => handleAdminCategoryVoteClose({ selectedCategory: label })} disabled={adminAdvancing}>اختيار {label}</button>
+                  <button type="button" className="secondary-action" key={`admin-tie-${label}`} onClick={() => void runLiveControl(() => handleAdminCategoryVoteClose({ selectedCategory: label }))} disabled={adminAdvancing}>اختيار {label}</button>
                 ))}
               </div>
             )}
-            {stage === "question" && <button onClick={() => endQuestionAndReveal(room, { allowUndo: true })}>إنهاء الوقت وكشف الإجابة</button>}
-            {stage === "question" && <button className="secondary-action" onClick={() => extendQuestionTime(room, 10)}>+10 ثوانٍ</button>}
-            {stage === "question" && isMediaQuestion(room?.currentQuestion) && !hasMediaEnded(room, room.currentQuestion) && <button className="secondary-action" onClick={() => finishMediaQuestion(room.currentQuestion)}>تجاوز المقطع</button>}
+            {stage === "question" && <button onClick={() => void runLiveControl(() => endQuestionAndReveal(room, { allowUndo: true }))}>إنهاء الوقت وكشف الإجابة</button>}
+            {stage === "question" && <button className="secondary-action" onClick={() => void runLiveControl(() => extendQuestionTime(room, 10))}>+10 ثوانٍ</button>}
+            {stage === "question" && isMediaQuestion(room?.currentQuestion) && !hasMediaEnded(room, room.currentQuestion) && <button className="secondary-action" onClick={() => void runLiveControl(() => finishMediaQuestion(room.currentQuestion))}>تجاوز المقطع</button>}
             {stage === "reveal" && (!room?.practiceMode && adminCurrentIsLastQuestion ? <button onClick={() => handleFinalizeQuestion({ announceWinners: true })} disabled={finalization.isBusy}>{finalization.isBusy ? "جاري اعتماد النتائج..." : "إعلان الفائزين"}</button> : <button onClick={() => handleFinalizeQuestion()} disabled={finalization.isBusy}>{finalization.isBusy ? "جاري اعتماد النتائج..." : "إظهار النتائج"}</button>)}
-            {stage === "results" && (room?.practiceMode ? practiceQuestions[currentQuestionIndex + 1] : competitionQuestions[currentQuestionIndex + 1]) && <button onClick={advanceFromDashboard} disabled={adminAdvancing || !adminCurrentProcessed}>{!adminCurrentProcessed ? "جاري احتساب النتائج..." : nextAdminQuestionNeedsVote ? "بدء تصويت الجولة التالية" : adminNextQuestionIsLast ? "عرض السؤال الأخير" : "عرض السؤال التالي"}</button>}
-            {stage === "results" && room?.practiceMode && <button className="secondary-action" onClick={finishPracticeAndReturnToStart}>إنهاء التجربة</button>}
+            {stage === "results" && (room?.practiceMode ? practiceQuestions[currentQuestionIndex + 1] : competitionQuestions[currentQuestionIndex + 1]) && <button onClick={handleAdvanceFromDashboardClick} disabled={adminAdvancing || !adminCurrentProcessed}>{!adminCurrentProcessed ? "جاري احتساب النتائج..." : nextAdminQuestionNeedsVote ? "بدء تصويت الجولة التالية" : adminNextQuestionIsLast ? "عرض السؤال الأخير" : "عرض السؤال التالي"}</button>}
+            {stage === "results" && room?.practiceMode && <button className="secondary-action" onClick={() => void runLiveControl(finishPracticeAndReturnToStart)}>إنهاء التجربة</button>}
             {stage === "finished" && <span className="broadcast-finished-label">انتهت المسابقة — راجع النتائج من قسم التقارير.</span>}
             </div>
+            {liveActionError && <p className="display-start-error" role="alert">{liveActionError}</p>}
           </section>
         </div>
 
@@ -5234,60 +5262,27 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
   }
 
   function previewPreviousStep() {
-    const index = displayQuestionIndex;
-    if (displayStage === "finished") {
-      setPreviewQuestionIndex(currentQuestionIndex);
-      setPreviewStage("results");
-    } else if (displayStage === "results") {
-      setPreviewQuestionIndex(index);
-      setPreviewStage("reveal");
-    } else if (displayStage === "reveal") {
-      setPreviewQuestionIndex(index);
-      setPreviewStage("question");
-    } else if (displayStage === "question" && index > 0) {
-      setPreviewQuestionIndex(index - 1);
-      setPreviewStage("results");
-    } else if (displayStage === "question") {
-      setPreviewQuestionIndex(null);
-      setPreviewStage("registration");
-    } else if (displayStage === "registration") {
-      setPreviewQuestionIndex(null);
-      setPreviewStage("instructions");
-    } else if (displayStage === "instructions") {
-      setPreviewQuestionIndex(null);
-      setPreviewStage("home");
-    }
+    const target = previousDisplayPreview({
+      displayStage,
+      displayQuestionIndex,
+      currentQuestionIndex,
+    });
+    if (!target) return;
+    setPreviewQuestionIndex(target.questionIndex);
+    setPreviewStage(target.stage);
   }
 
   function previewNextStep() {
-    const index = displayQuestionIndex;
-    if (!previewStage) return;
-
-    if (displayStage === "home") {
-      setPreviewStage("instructions");
-    } else if (displayStage === "instructions") {
-      setPreviewStage("registration");
-    } else if (displayStage === "registration" && currentQuestionIndex >= 0) {
-      setPreviewQuestionIndex(0);
-      setPreviewStage("question");
-    } else if (displayStage === "question") {
-      setPreviewQuestionIndex(index);
-      setPreviewStage("reveal");
-    } else if (displayStage === "reveal") {
-      if (index === currentQuestionIndex && stage === "results") {
-        setPreviewQuestionIndex(null);
-        setPreviewStage(null);
-      } else {
-        setPreviewQuestionIndex(index);
-        setPreviewStage("results");
-      }
-    } else if (displayStage === "results" && index < currentQuestionIndex) {
-      setPreviewQuestionIndex(index + 1);
-      setPreviewStage("question");
-    } else {
-      setPreviewStage(null);
-      setPreviewQuestionIndex(null);
-    }
+    const target = nextDisplayPreview({
+      liveStage: stage,
+      previewStage,
+      displayStage,
+      displayQuestionIndex,
+      currentQuestionIndex,
+    });
+    if (!target) return;
+    setPreviewStage(target.stage);
+    setPreviewQuestionIndex(target.questionIndex);
   }
 
   return (
@@ -5427,6 +5422,16 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
         <div className="display-history-nav" aria-label="التنقل بين مراحل العرض">
           <button type="button" className="display-nav-button display-next-button" onClick={previewNextStep} disabled={!previewStage}>التالي</button>
           <button type="button" className="display-nav-button display-back-button" onClick={previewPreviousStep}>السابق</button>
+          {previewStage && (
+            <button type="button" className="display-nav-button display-current-stage-button" onClick={() => { setPreviewStage(null); setPreviewQuestionIndex(null); }}>
+              العرض الحالي
+            </button>
+          )}
+          {stage === QUIZ_STAGES.FINISHED && !previewStage && (
+            <button type="button" className="display-nav-button display-current-stage-button" onClick={() => setShowFinalQuestionResults((value) => !value)} disabled={!finalQuestion}>
+              {showFinalQuestionResults ? "العودة للفائزين" : "نتائج السؤال الأخير"}
+            </button>
+          )}
         </div>
       )}
     </div>
