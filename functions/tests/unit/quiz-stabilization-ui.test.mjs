@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { buildDisplaySnapshotFromOfficialResult } from "../../../src/display-official-result.js";
+import { DisplayNavigationControls } from "../../../src/display-navigation-controls.js";
 import {
   isQuizStageTransitionAllowed,
   nextDisplayPreview,
@@ -91,7 +94,59 @@ test("the real Admin and Display wiring uses safe handlers and local-only displa
   assert.match(source, /async function handleAdvanceFromDashboardClick\(\)/);
   assert.match(source, /onClick=\{handleAdvanceFromDashboardClick\}/);
   assert.doesNotMatch(source, /onClick=\{advanceFromDashboard\}/);
-  assert.match(source, />\s*العرض الحالي\s*</);
-  assert.match(source, /"نتائج السؤال الأخير"/);
+  assert.match(source, /import \{ DisplayNavigationControls \} from "\.\/display-navigation-controls\.js"/);
+  assert.match(source, /<DisplayNavigationControls[\s\S]*stage=\{displayStage\}/);
   assert.match(source, /enabled:\s*initialView !== "display"/);
+});
+
+const DISPLAY_NAVIGATION_CASES = [
+  { stage: QUIZ_STAGES.HOME, buttons: [] },
+  { stage: QUIZ_STAGES.QUESTION, buttons: ["التالي", "السابق", "العرض الحالي"] },
+  { stage: QUIZ_STAGES.REVEAL, buttons: ["التالي", "السابق", "العرض الحالي"] },
+  { stage: QUIZ_STAGES.RESULTS, buttons: ["التالي", "السابق", "العرض الحالي"] },
+  { stage: QUIZ_STAGES.FINISHED, buttons: ["التالي", "السابق", "العرض الحالي", "نتائج السؤال الأخير"] },
+];
+
+function renderDisplayNavigation(stage, overrides = {}) {
+  return renderToStaticMarkup(React.createElement(DisplayNavigationControls, {
+    stage,
+    previewStage: null,
+    finalQuestion: { questionId: "q-last" },
+    showFinalQuestionResults: false,
+    onPrevious: () => {},
+    onNext: () => {},
+    onReturnToLive: () => {},
+    onToggleFinalQuestionResults: () => {},
+    ...overrides,
+  }));
+}
+
+for (const { stage, buttons } of DISPLAY_NAVIGATION_CASES) {
+  test(`the real Display navigation renders the intended controls during ${stage}`, () => {
+    const html = renderDisplayNavigation(stage);
+    for (const label of ["التالي", "السابق", "العرض الحالي", "نتائج السؤال الأخير", "العودة للفائزين"]) {
+      assert.equal(html.includes(`>${label}<`), buttons.includes(label), `${label} visibility during ${stage}`);
+    }
+    assert.equal(html.includes("/api/admin"), false);
+    assert.equal(html.includes("/api/quiz"), false);
+  });
+}
+
+test("finished Display toggles between final-question results and winners locally", () => {
+  const html = renderDisplayNavigation(QUIZ_STAGES.FINISHED, { showFinalQuestionResults: true });
+  assert.match(html, />العودة للفائزين</);
+  assert.doesNotMatch(html, />نتائج السؤال الأخير</);
+});
+
+test("preview mode keeps return-to-live visible and enabled", () => {
+  const html = renderDisplayNavigation(QUIZ_STAGES.RESULTS, { previewStage: QUIZ_STAGES.REVEAL });
+  assert.match(html, />العرض الحالي</);
+  assert.doesNotMatch(html, /display-current-stage-button[^>]*disabled/);
+});
+
+test("Desktop Display CSS anchors the visible toolbar inside the 16:9 frame", async () => {
+  const css = await readFile(new URL("../../../src/App.css", import.meta.url), "utf8");
+  assert.match(css, /\.display-frame\s*\{[^}]*position:\s*relative/s);
+  assert.match(css, /\.display-history-nav\s*\{[^}]*position:\s*absolute[^}]*z-index:\s*8[^}]*display:\s*flex/s);
+  assert.doesNotMatch(css, /\.display-history-nav\s*\{[^}]*display:\s*none/s);
 });

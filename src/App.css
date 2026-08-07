@@ -5007,6 +5007,7 @@ button.danger,
 }
 
 .display-frame {
+  position: relative;
   width: 100vw;
   height: 56.25vw;
   max-height: 100vh;
@@ -6017,6 +6018,10 @@ button.danger,
 
 .display-next-button:disabled {
   opacity: 0.42;
+}
+
+.display-current-stage-button:disabled {
+  opacity: 0.58;
 }
 
 .force-process-button {

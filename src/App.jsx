@@ -27,9 +27,9 @@ import {
 import {
   nextDisplayPreview,
   previousDisplayPreview,
-  QUIZ_STAGES,
   runHandledUiAction,
 } from "./quiz-state-machine.js";
+import { DisplayNavigationControls } from "./display-navigation-controls.js";
 import {
   activateJokerSecurely,
   cancelJokerSecurely,
@@ -5418,22 +5418,16 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
         )}
       </div>
 
-      {displayStage !== "home" && displayStage !== "ready" && displayStage !== "prizeWheel" && displayStage !== "finalCountdown" && (
-        <div className="display-history-nav" aria-label="التنقل بين مراحل العرض">
-          <button type="button" className="display-nav-button display-next-button" onClick={previewNextStep} disabled={!previewStage}>التالي</button>
-          <button type="button" className="display-nav-button display-back-button" onClick={previewPreviousStep}>السابق</button>
-          {previewStage && (
-            <button type="button" className="display-nav-button display-current-stage-button" onClick={() => { setPreviewStage(null); setPreviewQuestionIndex(null); }}>
-              العرض الحالي
-            </button>
-          )}
-          {stage === QUIZ_STAGES.FINISHED && !previewStage && (
-            <button type="button" className="display-nav-button display-current-stage-button" onClick={() => setShowFinalQuestionResults((value) => !value)} disabled={!finalQuestion}>
-              {showFinalQuestionResults ? "العودة للفائزين" : "نتائج السؤال الأخير"}
-            </button>
-          )}
-        </div>
-      )}
+      <DisplayNavigationControls
+        stage={displayStage}
+        previewStage={previewStage}
+        finalQuestion={finalQuestion}
+        showFinalQuestionResults={showFinalQuestionResults}
+        onPrevious={previewPreviousStep}
+        onNext={previewNextStep}
+        onReturnToLive={() => { setPreviewStage(null); setPreviewQuestionIndex(null); }}
+        onToggleFinalQuestionResults={() => setShowFinalQuestionResults((value) => !value)}
+      />
     </div>
   );
 }
