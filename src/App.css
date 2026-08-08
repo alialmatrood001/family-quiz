@@ -6020,10 +6020,6 @@ button.danger,
   opacity: 0.42;
 }
 
-.display-current-stage-button:disabled {
-  opacity: 0.58;
-}
-
 .force-process-button {
   background: #9a6a25 !important;
 }

@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import React from "react";
+import React, { useState } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import TestRenderer, { act } from "react-test-renderer";
 import { buildDisplaySnapshotFromOfficialResult } from "../../../src/display-official-result.js";
 import { DisplayNavigationControls } from "../../../src/display-navigation-controls.js";
 import {
@@ -13,6 +14,8 @@ import {
   QUIZ_STAGES,
   runHandledUiAction,
 } from "../../../src/quiz-state-machine.js";
+
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 test("official-result fallback renders public names, points, and ranking", () => {
   const snapshot = buildDisplaySnapshotFromOfficialResult({
@@ -101,10 +104,11 @@ test("the real Admin and Display wiring uses safe handlers and local-only displa
 
 const DISPLAY_NAVIGATION_CASES = [
   { stage: QUIZ_STAGES.HOME, buttons: [] },
-  { stage: QUIZ_STAGES.QUESTION, buttons: ["التالي", "السابق", "العرض الحالي"] },
-  { stage: QUIZ_STAGES.REVEAL, buttons: ["التالي", "السابق", "العرض الحالي"] },
-  { stage: QUIZ_STAGES.RESULTS, buttons: ["التالي", "السابق", "العرض الحالي"] },
-  { stage: QUIZ_STAGES.FINISHED, buttons: ["التالي", "السابق", "العرض الحالي", "نتائج السؤال الأخير"] },
+  { stage: QUIZ_STAGES.REGISTRATION, buttons: ["السابق"] },
+  { stage: QUIZ_STAGES.QUESTION, buttons: ["السابق"] },
+  { stage: QUIZ_STAGES.REVEAL, buttons: ["السابق"] },
+  { stage: QUIZ_STAGES.RESULTS, buttons: ["السابق"] },
+  { stage: QUIZ_STAGES.FINISHED, buttons: ["السابق", "نتائج السؤال الأخير"] },
 ];
 
 function renderDisplayNavigation(stage, overrides = {}) {
@@ -113,6 +117,8 @@ function renderDisplayNavigation(stage, overrides = {}) {
     previewStage: null,
     finalQuestion: { questionId: "q-last" },
     showFinalQuestionResults: false,
+    canPrevious: stage !== QUIZ_STAGES.HOME,
+    canNext: false,
     onPrevious: () => {},
     onNext: () => {},
     onReturnToLive: () => {},
@@ -139,9 +145,42 @@ test("finished Display toggles between final-question results and winners locall
 });
 
 test("preview mode keeps return-to-live visible and enabled", () => {
-  const html = renderDisplayNavigation(QUIZ_STAGES.RESULTS, { previewStage: QUIZ_STAGES.REVEAL });
+  const html = renderDisplayNavigation(QUIZ_STAGES.RESULTS, {
+    previewStage: QUIZ_STAGES.REVEAL,
+    canNext: true,
+  });
   assert.match(html, />العرض الحالي</);
-  assert.doesNotMatch(html, /display-current-stage-button[^>]*disabled/);
+  assert.match(html, />التالي</);
+});
+
+test("return-to-live is absent live, appears in preview, and removes preview when clicked", async () => {
+  let requests = 0;
+  function DisplayNavigationHarness() {
+    const [previewStage, setPreviewStage] = useState(QUIZ_STAGES.REVEAL);
+    return React.createElement(DisplayNavigationControls, {
+      stage: QUIZ_STAGES.RESULTS,
+      previewStage,
+      finalQuestion: { questionId: "q-last" },
+      showFinalQuestionResults: false,
+      canPrevious: true,
+      canNext: !!previewStage,
+      onPrevious: () => {},
+      onNext: () => {},
+      onReturnToLive: () => setPreviewStage(null),
+      onToggleFinalQuestionResults: () => {},
+    });
+  }
+
+  let renderer;
+  await act(async () => {
+    renderer = TestRenderer.create(React.createElement(DisplayNavigationHarness));
+  });
+  const returnButton = renderer.root.findAllByType("button").find((button) => button.children.join("") === "العرض الحالي");
+  assert.ok(returnButton);
+  await act(async () => returnButton.props.onClick());
+  assert.equal(renderer.root.findAllByType("button").some((button) => button.children.join("") === "العرض الحالي"), false);
+  assert.equal(requests, 0);
+  await act(async () => renderer.unmount());
 });
 
 test("Desktop Display CSS anchors the visible toolbar inside the 16:9 frame", async () => {

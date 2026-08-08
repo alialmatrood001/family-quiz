@@ -5261,28 +5261,29 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
     );
   }
 
+  const previousPreviewTarget = previousDisplayPreview({
+    displayStage,
+    displayQuestionIndex,
+    currentQuestionIndex,
+  });
+  const nextPreviewTarget = nextDisplayPreview({
+    liveStage: stage,
+    previewStage,
+    displayStage,
+    displayQuestionIndex,
+    currentQuestionIndex,
+  });
+
   function previewPreviousStep() {
-    const target = previousDisplayPreview({
-      displayStage,
-      displayQuestionIndex,
-      currentQuestionIndex,
-    });
-    if (!target) return;
-    setPreviewQuestionIndex(target.questionIndex);
-    setPreviewStage(target.stage);
+    if (!previousPreviewTarget) return;
+    setPreviewQuestionIndex(previousPreviewTarget.questionIndex);
+    setPreviewStage(previousPreviewTarget.stage);
   }
 
   function previewNextStep() {
-    const target = nextDisplayPreview({
-      liveStage: stage,
-      previewStage,
-      displayStage,
-      displayQuestionIndex,
-      currentQuestionIndex,
-    });
-    if (!target) return;
-    setPreviewStage(target.stage);
-    setPreviewQuestionIndex(target.questionIndex);
+    if (!nextPreviewTarget) return;
+    setPreviewStage(nextPreviewTarget.stage);
+    setPreviewQuestionIndex(nextPreviewTarget.questionIndex);
   }
 
   return (
@@ -5423,6 +5424,8 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
         previewStage={previewStage}
         finalQuestion={finalQuestion}
         showFinalQuestionResults={showFinalQuestionResults}
+        canPrevious={!!previousPreviewTarget}
+        canNext={!!nextPreviewTarget}
         onPrevious={previewPreviousStep}
         onNext={previewNextStep}
         onReturnToLive={() => { setPreviewStage(null); setPreviewQuestionIndex(null); }}

@@ -17,6 +17,8 @@ export function DisplayNavigationControls({
   previewStage,
   finalQuestion,
   showFinalQuestionResults,
+  canPrevious,
+  canNext,
   onPrevious,
   onNext,
   onReturnToLive,
@@ -33,44 +35,46 @@ export function DisplayNavigationControls({
       "data-display-stage": stage,
       "data-preview-active": String(isPreviewing),
     },
-    React.createElement(
-      "button",
-      {
-        type: "button",
-        className: "display-nav-button display-next-button",
-        onClick: onNext,
-        disabled: !isPreviewing,
-      },
-      "التالي",
-    ),
-    React.createElement(
-      "button",
-      {
-        type: "button",
-        className: "display-nav-button display-back-button",
-        onClick: onPrevious,
-      },
-      "السابق",
-    ),
-    React.createElement(
-      "button",
-      {
-        type: "button",
-        className: "display-nav-button display-current-stage-button",
-        onClick: onReturnToLive,
-        disabled: !isPreviewing,
-        "aria-pressed": !isPreviewing,
-      },
-      "العرض الحالي",
-    ),
-    stage === QUIZ_STAGES.FINISHED && !isPreviewing
+    canNext
+      ? React.createElement(
+          "button",
+          {
+            type: "button",
+            className: "display-nav-button display-next-button",
+            onClick: onNext,
+          },
+          "التالي",
+        )
+      : null,
+    canPrevious
+      ? React.createElement(
+          "button",
+          {
+            type: "button",
+            className: "display-nav-button display-back-button",
+            onClick: onPrevious,
+          },
+          "السابق",
+        )
+      : null,
+    isPreviewing
+      ? React.createElement(
+          "button",
+          {
+            type: "button",
+            className: "display-nav-button display-current-stage-button",
+            onClick: onReturnToLive,
+          },
+          "العرض الحالي",
+        )
+      : null,
+    stage === QUIZ_STAGES.FINISHED && !isPreviewing && finalQuestion
       ? React.createElement(
           "button",
           {
             type: "button",
             className: "display-nav-button display-current-stage-button",
             onClick: onToggleFinalQuestionResults,
-            disabled: !finalQuestion,
           },
           showFinalQuestionResults ? "العودة للفائزين" : "نتائج السؤال الأخير",
         )
