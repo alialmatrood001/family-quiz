@@ -100,6 +100,19 @@ export function safeServerFailureDiagnostic(error, normalized) {
       errorCode: normalized.code,
     });
   }
+  const safeToken = (value, fallback) => {
+    const token = String(value || "");
+    return /^[a-z0-9_./:-]{1,100}$/i.test(token) ? token : fallback;
+  };
+  const resetDiagnostic = error?.failedStep
+    ? {
+        failedStep: safeToken(error.failedStep, "unknown-reset-step"),
+        firestoreCode: safeToken(error.firestoreCode || error.code, "unknown"),
+        elapsedMs: Number.isFinite(Number(error.elapsedMs))
+          ? Math.max(0, Math.round(Number(error.elapsedMs)))
+          : 0,
+      }
+    : {};
   return Object.freeze({
     failedStage: String(error?.diagnosticStage || "unknown"),
     failedCheck: String(error?.failedCheck || "server-runtime-failure"),
@@ -107,6 +120,7 @@ export function safeServerFailureDiagnostic(error, normalized) {
     expectedValue: String(error?.expectedValue || "successful server request"),
     actualValue: String(error?.actualValue || "failed"),
     errorCode: normalized.code,
+    ...resetDiagnostic,
   });
 }
 

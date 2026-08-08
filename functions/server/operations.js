@@ -10,18 +10,30 @@ function createServerOperations({ db }) {
   const secureWrites = createSecureWriteHandlers({ db });
   const resetAndOpenRegistration = async (request) => {
     const roomId = request?.data?.roomId;
-    const reset = await secureWrites.resetQuizData({
-      auth: request.auth,
-      data: {
-        roomId,
-        mode: "full",
-        reason: "فتح التسجيل من أدوات التحكم الآمنة",
-      },
-    });
-    const lifecycle = await secureWrites.controlQuizLifecycle({
-      auth: request.auth,
-      data: { roomId, action: "open-registration" },
-    });
+    let reset;
+    try {
+      reset = await secureWrites.resetQuizData({
+        auth: request.auth,
+        data: {
+          roomId,
+          mode: "full",
+          reason: "فتح التسجيل من أدوات التحكم الآمنة",
+        },
+      });
+    } catch (error) {
+      if (error && typeof error === "object") error.failedStep ||= "reset-quiz-data";
+      throw error;
+    }
+    let lifecycle;
+    try {
+      lifecycle = await secureWrites.controlQuizLifecycle({
+        auth: request.auth,
+        data: { roomId, action: "open-registration" },
+      });
+    } catch (error) {
+      if (error && typeof error === "object") error.failedStep ||= "open-registration";
+      throw error;
+    }
     return { success: true, status: "registration-opened", reset, lifecycle };
   };
   const startCompetitionWithQuestion = async (request) => {

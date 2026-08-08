@@ -84,6 +84,9 @@ class MockedWifFirestore {
   runTransaction(...args) {
     return db.runTransaction(...args);
   }
+  batch(...args) {
+    return db.batch(...args);
+  }
   bulkWriter(...args) {
     return db.bulkWriter(...args);
   }

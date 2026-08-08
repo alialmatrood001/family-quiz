@@ -18,6 +18,23 @@ const {
 } = require("./domain");
 
 const MAX_PLAYERS = 400;
+const RESET_BATCH_WRITE_LIMIT = 400;
+const RESET_COLLECTIONS = Object.freeze({
+  full: Object.freeze([
+    ["players", "delete-players"],
+    ["playerPrivate", "delete-player-private"],
+    ["playerRegistrationKeys", "delete-registration-keys"],
+    ["visitors", "delete-visitors"],
+    ["answers", "delete-answers"],
+    ["questionResults", "delete-question-results"],
+    ["messages", "delete-messages"],
+  ]),
+  "answers-messages": Object.freeze([
+    ["answers", "delete-answers"],
+    ["messages", "delete-messages"],
+  ]),
+  messages: Object.freeze([["messages", "delete-messages"]]),
+});
 const QUIZ_INITIALIZATION = Object.freeze({
   title: "مسابقة قروب العائلة العائلية",
   subtitle: "من تقديم الأستاذ إبراهيم ال مطرود",
@@ -64,6 +81,35 @@ function optionText(option) {
 
 function timestampFactory(now) {
   return () => Timestamp.fromMillis(now());
+}
+
+function safeFirestoreErrorCode(error) {
+  const code = String(error?.code ?? "unknown");
+  return /^[a-z0-9_./-]{1,80}$/i.test(code) ? code : "unknown";
+}
+
+async function runResetStep(failedStep, action) {
+  const startedAt = Date.now();
+  try {
+    return await action();
+  } catch (error) {
+    if (error && typeof error === "object") {
+      error.failedStep ||= failedStep;
+      error.firestoreCode ||= safeFirestoreErrorCode(error);
+      error.elapsedMs ||= Math.max(0, Date.now() - startedAt);
+    }
+    throw error;
+  }
+}
+
+async function deleteDocumentsInBatches(db, documents) {
+  for (let offset = 0; offset < documents.length; offset += RESET_BATCH_WRITE_LIMIT) {
+    const batch = db.batch();
+    for (const document of documents.slice(offset, offset + RESET_BATCH_WRITE_LIMIT)) {
+      batch.delete(document.ref);
+    }
+    await batch.commit();
+  }
 }
 
 function registrationKeyId(type, value) {
@@ -1153,40 +1199,35 @@ function createSecureWriteHandlers({
       throw new HttpsError("invalid-argument", "reason must contain 3 to 200 characters");
     }
     const roomRef = db.doc(`rooms/${roomId}`);
-    const roomSnapshot = await roomRef.get();
+    const roomSnapshot = await runResetStep("load-room", () => roomRef.get());
     if (!roomSnapshot.exists) throw new HttpsError("not-found", "Room not found");
     if (["question", "reveal"].includes(roomSnapshot.data().stage)) {
       throw new HttpsError("failed-precondition", "Quiz data cannot be reset during an active question");
     }
-    const collectionNames =
-      mode === "full"
-        ? ["players", "playerPrivate", "playerRegistrationKeys", "visitors", "answers", "messages"]
-        : mode === "messages"
-          ? ["messages"]
-          : ["answers", "messages"];
-    const snapshots = await Promise.all(
-      collectionNames.map((name) => roomRef.collection(name).get())
-    );
-    const writer = db.bulkWriter();
+    const collections = RESET_COLLECTIONS[mode];
+    const snapshots = await Promise.all(collections.map(([name]) =>
+      runResetStep(`load-${name}`, () => roomRef.collection(name).get())
+    ));
     let deletedCount = 0;
-    for (const snapshot of snapshots) {
-      for (const document of snapshot.docs) {
-        writer.delete(document.ref);
-        deletedCount += 1;
-      }
+    for (let index = 0; index < snapshots.length; index += 1) {
+      const documents = snapshots[index].docs;
+      const failedStep = collections[index][1];
+      await runResetStep(failedStep, () => deleteDocumentsInBatches(db, documents));
+      deletedCount += documents.length;
     }
-    await writer.close();
     const operationRunId = runId();
-    await roomRef.collection("auditLogs").doc().create({
-      type: "reset-quiz-data",
-      adminUid,
-      targetId: roomId,
-      mode,
-      reason,
-      runId: operationRunId,
-      deletedCount,
-      createdAt: serverTimestamp(),
-    });
+    await runResetStep("write-reset-audit", () =>
+      roomRef.collection("auditLogs").doc().create({
+        type: "reset-quiz-data",
+        adminUid,
+        targetId: roomId,
+        mode,
+        reason,
+        runId: operationRunId,
+        deletedCount,
+        createdAt: serverTimestamp(),
+      })
+    );
     return { success: true, status: "reset", mode, deletedCount, runId: operationRunId };
   };
 
