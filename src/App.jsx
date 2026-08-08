@@ -4346,7 +4346,6 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
         </nav>
         <div className="dashboard-view-links">
           <a className="dashboard-display-button" href="/?view=display" target="_blank" rel="noreferrer">فتح شاشة العرض ↗</a>
-          <a className="dashboard-presenter-button" href="/?view=presenter" target="_blank" rel="noreferrer">فتح شاشة المقدم ↗</a>
         </div>
         <button className="dashboard-export-button" onClick={exportFullExcel}>استخراج Excel شامل</button>
       </aside>
@@ -5160,8 +5159,8 @@ function DisplayScreen({
   answers,
   allAnswers,
   officialResultState,
-  presenterDock = null,
-  presenterMode = false,
+  controlDock = null,
+  controlMode = false,
 }) {
   const [previewStage, setPreviewStage] = useState(null);
   const [previewQuestionIndex, setPreviewQuestionIndex] = useState(null);
@@ -5290,7 +5289,7 @@ function DisplayScreen({
   }
 
   return (
-    <div className={presenterMode ? "display-frame presenter-display-frame" : "display-frame"}>
+    <div className={controlMode ? "display-frame presenter-display-frame" : "display-frame"}>
       <div className="display-content-area">
         {displayStage === "ready" && (
           <div className="display-panel ready-countdown-screen">
@@ -5434,12 +5433,12 @@ function DisplayScreen({
         onReturnToLive={() => { setPreviewStage(null); setPreviewQuestionIndex(null); }}
         onToggleFinalQuestionResults={() => setShowFinalQuestionResults((value) => !value)}
       />
-      {presenterDock}
+      {controlDock}
     </div>
   );
 }
 
-function PresenterScreen({ room, players, questions, messages, answers, allAnswers, officialResultState, finalization }) {
+function ControlledDisplayScreen({ room, players, questions, messages, answers, allAnswers, officialResultState, finalization }) {
   const mainQuestions = getMainQuestions(questions);
   const practiceQuestions = getPracticeQuestions(questions);
   const controller = usePresenterQuizControls({
@@ -5463,8 +5462,8 @@ function PresenterScreen({ room, players, questions, messages, answers, allAnswe
       answers={answers}
       allAnswers={allAnswers}
       officialResultState={officialResultState}
-      presenterMode
-      presenterDock={<PresenterQuizControls controller={controller} />}
+      controlMode
+      controlDock={<PresenterQuizControls controller={controller} />}
     />
   );
 }
@@ -5740,11 +5739,10 @@ function AdminPanel({ initialView = "control", adminSession }) {
   const reportFirestoreReadError = useCallback((failure) => {
     setFirestoreReadError(`${failure.message} (${failure.path})`);
   }, []);
-  const listenersReady =
-    initialView === APP_VIEWS.DISPLAY || adminFirestoreListenersReady(adminSession);
+  const listenersReady = adminFirestoreListenersReady(adminSession);
   const room = useRoom(listenersReady, reportFirestoreReadError);
   const players = usePlayers(listenersReady, reportFirestoreReadError);
-  const canReadQuestionBank = listenersReady && initialView !== APP_VIEWS.DISPLAY;
+  const canReadQuestionBank = listenersReady;
   const storedQuestions = useQuestions(
     room?.activePackageId || DEFAULT_PACKAGE_ID,
     canReadQuestionBank,
@@ -5771,11 +5769,11 @@ function AdminPanel({ initialView = "control", adminSession }) {
   const [roomCreationBusy, setRoomCreationBusy] = useState(false);
   const [roomCreationError, setRoomCreationError] = useState("");
   const finalization = useQuestionFinalization({
-    enabled: initialView !== APP_VIEWS.DISPLAY,
+    enabled: true,
     room,
     canFinalize: adminSession?.isAdmin === true,
     officialResultState,
-    onResumeDecision: initialView === APP_VIEWS.DISPLAY ? undefined : reportStagingFinalizationResume,
+    onResumeDecision: reportStagingFinalizationResume,
   });
   const gameHistory = [...(room?.gameHistory || [])].sort(
     (a, b) => Number(b.savedAtMs || 0) - Number(a.savedAtMs || 0)
@@ -5852,33 +5850,6 @@ function AdminPanel({ initialView = "control", adminSession }) {
   }
 
   if (initialView === APP_VIEWS.DISPLAY) {
-    // Display page renders its own set of automation components internally.
-    return (
-      <>
-        {firestoreReadErrorBanner}
-        <DisplayOfficialResultController
-          room={room}
-          players={players}
-          listenerState={officialResultState}
-          readResult={readOfficialQuestionResult}
-          render={({ officialResultState: displayOfficialResultState }) => (
-            <DisplayScreen
-              room={room}
-              players={players}
-              questions={questions}
-              allQuestions={allQuestions}
-              messages={messages}
-              answers={answers}
-              allAnswers={allAnswers}
-              officialResultState={displayOfficialResultState}
-            />
-          )}
-        />
-      </>
-    );
-  }
-
-  if (initialView === APP_VIEWS.PRESENTER) {
     return (
       <>
         {alwaysOnAutomations}
@@ -5888,15 +5859,15 @@ function AdminPanel({ initialView = "control", adminSession }) {
           players={players}
           listenerState={officialResultState}
           readResult={readOfficialQuestionResult}
-          render={({ officialResultState: presenterOfficialResultState }) => (
-            <PresenterScreen
+          render={({ officialResultState: displayOfficialResultState }) => (
+            <ControlledDisplayScreen
               room={room}
               players={players}
               questions={questions}
               messages={messages}
               answers={answers}
               allAnswers={allAnswers}
-              officialResultState={presenterOfficialResultState}
+              officialResultState={displayOfficialResultState}
               finalization={finalization}
             />
           )}
@@ -7237,10 +7208,10 @@ function AdminAuthGate({ adminView }) {
   }
 
   return (
-    <div className={adminView === APP_VIEWS.PRESENTER ? "display-app presenter-app" : "app"} dir="rtl">
-      <div className={adminView === APP_VIEWS.PRESENTER ? "admin-toolbar presenter-admin-toolbar card" : "admin-toolbar card"}>
+    <div className={adminView === APP_VIEWS.DISPLAY ? "display-app" : "app"} dir="rtl">
+      <div className={adminView === APP_VIEWS.DISPLAY ? "admin-toolbar presenter-admin-toolbar card" : "admin-toolbar card"}>
         <span className="muted">حساب الإدارة: {session.user.email || session.user.uid}</span>
-        {adminView === APP_VIEWS.PRESENTER && <a className="link-button" href="/?view=control">لوحة التحكم</a>}
+        {adminView === APP_VIEWS.DISPLAY && <a className="link-button" href="/?view=control">لوحة التحكم</a>}
         <button type="button" onClick={handleSignOut} disabled={authWorking}>تسجيل الخروج</button>
       </div>
       <AdminPanel initialView={adminView} adminSession={session} />
@@ -7251,15 +7222,6 @@ function AdminAuthGate({ adminView }) {
 
 export default function App() {
   const requestedView = resolveRequestedView(window.location.search);
-
-  if (requestedView === APP_VIEWS.DISPLAY) {
-    return (
-      <div className="display-app" dir="rtl">
-        <AdminPanel initialView="display" />
-        <AppCredit />
-      </div>
-    );
-  }
 
   if (viewRequiresAdmin(requestedView)) {
     return <AdminAuthGate adminView={requestedView} />;

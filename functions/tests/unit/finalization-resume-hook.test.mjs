@@ -24,7 +24,7 @@ function FinalizationHarness({ room, resultState, client, decisions }) {
   );
 }
 
-function DisabledDisplayFinalizationHarness({ room, resultState, client, decisions }) {
+function DisabledFinalizationHarness({ room, resultState, client, decisions }) {
   const finalization = useQuestionFinalization({
     enabled: false,
     room,
@@ -37,12 +37,12 @@ function DisabledDisplayFinalizationHarness({ room, resultState, client, decisio
   return React.createElement("output", { "data-status": finalization.status }, finalization.status);
 }
 
-test("DisplayView does not run admin finalization recovery or its staging diagnostic", async () => {
+test("an explicitly disabled finalization consumer remains inert", async () => {
   let requests = 0;
   const decisions = [];
   let renderer;
   await act(async () => {
-    renderer = TestRenderer.create(React.createElement(DisabledDisplayFinalizationHarness, {
+    renderer = TestRenderer.create(React.createElement(DisabledFinalizationHarness, {
       room: {
         stage: "results",
         activeQuestionId: "q1",

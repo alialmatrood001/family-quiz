@@ -92,14 +92,16 @@ test("operational button failures are caught instead of becoming unhandled promi
   assert.equal(captured, expected);
 });
 
-test("the real Admin and Display wiring uses safe handlers and local-only display controls", async () => {
+test("the real Admin and controlled Display wiring uses safe handlers plus local navigation", async () => {
   const source = await readFile(new URL("../../../src/App.jsx", import.meta.url), "utf8");
   assert.match(source, /async function handleAdvanceFromDashboardClick\(\)/);
   assert.match(source, /onClick=\{handleAdvanceFromDashboardClick\}/);
   assert.doesNotMatch(source, /onClick=\{advanceFromDashboard\}/);
   assert.match(source, /import \{ DisplayNavigationControls \} from "\.\/display-navigation-controls\.js"/);
   assert.match(source, /<DisplayNavigationControls[\s\S]*stage=\{displayStage\}/);
-  assert.match(source, /enabled:\s*initialView !== APP_VIEWS\.DISPLAY/);
+  assert.match(source, /const listenersReady = adminFirestoreListenersReady\(adminSession\)/);
+  assert.match(source, /enabled:\s*true/);
+  assert.match(source, /<ControlledDisplayScreen[\s\S]*finalization=\{finalization\}/);
 });
 
 const DISPLAY_NAVIGATION_CASES = [

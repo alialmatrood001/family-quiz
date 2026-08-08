@@ -28,7 +28,7 @@ async function call(operation, data, token) {
   return response.body.data;
 }
 
-test("Admin, Display, and three Players complete two questions and finish without state drift", { timeout: 120_000 }, async (t) => {
+test("Admin Control, controlled Display, and three Players complete two questions and finish without state drift", { timeout: 120_000 }, async (t) => {
   const roomId = "full-quiz-stabilization";
   const questionIds = ["stabilization-q1", "stabilization-q2"];
   const identities = await Promise.all([
@@ -39,7 +39,7 @@ test("Admin, Display, and three Players complete two questions and finish withou
   ]);
   const tokens = await Promise.all(identities.map(signInEmulatorIdentity));
   const [adminToken, ...playerTokens] = tokens;
-  const presenter = createQuizLiveOperations({
+  const displayControls = createQuizLiveOperations({
     controlLifecycle: (data) => call("controlQuizLifecycle", data, adminToken),
     finishQuiz: (data) => call("finishQuiz", data, adminToken),
     resetQuizData: (data) => call("resetQuizData", data, adminToken),
@@ -54,7 +54,7 @@ test("Admin, Display, and three Players complete two questions and finish withou
   });
 
   assert.equal((await call("initializeQuiz", { roomId }, adminToken)).status, "created");
-  assert.equal((await presenter.resetAndOpenRegistration(roomId)).status, "open-registration");
+  assert.equal((await displayControls.resetAndOpenRegistration(roomId)).status, "open-registration");
   const ref = roomRef(roomId);
   await Promise.all(questionIds.map((questionId, index) => ref.collection("questions").doc(questionId).set({
     text: `Stabilization question ${index + 1}`,
@@ -76,7 +76,7 @@ test("Admin, Display, and three Players complete two questions and finish withou
   }, token)));
   assert.equal(new Set(registrations.map((registration) => registration.playerId)).size, 3);
 
-  await presenter.startCompetition(roomId);
+  await displayControls.startCompetition(roomId);
   const scoresAfterQuestions = [];
   for (let questionIndex = 0; questionIndex < questionIds.length; questionIndex += 1) {
     const questionId = questionIds[questionIndex];
@@ -87,15 +87,15 @@ test("Admin, Display, and three Players complete two questions and finish withou
         playerId: registrations[0].playerId,
       }, playerTokens[0])).status, "pending");
     }
-    await presenter.prepareQuestion({ roomId, questionId, questionIndex });
-    await presenter.startQuestion({ roomId, questionId });
+    await displayControls.prepareQuestion({ roomId, questionId, questionIndex });
+    await displayControls.startQuestion({ roomId, questionId });
     await Promise.all(registrations.map((registration, playerIndex) => call("submitAnswer", {
       roomId,
       questionId,
       playerId: registration.playerId,
       selectedIndex: playerIndex === 2 ? 2 : questionIndex,
     }, playerTokens[playerIndex])));
-    await presenter.revealQuestion({ roomId, questionId });
+    await displayControls.revealQuestion({ roomId, questionId });
     assert.equal((await call("finalizeQuestion", { roomId, questionId }, adminToken)).status, "finalized");
     assert.equal((await call("finalizeQuestion", { roomId, questionId }, adminToken)).status, "already-finalized");
 
@@ -128,9 +128,9 @@ test("Admin, Display, and three Players complete two questions and finish withou
   assert.equal(firstPlayerAfter.data().jokerUsed, true);
   assert.equal(firstPlayerAfter.data().jokerQuestionId, questionIds[1]);
 
-  await presenter.beginFinalCountdown(roomId);
-  assert.equal((await presenter.finishQuiz(roomId)).status, "finished");
-  assert.equal((await presenter.finishQuiz(roomId)).status, "already-finished");
+  await displayControls.beginFinalCountdown(roomId);
+  assert.equal((await displayControls.finishQuiz(roomId)).status, "finished");
+  assert.equal((await displayControls.finishQuiz(roomId)).status, "already-finished");
   const finished = (await ref.get()).data();
   assert.equal(finished.stage, "finished");
   assert.equal(finished.gameHistory.length, 1);

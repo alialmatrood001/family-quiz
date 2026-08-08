@@ -32,14 +32,15 @@ function labelsFor(room, overrides = {}) {
   }).map(({ label }) => label);
 }
 
-test("routing separates public Display from authenticated Presenter and Admin Control", () => {
+test("routing exposes only Player, authenticated Display, and Admin Control as primary pages", () => {
   assert.equal(resolveRequestedView("?view=display"), APP_VIEWS.DISPLAY);
-  assert.equal(resolveRequestedView("?view=presenter"), APP_VIEWS.PRESENTER);
   assert.equal(resolveRequestedView("?view=control"), APP_VIEWS.CONTROL);
+  assert.equal(resolveRequestedView("?view=presenter"), APP_VIEWS.PLAYER);
   assert.equal(resolveRequestedView("?admin=legacy"), APP_VIEWS.CONTROL);
-  assert.equal(viewRequiresAdmin(APP_VIEWS.DISPLAY), false);
-  assert.equal(viewRequiresAdmin(APP_VIEWS.PRESENTER), true);
+  assert.equal("PRESENTER" in APP_VIEWS, false);
+  assert.equal(viewRequiresAdmin(APP_VIEWS.DISPLAY), true);
   assert.equal(viewRequiresAdmin(APP_VIEWS.CONTROL), true);
+  assert.equal(viewRequiresAdmin(APP_VIEWS.PLAYER), false);
 });
 
 const stageCases = [
@@ -55,19 +56,32 @@ const stageCases = [
 ];
 
 for (const [stage, expected] of stageCases) {
-  test(`Presenter renders only valid server-backed controls during ${stage}`, () => {
+  test(`Display renders only valid server-backed controls during ${stage}`, () => {
     const currentQuestionIndex = ["question", "reveal", "results"].includes(stage) ? 0 : -1;
     const currentQuestion = ["ready", "question", "reveal", "results"].includes(stage) ? mainQuestions[0] : null;
     assert.deepEqual(labelsFor({ stage, currentQuestionIndex, currentQuestion }), expected);
   });
 }
 
-test("Presenter media controls appear only for an unfinished supported media question", () => {
+test("Display media controls appear only for an unfinished supported media question", () => {
   const labels = labelsFor({ stage: "question", currentQuestionIndex: 0, currentQuestion: mainQuestions[0] }, {
     isMedia: true,
     mediaEnded: false,
   });
   assert.equal(labels.includes("تجاوز المقطع وإظهار الخيارات"), true);
+});
+
+test("Display registration chooses the safe start action for the current mode", () => {
+  assert.deepEqual(labelsFor({ stage: "registration", practiceFinished: false }), ["عرض معلومات المسابقة"]);
+  assert.deepEqual(labelsFor({ stage: "registration", practiceFinished: true }), ["ابدأ المسابقة"]);
+});
+
+test("Display results offers finish only after the final question", () => {
+  assert.deepEqual(labelsFor({
+    stage: "results",
+    currentQuestionIndex: 1,
+    currentQuestion: mainQuestions[1],
+  }), ["إنهاء المسابقة"]);
 });
 
 test("the last reveal exposes the secure winner announcement action", () => {
@@ -94,7 +108,7 @@ test("voting transitions remain deferred instead of restoring direct Firestore w
   ]);
 });
 
-function PresenterHarness({ room, operations, finalization }) {
+function DisplayControlsHarness({ room, operations, finalization }) {
   const controller = usePresenterQuizControls({
     room,
     mainQuestions,
@@ -114,7 +128,7 @@ function findButton(renderer, label) {
   return renderer.root.findAllByType("button").find((button) => button.children.join("") === label);
 }
 
-test("real Presenter React controls call the injected secure operation and catch failures", async () => {
+test("real Display React controls call the injected secure operation and catch failures", async () => {
   const calls = [];
   const operations = {
     revealQuestion: async (data) => calls.push(["reveal", data]),
@@ -122,7 +136,7 @@ test("real Presenter React controls call the injected secure operation and catch
   };
   let renderer;
   await act(async () => {
-    renderer = TestRenderer.create(React.createElement(PresenterHarness, {
+    renderer = TestRenderer.create(React.createElement(DisplayControlsHarness, {
       room: { stage: "question", currentQuestionIndex: 0, currentQuestion: mainQuestions[0] },
       operations,
       finalization: { isBusy: false, requestFinalization: async () => {} },
@@ -138,14 +152,14 @@ test("real Presenter React controls call the injected secure operation and catch
   await act(async () => renderer.unmount());
 });
 
-test("Presenter prevents double clicks while a server action is pending", async () => {
+test("Display prevents double clicks while a server action is pending", async () => {
   let calls = 0;
   let release;
   const pending = new Promise((resolve) => { release = resolve; });
   const operations = { resetAndOpenRegistration: async () => { calls += 1; await pending; } };
   let renderer;
   await act(async () => {
-    renderer = TestRenderer.create(React.createElement(PresenterHarness, {
+    renderer = TestRenderer.create(React.createElement(DisplayControlsHarness, {
       room: { stage: "home" },
       operations,
       finalization: { isBusy: false, requestFinalization: async () => {} },
@@ -163,11 +177,11 @@ test("Presenter prevents double clicks while a server action is pending", async 
   await act(async () => renderer.unmount());
 });
 
-test("Presenter renders a safe error instead of leaking an unhandled rejection", async () => {
+test("Display renders a safe error instead of leaking an unhandled rejection", async () => {
   const operations = { resetAndOpenRegistration: async () => { throw new Error("private server detail"); } };
   let renderer;
   await act(async () => {
-    renderer = TestRenderer.create(React.createElement(PresenterHarness, {
+    renderer = TestRenderer.create(React.createElement(DisplayControlsHarness, {
       room: { stage: "home" },
       operations,
       finalization: { isBusy: false, requestFinalization: async () => {} },
@@ -180,7 +194,7 @@ test("Presenter renders a safe error instead of leaking an unhandled rejection",
   await act(async () => renderer.unmount());
 });
 
-test("Admin Control and Presenter share one server-action mapping", async () => {
+test("Admin Control and Display share one server-action mapping", async () => {
   const calls = [];
   const record = (operation) => async (data) => calls.push([operation, data]);
   const operations = createQuizLiveOperations({
@@ -207,14 +221,42 @@ test("Admin Control and Presenter share one server-action mapping", async () => 
   ]);
 });
 
-test("Public Display wiring has no Presenter dock or mutation handlers", async () => {
+test("Display operations contain no direct Firestore write path", async () => {
+  const files = await Promise.all([
+    readFile(new URL("../../../src/presenter-quiz-controller.js", import.meta.url), "utf8"),
+    readFile(new URL("../../../src/presenter-quiz-controls.js", import.meta.url), "utf8"),
+    readFile(new URL("../../../src/quiz-live-operations.js", import.meta.url), "utf8"),
+    readFile(new URL("../../../src/quiz-live-operations-core.js", import.meta.url), "utf8"),
+  ]);
+  const source = files.join("\n");
+  assert.doesNotMatch(source, /firebase\/firestore|\bsetDoc\b|\bupdateDoc\b|\baddDoc\b|\bdeleteDoc\b/);
+  assert.match(source, /controlQuizLifecycleSecurely/);
+  assert.match(source, /controlQuestionSecurely/);
+  assert.match(source, /finalize|requestFinalization/);
+});
+
+test("Display is authenticated, mounts the operational dock, and no presenter route remains", async () => {
   const source = await readFile(new URL("../../../src/App.jsx", import.meta.url), "utf8");
+  const displayBranchStart = source.indexOf(`if (initialView === APP_VIEWS.DISPLAY)`);
+  const displayBranchEnd = source.indexOf(`if (!room)`, displayBranchStart);
   const displayBranch = source.slice(
-    source.indexOf(`if (initialView === APP_VIEWS.DISPLAY)`),
-    source.indexOf(`if (initialView === APP_VIEWS.PRESENTER)`),
+    displayBranchStart,
+    displayBranchEnd,
   );
-  assert.doesNotMatch(displayBranch, /PresenterQuizControls|usePresenterQuizControls|presenterDock/);
-  assert.doesNotMatch(displayBranch, /quizLiveOperations|requestFinalization/);
-  assert.match(source, /requestedView === APP_VIEWS\.DISPLAY/);
+  assert.match(displayBranch, /ControlledDisplayScreen/);
+  assert.match(displayBranch, /finalization=\{finalization\}/);
+  assert.match(source, /controlDock=\{<PresenterQuizControls controller=\{controller\} \/>\}/);
+  assert.doesNotMatch(source, /APP_VIEWS\.PRESENTER|view=presenter|function PresenterScreen/);
   assert.match(source, /viewRequiresAdmin\(requestedView\)/);
+  assert.match(source, /adminView === APP_VIEWS\.DISPLAY/);
+  assert.doesNotMatch(source, /requestedView === APP_VIEWS\.DISPLAY/);
+});
+
+test("Control stays detailed, Display stays visual, and Player route is unchanged", async () => {
+  const source = await readFile(new URL("../../../src/App.jsx", import.meta.url), "utf8");
+  assert.match(source, /return <AdminAuthGate adminView=\{requestedView\} \/>/);
+  assert.match(source, /<AdminPanel initialView=\{adminView\} adminSession=\{session\} \/>/);
+  assert.match(source, /<AdminControl[\s\S]*room=\{room\}/);
+  assert.match(source, /<PlayerPanel \/>/);
+  assert.doesNotMatch(source, /<AdminControl[^>]*initialView=\{APP_VIEWS\.DISPLAY\}/);
 });
