@@ -46,11 +46,15 @@ export const cancelJoker = (data, options) => serverApiClient.cancelJoker(data, 
 export const updatePlayerProfile = (data, options) =>
   serverApiClient.updatePlayerProfile(data, options);
 export const prepareQuestion = (data, options) => serverApiClient.prepareQuestion(data, options);
+export const startCompetitionWithQuestion = (data, options) =>
+  serverApiClient.startCompetitionWithQuestion(data, options);
 export const startQuestion = (data, options) => serverApiClient.startQuestion(data, options);
 export const controlQuestion = (data, options) => serverApiClient.controlQuestion(data, options);
 export const finalizeQuestion = (data, options) => serverApiClient.finalizeQuestion(data, options);
 export const controlQuizLifecycle = (data, options) =>
   serverApiClient.controlQuizLifecycle(data, options);
+export const resetAndOpenRegistration = (data, options) =>
+  serverApiClient.resetAndOpenRegistration(data, options);
 export const finishQuiz = (data, options) => serverApiClient.finishQuiz(data, options);
 export const adjustPlayerScore = (data, options) =>
   serverApiClient.adjustPlayerScore(data, options);

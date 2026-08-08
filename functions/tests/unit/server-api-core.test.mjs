@@ -46,12 +46,12 @@ test("unknown server transport fails clearly", () => {
   );
 });
 
-test("client exposes all eighteen server operations", () => {
+test("client exposes all twenty server operations", () => {
   const client = createServerApiClient({
     transport: "callable",
     callableInvoker: async () => ({}),
   });
-  assert.equal(Object.keys(SERVER_OPERATIONS).length, 18);
+  assert.equal(Object.keys(SERVER_OPERATIONS).length, 20);
   for (const operation of Object.keys(SERVER_OPERATIONS)) {
     assert.equal(typeof client[operation], "function");
   }

@@ -1,6 +1,7 @@
 "use strict";
 
 const { AsyncLocalStorage } = require("node:async_hooks");
+const { measureServerTiming } = require("./request-timing");
 const {
   EXPECTED_VERCEL_AUDIENCE,
   EXPECTED_VERCEL_ISSUER,
@@ -79,8 +80,11 @@ function oidcTokenFromRequest(req) {
 }
 
 function runWithVercelOidcRequest(req, callback) {
-  const token = oidcTokenFromRequest(req);
-  validateVercelOidcToken(token);
+  const token = measureServerTiming("resolveVercelOidcMs", () => {
+    const requestToken = oidcTokenFromRequest(req);
+    validateVercelOidcToken(requestToken);
+    return requestToken;
+  });
   return requestTokenStorage.run(Object.freeze({ token }), callback);
 }
 

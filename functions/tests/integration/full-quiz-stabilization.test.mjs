@@ -43,9 +43,10 @@ test("Admin Control, controlled Display, and three Players complete two question
   const displayControls = createQuizLiveOperations({
     controlLifecycle: (data) => call("controlQuizLifecycle", data, adminToken),
     finishQuiz: (data) => call("finishQuiz", data, adminToken),
-    resetQuizData: (data) => call("resetQuizData", data, adminToken),
+    resetAndOpenRegistration: (data) => call("resetAndOpenRegistration", data, adminToken),
     resetPracticeScores: (data) => call("resetPracticeScores", data, adminToken),
     prepareQuestion: (data) => call("prepareQuestion", data, adminToken),
+    startCompetitionWithQuestion: (data) => call("startCompetitionWithQuestion", data, adminToken),
     startQuestion: (data) => call("startQuestion", data, adminToken),
     controlQuestion: (data) => call("controlQuestion", data, adminToken),
   });
@@ -61,7 +62,7 @@ test("Admin Control, controlled Display, and three Players complete two question
   });
 
   assert.equal((await call("initializeQuiz", { roomId }, adminToken)).status, "created");
-  assert.equal((await displayControls.resetAndOpenRegistration(roomId)).status, "open-registration");
+  assert.equal((await displayControls.resetAndOpenRegistration(roomId)).status, "registration-opened");
   const ref = roomRef(roomId);
   await Promise.all(questionIds.map((questionId, index) => ref.collection("questions").doc(questionId).set({
     text: `Stabilization question ${index + 1}`,
@@ -83,7 +84,6 @@ test("Admin Control, controlled Display, and three Players complete two question
   }, token)));
   assert.equal(new Set(registrations.map((registration) => registration.playerId)).size, 3);
 
-  await displayControls.startCompetition(roomId);
   const scoresAfterQuestions = [];
   for (let questionIndex = 0; questionIndex < questionIds.length; questionIndex += 1) {
     const questionId = questionIds[questionIndex];
@@ -94,7 +94,15 @@ test("Admin Control, controlled Display, and three Players complete two question
         playerId: registrations[0].playerId,
       }, playerTokens[0]))).status, "pending");
     }
-    await displayControls.prepareQuestion({ roomId, questionId, questionIndex });
+    if (questionIndex === 0) {
+      assert.equal((await displayControls.startCompetitionWithQuestion({
+        roomId,
+        questionId,
+        questionIndex,
+      })).status, "competition-question-prepared");
+    } else {
+      await displayControls.prepareQuestion({ roomId, questionId, questionIndex });
+    }
     await measure("startQuestion", () => displayControls.startQuestion({ roomId, questionId }));
     const answeringPlayers = questionIndex === 0 ? registrations.slice(0, 2) : registrations;
     await measure("submitAnswer.batch", () => Promise.all(answeringPlayers.map((registration, playerIndex) => call("submitAnswer", {

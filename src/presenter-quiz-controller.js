@@ -159,8 +159,12 @@ export function usePresenterQuizControls({
       await prepare(practiceQuestions[0], 0);
     },
     "start-competition": async () => {
-      await operations.startCompetition(roomId);
-      await prepare(mainQuestions[0], 0);
+      const first = mainQuestions[0];
+      await operations.startCompetitionWithQuestion({
+        roomId,
+        questionId: questionId(first),
+        questionIndex: 0,
+      });
     },
     "start-question": () => operations.startQuestion({ roomId, questionId: currentId }),
     "reveal-question": async () => {

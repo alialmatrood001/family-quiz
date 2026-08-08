@@ -100,7 +100,14 @@ export function createQuestionFinalizationClient({
         }
       };
 
-      await requestFinalization();
+      const accepted = await requestFinalization();
+      if (
+        accepted?.officialResult &&
+        String(accepted.officialResult.questionId || "") === safeQuestionId &&
+        Array.isArray(accepted.officialResult.results)
+      ) {
+        return { officialResult: accepted.officialResult, source: "server-response" };
+      }
       let recoveryAttempt = 0;
       while (true) {
         try {

@@ -24,6 +24,9 @@ exports.submitAnswer = onCall(asFirebaseCallable(operations.submitAnswer));
 exports.activateJoker = onCall(asFirebaseCallable(operations.activateJoker));
 exports.cancelJoker = onCall(asFirebaseCallable(operations.cancelJoker));
 exports.prepareQuestion = onCall(asFirebaseCallable(operations.prepareQuestion));
+exports.startCompetitionWithQuestion = onCall(
+  asFirebaseCallable(operations.startCompetitionWithQuestion)
+);
 exports.startQuestion = onCall(asFirebaseCallable(operations.startQuestion));
 exports.controlQuestion = onCall(asFirebaseCallable(operations.controlQuestion));
 exports.controlQuizLifecycle = onCall(asFirebaseCallable(operations.controlQuizLifecycle));
@@ -37,3 +40,6 @@ exports.updatePlayerProfile = onCall(asFirebaseCallable(operations.updatePlayerP
 exports.deletePlayer = onCall(asFirebaseCallable(operations.deletePlayer));
 exports.resetPracticeScores = onCall(asFirebaseCallable(operations.resetPracticeScores));
 exports.resetQuizData = onCall(asFirebaseCallable(operations.resetQuizData));
+exports.resetAndOpenRegistration = onCall(
+  asFirebaseCallable(operations.resetAndOpenRegistration)
+);

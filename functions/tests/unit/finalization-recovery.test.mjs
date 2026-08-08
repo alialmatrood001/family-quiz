@@ -354,6 +354,24 @@ test("a genuine finalization conflict is surfaced and is not masked as processin
   assert.equal(waited, false);
 });
 
+test("a valid official result in the HTTP response completes UI without another snapshot wait", async () => {
+  let waited = false;
+  const officialResult = {
+    questionId: "q1",
+    runId: "response-run",
+    results: [{ playerId: "public-player", points: 100 }],
+  };
+  const client = createQuestionFinalizationClient({
+    firestore: {},
+    finalizeOperation: async () => ({ status: "finalized", officialResult }),
+    waitForResult: async () => { waited = true; },
+  });
+  const result = await client.finalizeAndWait({ roomId: "room", questionId: "q1" });
+  assert.equal(result.officialResult, officialResult);
+  assert.equal(result.source, "server-response");
+  assert.equal(waited, false);
+});
+
 test("quiz reset remains blocked during an active question or finalization", () => {
   assert.equal(isQuizResetBlocked({ stage: "question" }), true);
   assert.equal(isQuizResetBlocked({ stage: "reveal" }), true);

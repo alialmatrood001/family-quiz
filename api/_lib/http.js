@@ -1,6 +1,19 @@
 import { Buffer } from "node:buffer";
+import { createRequire } from "node:module";
 import process from "node:process";
-import { serverRuntime, withServerRequestIdentity } from "./server-runtime.js";
+import {
+  ensureServerRequestDatabase,
+  serverRuntime,
+  withServerRequestIdentity,
+} from "./server-runtime.js";
+
+const require = createRequire(import.meta.url);
+const {
+  measureServerTiming,
+  runWithServerTimings,
+  serverTimingHeader,
+  serverTimingSnapshot,
+} = require("../../functions/server/request-timing.js");
 
 export const MAX_JSON_BYTES = 32 * 1024;
 
@@ -149,6 +162,16 @@ function setCors(req, res, methods = ["POST", "OPTIONS"]) {
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
   res.setHeader("Access-Control-Allow-Methods", methods.join(", "));
+  res.setHeader("Access-Control-Expose-Headers", "Server-Timing");
+}
+
+function completeServerTimings(res) {
+  const snapshot = serverTimingSnapshot();
+  res.setHeader("Server-Timing", serverTimingHeader(snapshot));
+  if (process.env.APP_ENVIRONMENT === "staging") {
+    console.info("staging-server-timing", snapshot);
+  }
+  return snapshot;
 }
 
 function httpError(status, code, message) {
@@ -351,7 +374,9 @@ export async function verifiedAuth(
   }
   let claims;
   try {
-    claims = await runtime.auth.verifyIdToken(token);
+    claims = await measureServerTiming("verifyFirebaseTokenMs", () =>
+      runtime.auth.verifyIdToken(token),
+    );
   } catch (error) {
     throw tokenVerificationError(error);
   }
@@ -398,78 +423,89 @@ export function createActionEndpoint({
 }) {
   const allowed = new Set(actions);
   return async function actionEndpoint(req, res) {
-    try {
-      setNoStore(res);
-      setCors(req, res);
-      if (req.method === "OPTIONS") {
-        res.status(204).end();
-        return;
-      }
-      if (req.method !== "POST") {
-        throw httpError(405, "method-not-allowed", "Only POST is supported");
-      }
-      const { action, data } = parseProtocolBody(req);
-      if (!allowed.has(action)) {
-        throw httpError(404, "unknown-action", SAFE_MESSAGES["unknown-action"]);
-      }
-      const result = await requestIdentity(req, async () => {
-        const auth = await verifiedAuth(req, { runtimeFactory });
-        if (adminOnly && auth.token?.admin !== true) {
-          throw httpError(403, "permission-denied", "Admin permission is required");
+    return runWithServerTimings(async () => {
+      try {
+        setNoStore(res);
+        setCors(req, res);
+        if (req.method === "OPTIONS") {
+          completeServerTimings(res);
+          res.status(204).end();
+          return;
         }
-        const operation = runtimeFactory().operations[action];
-        if (typeof operation !== "function") {
+        if (req.method !== "POST") {
+          throw httpError(405, "method-not-allowed", "Only POST is supported");
+        }
+        const { action, data } = parseProtocolBody(req);
+        if (!allowed.has(action)) {
           throw httpError(404, "unknown-action", SAFE_MESSAGES["unknown-action"]);
         }
-        return operation({ auth, data });
-      });
-      send(res, 200, { ok: true, data: result ?? {} });
-    } catch (error) {
-      const normalized = normalizeError(error);
-      logSafeServerFailure(error, normalized);
-      send(res, normalized.status, {
-        ok: false,
-        error: {
-          code: normalized.code,
-          message: normalized.message,
-        },
-      });
-    }
+        const result = await requestIdentity(req, async () => {
+          const auth = await verifiedAuth(req, { runtimeFactory });
+          if (adminOnly && auth.token?.admin !== true) {
+            throw httpError(403, "permission-denied", "Admin permission is required");
+          }
+          await ensureServerRequestDatabase();
+          const operation = runtimeFactory().operations[action];
+          if (typeof operation !== "function") {
+            throw httpError(404, "unknown-action", SAFE_MESSAGES["unknown-action"]);
+          }
+          return measureServerTiming("firestoreOperationMs", () => operation({ auth, data }));
+        });
+        completeServerTimings(res);
+        send(res, 200, { ok: true, data: result ?? {} });
+      } catch (error) {
+        const normalized = normalizeError(error);
+        logSafeServerFailure(error, normalized);
+        completeServerTimings(res);
+        send(res, normalized.status, {
+          ok: false,
+          error: {
+            code: normalized.code,
+            message: normalized.message,
+          },
+        });
+      }
+    });
   };
 }
 
 export function createHealthEndpoint() {
   return async function healthEndpoint(req, res) {
-    try {
-      setNoStore(res);
-      setCors(req, res, ["GET", "OPTIONS"]);
-      if (req.method === "OPTIONS") {
-        res.status(204).end();
-        return;
+    return runWithServerTimings(async () => {
+      try {
+        setNoStore(res);
+        setCors(req, res, ["GET", "OPTIONS"]);
+        if (req.method === "OPTIONS") {
+          completeServerTimings(res);
+          res.status(204).end();
+          return;
+        }
+        if (req.method !== "GET") {
+          throw httpError(405, "method-not-allowed", "Only GET is supported");
+        }
+        completeServerTimings(res);
+        send(res, 200, {
+          ok: true,
+          data: {
+            status: "ok",
+            service: "family-quiz-vercel-api",
+            environment:
+              process.env.APP_ENVIRONMENT ||
+              (process.env.FIRESTORE_EMULATOR_HOST ? "local-emulator" : "local"),
+            transport: process.env.SERVER_TRANSPORT || "vercel",
+          },
+        });
+      } catch (error) {
+        const normalized = normalizeError(error);
+        completeServerTimings(res);
+        send(res, normalized.status, {
+          ok: false,
+          error: {
+            code: normalized.code,
+            message: normalized.message,
+          },
+        });
       }
-      if (req.method !== "GET") {
-        throw httpError(405, "method-not-allowed", "Only GET is supported");
-      }
-      send(res, 200, {
-        ok: true,
-        data: {
-          status: "ok",
-          service: "family-quiz-vercel-api",
-          environment:
-            process.env.APP_ENVIRONMENT ||
-            (process.env.FIRESTORE_EMULATOR_HOST ? "local-emulator" : "local"),
-          transport: process.env.SERVER_TRANSPORT || "vercel",
-        },
-      });
-    } catch (error) {
-      const normalized = normalizeError(error);
-      send(res, normalized.status, {
-        ok: false,
-        error: {
-          code: normalized.code,
-          message: normalized.message,
-        },
-      });
-    }
+    });
   };
 }

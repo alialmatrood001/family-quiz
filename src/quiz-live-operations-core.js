@@ -1,25 +1,26 @@
 export function createQuizLiveOperations({
   controlLifecycle,
   finishQuiz,
-  resetQuizData,
+  resetAndOpenRegistration,
   resetPracticeScores,
   prepareQuestion,
+  startCompetitionWithQuestion,
   startQuestion,
   controlQuestion,
 }) {
   return Object.freeze({
     openRegistration: (roomId) => controlLifecycle({ roomId, action: "open-registration" }),
-    resetAndOpenRegistration: async (roomId) => {
-      await resetQuizData({
-        roomId,
-        mode: "full",
-        reason: "فتح التسجيل من أدوات التحكم الآمنة",
-      });
-      return controlLifecycle({ roomId, action: "open-registration" });
-    },
+    resetAndOpenRegistration: (roomId) => resetAndOpenRegistration({ roomId }),
     returnRegistration: (roomId) => controlLifecycle({ roomId, action: "return-registration" }),
     showInstructions: (roomId) => controlLifecycle({ roomId, action: "show-instructions" }),
     startCompetition: (roomId) => controlLifecycle({ roomId, action: "start-competition" }),
+    startCompetitionWithQuestion: ({ roomId, questionId, questionIndex, selectedCategory }) =>
+      startCompetitionWithQuestion({
+        roomId,
+        questionId,
+        questionIndex,
+        ...(selectedCategory ? { selectedCategory } : {}),
+      }),
     startPractice: (roomId) => controlLifecycle({ roomId, action: "start-practice" }),
     beginFinalCountdown: (roomId) => controlLifecycle({ roomId, action: "begin-final-countdown" }),
     finishQuiz: (roomId) => finishQuiz({ roomId }),

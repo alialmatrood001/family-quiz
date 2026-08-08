@@ -41,6 +41,7 @@ function publicResult(result, status) {
     questionId: result.questionId,
     runId: result.runId,
     counts: result.counts,
+    officialResult: result,
   };
 }
 

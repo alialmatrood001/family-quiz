@@ -200,20 +200,22 @@ test("Admin Control and Display share one server-action mapping", async () => {
   const operations = createQuizLiveOperations({
     controlLifecycle: record("controlQuizLifecycle"),
     finishQuiz: record("finishQuiz"),
-    resetQuizData: record("resetQuizData"),
+    resetAndOpenRegistration: record("resetAndOpenRegistration"),
     resetPracticeScores: record("resetPracticeScores"),
     prepareQuestion: record("prepareQuestion"),
+    startCompetitionWithQuestion: record("startCompetitionWithQuestion"),
     startQuestion: record("startQuestion"),
     controlQuestion: record("controlQuestion"),
   });
   await operations.resetAndOpenRegistration("room-1");
+  await operations.startCompetitionWithQuestion({ roomId: "room-1", questionId: "q1", questionIndex: 0 });
   await operations.prepareQuestion({ roomId: "room-1", questionId: "q1", questionIndex: 0 });
   await operations.startQuestion({ roomId: "room-1", questionId: "q1" });
   await operations.revealQuestion({ roomId: "room-1", questionId: "q1" });
   await operations.finishQuiz("room-1");
   assert.deepEqual(calls.map(([operation]) => operation), [
-    "resetQuizData",
-    "controlQuizLifecycle",
+    "resetAndOpenRegistration",
+    "startCompetitionWithQuestion",
     "prepareQuestion",
     "startQuestion",
     "controlQuestion",

@@ -6,6 +6,10 @@ const resetPractice = createSingleFlightCallable(
   "تعذر إنهاء التدريب وإعادة النقاط.",
 );
 const resetQuiz = createSingleFlightCallable("resetQuizData", "تعذر مسح بيانات المسابقة.");
+const resetAndOpenRegistration = createSingleFlightCallable(
+  "resetAndOpenRegistration",
+  "تعذر فتح التسجيل.",
+);
 const getPrivateDetails = createSingleFlightCallable(
   "getPlayerPrivateDetails",
   "تعذر قراءة بيانات المتسابق الخاصة.",
@@ -28,6 +32,8 @@ export const resetPracticeScoresSecurely = (data) =>
   resetPractice(data, `practice-reset/${data.roomId}`);
 export const resetQuizDataSecurely = (data) =>
   resetQuiz(data, `quiz-reset/${data.roomId}/${data.mode}`);
+export const resetAndOpenRegistrationSecurely = (data) =>
+  resetAndOpenRegistration(data, `registration-reset/${data.roomId}`);
 export const getPlayerPrivateDetailsSecurely = (data) =>
   getPrivateDetails(data, `private/${data.roomId}/${data.playerId}`);
 export const initializeQuizSecurely = (data) =>

@@ -182,7 +182,7 @@ test("client banner and rollback modes remain explicit", () => {
 });
 
 test("operation registry and scoring behavior remain unchanged", () => {
-  assert.equal(Object.keys(SERVER_OPERATIONS).length, 18);
+  assert.equal(Object.keys(SERVER_OPERATIONS).length, 20);
   assert.deepEqual(Object.keys(SERVER_OPERATIONS), [
     "registerPlayer",
     "recoverPlayer",
@@ -191,10 +191,12 @@ test("operation registry and scoring behavior remain unchanged", () => {
     "cancelJoker",
     "updatePlayerProfile",
     "prepareQuestion",
+    "startCompetitionWithQuestion",
     "startQuestion",
     "controlQuestion",
     "finalizeQuestion",
     "controlQuizLifecycle",
+    "resetAndOpenRegistration",
     "finishQuiz",
     "adjustPlayerScore",
     "getPlayerPrivateDetails",

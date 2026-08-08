@@ -17,7 +17,7 @@ function normalizedCallableCode(error) {
     .replaceAll("_", "-");
 }
 
-test("all eighteen operations share stable error semantics across callable and Vercel", { timeout: 120_000 }, async (t) => {
+test("all twenty operations share stable error semantics across callable and Vercel", { timeout: 120_000 }, async (t) => {
   const [admin, player] = await Promise.all([
     createEmulatorIdentity({ admin: true, label: "operation10-parity-admin" }),
     createEmulatorIdentity({ label: "operation10-parity-player" }),
@@ -51,7 +51,7 @@ test("all eighteen operations share stable error semantics across callable and V
     assert.equal(vercelCode, callableCode, operation);
     rows.push({ operation, callable: callableCode, vercel: vercelCode });
   }
-  assert.equal(rows.length, 18);
+  assert.equal(rows.length, 20);
   console.log(`OPERATION10_PARITY ${JSON.stringify(rows)}`);
 });
 
@@ -67,6 +67,8 @@ async function invokeTransport(transport, operation, data, token, endpoint) {
 async function runSuccessScenario(transport, { adminToken, playerToken }) {
   const roomId = `operation10-parity-success-${transport}`;
   const practiceRoomId = `${roomId}-practice`;
+  const resetRoomId = `${roomId}-composite-reset`;
+  const startRoomId = `${roomId}-composite-start`;
   const questionId = "parity-question";
   const room = roomRef(roomId);
   await room.set({
@@ -96,6 +98,27 @@ async function runSuccessScenario(transport, { adminToken, playerToken }) {
     );
 
   const statuses = {};
+  await call("initializeQuiz", { roomId: resetRoomId }, "admin");
+  statuses.resetAndOpenRegistration = (
+    await call("resetAndOpenRegistration", { roomId: resetRoomId }, "admin")
+  ).status;
+  await call("initializeQuiz", { roomId: startRoomId }, "admin");
+  await roomRef(startRoomId).collection("questions").doc(questionId).set({
+    text: "Composite parity question",
+    options: ["A", "B"],
+    correctIndex: 0,
+    maxPoints: 1000,
+    minPoints: 100,
+    seconds: 30,
+    answerRevealDelaySeconds: 0,
+  });
+  statuses.startCompetitionWithQuestion = (
+    await call("startCompetitionWithQuestion", {
+      roomId: startRoomId,
+      questionId,
+      questionIndex: 0,
+    }, "admin")
+  ).status;
   statuses.initializeQuiz = (
     await call("initializeQuiz", { roomId }, "admin")
   ).status;
@@ -193,7 +216,12 @@ async function runSuccessScenario(transport, { adminToken, playerToken }) {
   const publicData = publicBeforeDelete.data();
   const privateData = privateBeforeDelete.data();
   const resultData = resultDocument.data();
-  await Promise.all([deleteRoom(roomId), deleteRoom(practiceRoomId)]);
+  await Promise.all([
+    deleteRoom(roomId),
+    deleteRoom(practiceRoomId),
+    deleteRoom(resetRoomId),
+    deleteRoom(startRoomId),
+  ]);
   return {
     statuses,
     score: publicData.score,
@@ -214,7 +242,7 @@ async function runSuccessScenario(transport, { adminToken, playerToken }) {
   };
 }
 
-test("all eighteen operations complete the same logical success scenario on both transports", { timeout: 180_000 }, async (t) => {
+test("all twenty operations complete the same logical success scenario on both transports", { timeout: 180_000 }, async (t) => {
   const [admin, player] = await Promise.all([
     createEmulatorIdentity({ admin: true, label: "operation10-success-admin" }),
     createEmulatorIdentity({ label: "operation10-success-player" }),
@@ -233,7 +261,7 @@ test("all eighteen operations complete the same logical success scenario on both
   assert.ok(callable.score >= 110 && callable.score <= 1010);
   assert.ok(vercel.score >= 110 && vercel.score <= 1010);
   assert.ok(Math.abs(callable.score - vercel.score) <= 50);
-  assert.equal(Object.keys(callable.statuses).length, 18);
+  assert.equal(Object.keys(callable.statuses).length, 20);
   assert.deepEqual(callable.publicPrivateFields, []);
   assert.equal(callable.privateHasIdentity, true);
   assert.equal(callable.deletedAfterScenario, true);
