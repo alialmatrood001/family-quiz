@@ -99,7 +99,7 @@ test("the real Admin and Display wiring uses safe handlers and local-only displa
   assert.doesNotMatch(source, /onClick=\{advanceFromDashboard\}/);
   assert.match(source, /import \{ DisplayNavigationControls \} from "\.\/display-navigation-controls\.js"/);
   assert.match(source, /<DisplayNavigationControls[\s\S]*stage=\{displayStage\}/);
-  assert.match(source, /enabled:\s*initialView !== "display"/);
+  assert.match(source, /enabled:\s*initialView !== APP_VIEWS\.DISPLAY/);
 });
 
 const DISPLAY_NAVIGATION_CASES = [

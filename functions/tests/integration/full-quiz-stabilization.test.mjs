@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { SERVER_OPERATIONS } from "../../../src/server-api-core.js";
 import { buildDisplaySnapshotFromOfficialResult } from "../../../src/display-official-result.js";
+import { createQuizLiveOperations } from "../../../src/quiz-live-operations-core.js";
 import {
   createEmulatorIdentity,
   deleteEmulatorIdentity,
@@ -38,13 +39,22 @@ test("Admin, Display, and three Players complete two questions and finish withou
   ]);
   const tokens = await Promise.all(identities.map(signInEmulatorIdentity));
   const [adminToken, ...playerTokens] = tokens;
+  const presenter = createQuizLiveOperations({
+    controlLifecycle: (data) => call("controlQuizLifecycle", data, adminToken),
+    finishQuiz: (data) => call("finishQuiz", data, adminToken),
+    resetQuizData: (data) => call("resetQuizData", data, adminToken),
+    resetPracticeScores: (data) => call("resetPracticeScores", data, adminToken),
+    prepareQuestion: (data) => call("prepareQuestion", data, adminToken),
+    startQuestion: (data) => call("startQuestion", data, adminToken),
+    controlQuestion: (data) => call("controlQuestion", data, adminToken),
+  });
   t.after(async () => {
     await deleteRoom(roomId);
     await Promise.all(identities.map(({ uid }) => deleteEmulatorIdentity(uid)));
   });
 
   assert.equal((await call("initializeQuiz", { roomId }, adminToken)).status, "created");
-  assert.equal((await call("controlQuizLifecycle", { roomId, action: "open-registration" }, adminToken)).status, "open-registration");
+  assert.equal((await presenter.resetAndOpenRegistration(roomId)).status, "open-registration");
   const ref = roomRef(roomId);
   await Promise.all(questionIds.map((questionId, index) => ref.collection("questions").doc(questionId).set({
     text: `Stabilization question ${index + 1}`,
@@ -66,7 +76,7 @@ test("Admin, Display, and three Players complete two questions and finish withou
   }, token)));
   assert.equal(new Set(registrations.map((registration) => registration.playerId)).size, 3);
 
-  await call("controlQuizLifecycle", { roomId, action: "start-competition" }, adminToken);
+  await presenter.startCompetition(roomId);
   const scoresAfterQuestions = [];
   for (let questionIndex = 0; questionIndex < questionIds.length; questionIndex += 1) {
     const questionId = questionIds[questionIndex];
@@ -77,15 +87,15 @@ test("Admin, Display, and three Players complete two questions and finish withou
         playerId: registrations[0].playerId,
       }, playerTokens[0])).status, "pending");
     }
-    await call("prepareQuestion", { roomId, questionId, questionIndex }, adminToken);
-    await call("startQuestion", { roomId, questionId }, adminToken);
+    await presenter.prepareQuestion({ roomId, questionId, questionIndex });
+    await presenter.startQuestion({ roomId, questionId });
     await Promise.all(registrations.map((registration, playerIndex) => call("submitAnswer", {
       roomId,
       questionId,
       playerId: registration.playerId,
       selectedIndex: playerIndex === 2 ? 2 : questionIndex,
     }, playerTokens[playerIndex])));
-    await call("controlQuestion", { roomId, questionId, action: "reveal" }, adminToken);
+    await presenter.revealQuestion({ roomId, questionId });
     assert.equal((await call("finalizeQuestion", { roomId, questionId }, adminToken)).status, "finalized");
     assert.equal((await call("finalizeQuestion", { roomId, questionId }, adminToken)).status, "already-finalized");
 
@@ -118,9 +128,9 @@ test("Admin, Display, and three Players complete two questions and finish withou
   assert.equal(firstPlayerAfter.data().jokerUsed, true);
   assert.equal(firstPlayerAfter.data().jokerQuestionId, questionIds[1]);
 
-  await call("controlQuizLifecycle", { roomId, action: "begin-final-countdown" }, adminToken);
-  assert.equal((await call("finishQuiz", { roomId }, adminToken)).status, "finished");
-  assert.equal((await call("finishQuiz", { roomId }, adminToken)).status, "already-finished");
+  await presenter.beginFinalCountdown(roomId);
+  assert.equal((await presenter.finishQuiz(roomId)).status, "finished");
+  assert.equal((await presenter.finishQuiz(roomId)).status, "already-finished");
   const finished = (await ref.get()).data();
   assert.equal(finished.stage, "finished");
   assert.equal(finished.gameHistory.length, 1);

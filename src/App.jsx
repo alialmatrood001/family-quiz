@@ -31,6 +31,12 @@ import {
 } from "./quiz-state-machine.js";
 import { DisplayNavigationControls } from "./display-navigation-controls.js";
 import {
+  PresenterQuizControls,
+} from "./presenter-quiz-controls.js";
+import { usePresenterQuizControls } from "./presenter-quiz-controller.js";
+import { quizLiveOperations } from "./quiz-live-operations.js";
+import { APP_VIEWS, resolveRequestedView, viewRequiresAdmin } from "./view-routing.js";
+import {
   activateJokerSecurely,
   cancelJokerSecurely,
   recoverPlayerSecurely,
@@ -39,18 +45,10 @@ import {
   updatePlayerProfileSecurely,
 } from "./quiz-write-client.js";
 import {
-  controlQuestionSecurely,
-  prepareQuestionSecurely,
-  startQuestionSecurely,
-} from "./question-control-client.js";
-import {
   adjustPlayerScoreSecurely,
-  controlQuizLifecycleSecurely,
-  finishQuizSecurely,
   getPlayerPrivateDetailsSecurely,
   initializeQuizSecurely,
   resetQuizDataSecurely,
-  resetPracticeScoresSecurely,
 } from "./admin-player-actions-client.js";
 import { runQuizInitialization } from "./quiz-initialization-flow.js";
 import {
@@ -350,10 +348,9 @@ function getQuestionTimeLeft(question, room, localNow) {
 async function extendQuestionTime(room, seconds = 10) {
   const question = room?.currentQuestion;
   if (!question || room?.stage !== "question") return;
-  await controlQuestionSecurely({
+  await quizLiveOperations.extendQuestion({
     roomId: ROOM_ID,
     questionId: question.questionId || question.id,
-    action: "extend",
     seconds,
   });
 }
@@ -988,7 +985,7 @@ async function clearMessagesOnly() {
 }
 
 async function returnToRegistrationKeepingPlayers() {
-  await controlQuizLifecycleSecurely({ roomId: ROOM_ID, action: "return-registration" });
+  await quizLiveOperations.returnRegistration(ROOM_ID);
 }
 
 async function setTemporaryRegistrationOpen(isOpen) {
@@ -1009,17 +1006,16 @@ async function hardResetGame() {
 }
 
 async function showInstructionsPage() {
-  await controlQuizLifecycleSecurely({ roomId: ROOM_ID, action: "show-instructions" });
+  await quizLiveOperations.showInstructions(ROOM_ID);
 }
 
 async function resetAndStartRegistration() {
-  await resetPlayersAnswersMessages();
-  await controlQuizLifecycleSecurely({ roomId: ROOM_ID, action: "open-registration" });
+  await quizLiveOperations.resetAndOpenRegistration(ROOM_ID);
 }
 
 async function preloadQuestionForReady(question, index, _readyUntilMs) {
   void _readyUntilMs;
-  return prepareQuestionSecurely({
+  return quizLiveOperations.prepareQuestion({
     roomId: ROOM_ID,
     questionId: question.id || question.questionId,
     questionIndex: index,
@@ -1116,7 +1112,7 @@ async function activatePreloadedQuestion(expectedQuestionId = null, expectedQues
     return false;
   }
 
-  await startQuestionSecurely({ roomId: ROOM_ID, questionId: expectedId });
+  await quizLiveOperations.startQuestion({ roomId: ROOM_ID, questionId: expectedId });
   return true;
 }
 
@@ -1124,10 +1120,9 @@ async function startMediaQuestion() {
   const roomSnapshot = await getDoc(doc(db, "rooms", ROOM_ID));
   const questionId =
     roomSnapshot.data()?.currentQuestion?.questionId || roomSnapshot.data()?.currentQuestion?.id;
-  await controlQuestionSecurely({
+  await quizLiveOperations.startMedia({
     roomId: ROOM_ID,
     questionId,
-    action: "media-start",
   });
 }
 
@@ -1138,10 +1133,9 @@ async function finishMediaQuestion(question = null) {
     questionId =
       roomSnapshot.data()?.currentQuestion?.questionId || roomSnapshot.data()?.currentQuestion?.id;
   }
-  await controlQuestionSecurely({
+  await quizLiveOperations.finishMedia({
     roomId: ROOM_ID,
     questionId,
-    action: "media-finish",
   });
 }
 
@@ -1219,16 +1213,15 @@ async function revealCorrectAnswer({ allowUndo = false, expectedQuestionId = nul
   }
 
   void allowUndo;
-  await controlQuestionSecurely({
+  await quizLiveOperations.revealQuestion({
     roomId: ROOM_ID,
     questionId: latestQuestionId,
-    action: "reveal",
   });
   return true;
 }
 
 async function beginFinalCountdown() {
-  await controlQuizLifecycleSecurely({ roomId: ROOM_ID, action: "begin-final-countdown" });
+  await quizLiveOperations.beginFinalCountdown(ROOM_ID);
 }
 
 async function toggleDisplayVideoSlot(enabled) {
@@ -1248,7 +1241,7 @@ async function finishGame(players = [], questions = [], allAnswers = [], message
   void allAnswers;
   void messages;
   void room;
-  await finishQuizSecurely({ roomId: ROOM_ID });
+  await quizLiveOperations.finishQuiz(ROOM_ID);
 }
 
 /* Automation */
@@ -4175,15 +4168,12 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
       alert("أضف أسئلة تجريبية أولًا من إعدادات الأسئلة، ثم اختر نوع السؤال: سؤال تجريبي.");
       return;
     }
-    await controlQuizLifecycleSecurely({ roomId: ROOM_ID, action: "start-practice" });
+    await quizLiveOperations.startPractice(ROOM_ID);
     await advanceFromDashboard(firstPractice, 0);
   }
 
   async function finishPracticeAndReturnToStart() {
-    await resetPracticeScoresSecurely({
-      roomId: ROOM_ID,
-      reason: "إنهاء الجولة التدريبية من لوحة الإدارة",
-    });
+    await quizLiveOperations.finishPractice(ROOM_ID);
   }
 
   async function startRealCompetition() {
@@ -4192,7 +4182,7 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
       alert("لا توجد أسئلة فعلية. أضف سؤالًا غير تجريبي أولًا.");
       return;
     }
-    await controlQuizLifecycleSecurely({ roomId: ROOM_ID, action: "start-competition" });
+    await quizLiveOperations.startCompetition(ROOM_ID);
     if (isVotingQuestion(firstQuestion)) {
       await startCategoryVote(firstQuestion, room, 0);
     } else {
@@ -4354,7 +4344,10 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
             <span>تجربة</span>
           </div>
         </nav>
-        <a className="dashboard-display-button" href="/?view=display" target="_blank" rel="noreferrer">فتح صفحة العرض ↗</a>
+        <div className="dashboard-view-links">
+          <a className="dashboard-display-button" href="/?view=display" target="_blank" rel="noreferrer">فتح شاشة العرض ↗</a>
+          <a className="dashboard-presenter-button" href="/?view=presenter" target="_blank" rel="noreferrer">فتح شاشة المقدم ↗</a>
+        </div>
         <button className="dashboard-export-button" onClick={exportFullExcel}>استخراج Excel شامل</button>
       </aside>
 
@@ -5159,7 +5152,17 @@ function AdminControl({ room, players, questions, allQuestions = [], questionPac
   );
 }
 
-function DisplayScreen({ room, players, questions, messages, answers, allAnswers, officialResultState }) {
+function DisplayScreen({
+  room,
+  players,
+  questions,
+  messages,
+  answers,
+  allAnswers,
+  officialResultState,
+  presenterDock = null,
+  presenterMode = false,
+}) {
   const [previewStage, setPreviewStage] = useState(null);
   const [previewQuestionIndex, setPreviewQuestionIndex] = useState(null);
   const [showFinalQuestionResults, setShowFinalQuestionResults] = useState(false);
@@ -5287,7 +5290,7 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
   }
 
   return (
-    <div className="display-frame">
+    <div className={presenterMode ? "display-frame presenter-display-frame" : "display-frame"}>
       <div className="display-content-area">
         {displayStage === "ready" && (
           <div className="display-panel ready-countdown-screen">
@@ -5431,7 +5434,38 @@ function DisplayScreen({ room, players, questions, messages, answers, allAnswers
         onReturnToLive={() => { setPreviewStage(null); setPreviewQuestionIndex(null); }}
         onToggleFinalQuestionResults={() => setShowFinalQuestionResults((value) => !value)}
       />
+      {presenterDock}
     </div>
+  );
+}
+
+function PresenterScreen({ room, players, questions, messages, answers, allAnswers, officialResultState, finalization }) {
+  const mainQuestions = getMainQuestions(questions);
+  const practiceQuestions = getPracticeQuestions(questions);
+  const controller = usePresenterQuizControls({
+    room,
+    mainQuestions,
+    practiceQuestions,
+    playersCount: players.length,
+    finalization,
+    isVotingQuestion,
+    isMediaQuestion,
+    hasMediaEnded,
+    roomId: ROOM_ID,
+  });
+
+  return (
+    <DisplayScreen
+      room={room}
+      players={players}
+      questions={questions}
+      messages={messages}
+      answers={answers}
+      allAnswers={allAnswers}
+      officialResultState={officialResultState}
+      presenterMode
+      presenterDock={<PresenterQuizControls controller={controller} />}
+    />
   );
 }
 
@@ -5707,10 +5741,10 @@ function AdminPanel({ initialView = "control", adminSession }) {
     setFirestoreReadError(`${failure.message} (${failure.path})`);
   }, []);
   const listenersReady =
-    initialView === "display" || adminFirestoreListenersReady(adminSession);
+    initialView === APP_VIEWS.DISPLAY || adminFirestoreListenersReady(adminSession);
   const room = useRoom(listenersReady, reportFirestoreReadError);
   const players = usePlayers(listenersReady, reportFirestoreReadError);
-  const canReadQuestionBank = listenersReady && initialView !== "display";
+  const canReadQuestionBank = listenersReady && initialView !== APP_VIEWS.DISPLAY;
   const storedQuestions = useQuestions(
     room?.activePackageId || DEFAULT_PACKAGE_ID,
     canReadQuestionBank,
@@ -5737,11 +5771,11 @@ function AdminPanel({ initialView = "control", adminSession }) {
   const [roomCreationBusy, setRoomCreationBusy] = useState(false);
   const [roomCreationError, setRoomCreationError] = useState("");
   const finalization = useQuestionFinalization({
-    enabled: initialView !== "display",
+    enabled: initialView !== APP_VIEWS.DISPLAY,
     room,
     canFinalize: adminSession?.isAdmin === true,
     officialResultState,
-    onResumeDecision: initialView === "display" ? undefined : reportStagingFinalizationResume,
+    onResumeDecision: initialView === APP_VIEWS.DISPLAY ? undefined : reportStagingFinalizationResume,
   });
   const gameHistory = [...(room?.gameHistory || [])].sort(
     (a, b) => Number(b.savedAtMs || 0) - Number(a.savedAtMs || 0)
@@ -5777,7 +5811,7 @@ function AdminPanel({ initialView = "control", adminSession }) {
     </>
   );
 
-  if (initialView === "settings") {
+  if (initialView === APP_VIEWS.SETTINGS) {
     return (
       <>
         {alwaysOnAutomations}
@@ -5807,7 +5841,7 @@ function AdminPanel({ initialView = "control", adminSession }) {
     );
   }
 
-  if (initialView === "lastgame") {
+  if (initialView === APP_VIEWS.LAST_GAME) {
     return (
       <>
         {alwaysOnAutomations}
@@ -5817,7 +5851,7 @@ function AdminPanel({ initialView = "control", adminSession }) {
     );
   }
 
-  if (initialView === "display") {
+  if (initialView === APP_VIEWS.DISPLAY) {
     // Display page renders its own set of automation components internally.
     return (
       <>
@@ -5837,6 +5871,33 @@ function AdminPanel({ initialView = "control", adminSession }) {
               answers={answers}
               allAnswers={allAnswers}
               officialResultState={displayOfficialResultState}
+            />
+          )}
+        />
+      </>
+    );
+  }
+
+  if (initialView === APP_VIEWS.PRESENTER) {
+    return (
+      <>
+        {alwaysOnAutomations}
+        {firestoreReadErrorBanner}
+        <DisplayOfficialResultController
+          room={room}
+          players={players}
+          listenerState={officialResultState}
+          readResult={readOfficialQuestionResult}
+          render={({ officialResultState: presenterOfficialResultState }) => (
+            <PresenterScreen
+              room={room}
+              players={players}
+              questions={questions}
+              messages={messages}
+              answers={answers}
+              allAnswers={allAnswers}
+              officialResultState={presenterOfficialResultState}
+              finalization={finalization}
             />
           )}
         />
@@ -7176,9 +7237,10 @@ function AdminAuthGate({ adminView }) {
   }
 
   return (
-    <div className="app" dir="rtl">
-      <div className="admin-toolbar card">
+    <div className={adminView === APP_VIEWS.PRESENTER ? "display-app presenter-app" : "app"} dir="rtl">
+      <div className={adminView === APP_VIEWS.PRESENTER ? "admin-toolbar presenter-admin-toolbar card" : "admin-toolbar card"}>
         <span className="muted">حساب الإدارة: {session.user.email || session.user.uid}</span>
+        {adminView === APP_VIEWS.PRESENTER && <a className="link-button" href="/?view=control">لوحة التحكم</a>}
         <button type="button" onClick={handleSignOut} disabled={authWorking}>تسجيل الخروج</button>
       </div>
       <AdminPanel initialView={adminView} adminSession={session} />
@@ -7188,16 +7250,9 @@ function AdminAuthGate({ adminView }) {
 }
 
 export default function App() {
-  const searchParams = new URLSearchParams(window.location.search);
-  const viewParam = searchParams.get("view");
-  const isDisplayView = viewParam === "display";
-  const isAdminViewRequest =
-    searchParams.has("admin") ||
-    viewParam === "settings" ||
-    viewParam === "control" ||
-    viewParam === "lastgame";
+  const requestedView = resolveRequestedView(window.location.search);
 
-  if (isDisplayView) {
+  if (requestedView === APP_VIEWS.DISPLAY) {
     return (
       <div className="display-app" dir="rtl">
         <AdminPanel initialView="display" />
@@ -7206,13 +7261,8 @@ export default function App() {
     );
   }
 
-  if (isAdminViewRequest) {
-    const adminView =
-      viewParam === "settings" || viewParam === "lastgame"
-        ? viewParam
-        : "control";
-
-    return <AdminAuthGate adminView={adminView} />;
+  if (viewRequiresAdmin(requestedView)) {
+    return <AdminAuthGate adminView={requestedView} />;
   }
 
   return (
