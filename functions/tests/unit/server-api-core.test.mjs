@@ -211,3 +211,22 @@ test("finalizeQuestion has the longer bounded timeout policy", () => {
   assert.equal(SERVER_OPERATIONS.finalizeQuestion.timeoutMs, 25_000);
   assert.equal(SERVER_OPERATIONS.submitAnswer.timeoutMs, undefined);
 });
+
+test("Vercel transport emits safe token, HTTP, and total timing metadata", async () => {
+  const timings = [];
+  let clock = 0;
+  const client = createServerApiClient({
+    transport: "vercel",
+    auth: { currentUser: { getIdToken: async () => { clock += 2; return "header.payload.signature"; } } },
+    fetchImpl: async () => {
+      clock += 8;
+      return jsonResponse(200, { ok: true, data: { status: "received" } });
+    },
+    now: () => clock,
+    onTiming: (entry) => timings.push(entry),
+  });
+  await client.submitAnswer({ roomId: "room", questionId: "q1", playerId: "p1", selectedIndex: 0 });
+  assert.deepEqual(timings.map(({ phase }) => phase), ["auth-token", "http", "total"]);
+  assert.deepEqual(timings.map(({ durationMs }) => durationMs), [2, 8, 10]);
+  assert.equal(JSON.stringify(timings).includes("header.payload.signature"), false);
+});

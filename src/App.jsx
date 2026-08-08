@@ -67,6 +67,10 @@ import {
   restoreAuthenticatedPlayerSession,
   writeStoredPlayerSession,
 } from "./player-session.js";
+import {
+  createUiSingleFlightGate,
+  resolvePlayerQuestionResult,
+} from "./player-question-result.js";
 import "./App.css";
 
 const ROOM_ID = "family-quiz-001";
@@ -631,84 +635,25 @@ function usePlayers(enabled = true, onError) {
   return players;
 }
 
-function useQuestions(activePackageId = DEFAULT_PACKAGE_ID, enabled = true, onError) {
-  const [questions, setQuestions] = useState([]);
-
-  useEffect(() => {
-    if (!enabled) {
-      setQuestions([]);
-      return undefined;
-    }
-    const packageId = activePackageId || DEFAULT_PACKAGE_ID;
-    const questionsRef = collection(db, "rooms", ROOM_ID, "questions");
-    const questionsSource =
-      packageId === DEFAULT_PACKAGE_ID
-        ? questionsRef
-        : query(questionsRef, where("packageId", "==", packageId));
-
-    const unsub = subscribeToFirestoreRead(
-      questionsSource,
-      `rooms/${ROOM_ID}/questions`,
-      (snap) => {
-        const list = snap.docs.map((d) => ({
-          id: d.id,
-          ...d.data(),
-        }));
-
-        const filtered = list.filter((question) => {
-          const questionPackageId = question.packageId || DEFAULT_PACKAGE_ID;
-          return questionPackageId === packageId;
-        });
-
-        filtered.sort((a, b) => (a.order || 0) - (b.order || 0));
-        setQuestions(filtered);
-      },
-      onError,
-      enabled,
-    );
-
-    return () => unsub();
-  }, [activePackageId, enabled, onError]);
-
-  return questions;
+function questionPackagesFromRoom(room) {
+  const savedPackages = Array.isArray(room?.questionPackages) ? room.questionPackages : [];
+  const cleanedPackages = savedPackages
+    .filter((item) => item?.id && item.id !== DEFAULT_PACKAGE_ID)
+    .map((item) => ({
+      id: item.id,
+      name: item.name || DEFAULT_PACKAGE_NAME,
+      createdAtMs: Number(item.createdAtMs || 0),
+    }))
+    .sort((a, b) => Number(a.createdAtMs || 0) - Number(b.createdAtMs || 0));
+  return [
+    { id: DEFAULT_PACKAGE_ID, name: DEFAULT_PACKAGE_NAME, createdAtMs: 0 },
+    ...cleanedPackages,
+  ];
 }
 
-function useQuestionPackages(enabled = true, onError) {
-  const [packages, setPackages] = useState([]);
-
-  useEffect(() => {
-    if (!enabled) {
-      setPackages([]);
-      return undefined;
-    }
-    const unsub = subscribeToFirestoreRead(
-      doc(db, "rooms", ROOM_ID),
-      `rooms/${ROOM_ID}`,
-      (snap) => {
-      const data = snap.exists() ? snap.data() : {};
-      const savedPackages = Array.isArray(data.questionPackages) ? data.questionPackages : [];
-      const cleanedPackages = savedPackages
-        .filter((item) => item?.id && item.id !== DEFAULT_PACKAGE_ID)
-        .map((item) => ({
-          id: item.id,
-          name: item.name || DEFAULT_PACKAGE_NAME,
-          createdAtMs: Number(item.createdAtMs || 0),
-        }))
-        .sort((a, b) => Number(a.createdAtMs || 0) - Number(b.createdAtMs || 0));
-
-        setPackages([
-          { id: DEFAULT_PACKAGE_ID, name: DEFAULT_PACKAGE_NAME, createdAtMs: 0 },
-          ...cleanedPackages,
-        ]);
-      },
-      onError,
-      enabled,
-    );
-
-    return () => unsub();
-  }, [enabled, onError]);
-
-  return packages;
+function questionsForPackage(questions, activePackageId) {
+  const packageId = activePackageId || DEFAULT_PACKAGE_ID;
+  return questions.filter((question) => (question.packageId || DEFAULT_PACKAGE_ID) === packageId);
 }
 
 function useAllQuestions(enabled = true, onError) {
@@ -743,12 +688,10 @@ function useAllQuestions(enabled = true, onError) {
 
 function useAnswers(questionId, enabled = true, onError) {
   const [answers, setAnswers] = useState([]);
-  const [officialResult, setOfficialResult] = useState(null);
 
   useEffect(() => {
     if (!enabled || !questionId) {
       setAnswers([]);
-      setOfficialResult(null);
       return;
     }
 
@@ -771,27 +714,10 @@ function useAnswers(questionId, enabled = true, onError) {
       onError,
       enabled,
     );
-    const unsubResult = subscribeToFirestoreRead(
-      doc(db, "rooms", ROOM_ID, "questionResults", questionId),
-      `rooms/${ROOM_ID}/questionResults/${questionId}`,
-      (snapshot) => setOfficialResult(snapshot.exists() ? snapshot.data() : null),
-      onError,
-      enabled,
-    );
-
-    return () => {
-      unsub();
-      unsubResult();
-    };
+    return () => unsub();
   }, [enabled, onError, questionId]);
 
-  const officialByPlayer = new Map(
-    (officialResult?.results || []).map((item) => [item.playerId, item]),
-  );
-  return answers.map((answer) => ({
-    ...answer,
-    ...(officialByPlayer.get(answer.playerId) || {}),
-  }));
+  return answers;
 }
 
 function useOfficialQuestionResult(questionId, enabled = true, onError) {
@@ -2150,6 +2076,8 @@ function QuestionScreen({
   onAnswer,
   selectedIndex,
   answerMessage,
+  pendingSelectedIndex = null,
+  answerSubmitting = false,
   displayMode = false,
   frozenProgressPercent = null,
   currentPlayer = null,
@@ -2387,9 +2315,11 @@ function QuestionScreen({
                   className={
                     selectedIndex === index
                       ? "answer-button selected"
+                      : pendingSelectedIndex === index
+                      ? "answer-button pending"
                       : "answer-button"
                   }
-                  disabled={!canAnswer || selectedIndex !== null}
+                  disabled={!canAnswer || selectedIndex !== null || answerSubmitting}
                   onClick={() => onAnswer?.(index)}
                   style={
                     !isAdmin
@@ -2779,6 +2709,9 @@ function FinishedDisplay({ players, messages = [] }) {
 /* Joker controls */
 
 function JokerControl({ player, stage, room = null, compact = false, locked = false, beforeQuestionMode = false }) {
+  const [pendingAction, setPendingAction] = useState(null);
+  const [actionError, setActionError] = useState("");
+  const actionGate = useRef(createUiSingleFlightGate()).current;
   const isPracticeJoker = !!room?.practiceMode || !!room?.currentQuestion?.isPractice;
   const activeQuestionId = room?.currentQuestion?.questionId;
   const practiceJokerUsedForQuestion =
@@ -2797,16 +2730,36 @@ function JokerControl({ player, stage, room = null, compact = false, locked = fa
 
   async function activateJoker() {
     if (!player?.id || jokerAlreadyUsed) return;
-    await activateJokerSecurely({
-      roomId: ROOM_ID,
-      playerId: player.id,
-      questionId: isDuringQuestion || isBeforeCurrentQuestion ? activeQuestionId : "next",
-    });
+    if (!actionGate.tryStart()) return;
+    setPendingAction("activate");
+    setActionError("");
+    try {
+      await activateJokerSecurely({
+        roomId: ROOM_ID,
+        playerId: player.id,
+        questionId: isDuringQuestion || isBeforeCurrentQuestion ? activeQuestionId : "next",
+      });
+    } catch (error) {
+      setActionError(error?.message || "تعذر تفعيل الجوكر.");
+    } finally {
+      setPendingAction(null);
+      actionGate.finish();
+    }
   }
 
   async function cancelJoker() {
     if (!player?.id) return;
-    await cancelJokerSecurely({ roomId: ROOM_ID, playerId: player.id });
+    if (!actionGate.tryStart()) return;
+    setPendingAction("cancel");
+    setActionError("");
+    try {
+      await cancelJokerSecurely({ roomId: ROOM_ID, playerId: player.id });
+    } catch (error) {
+      setActionError(error?.message || "تعذر إلغاء الجوكر.");
+    } finally {
+      setPendingAction(null);
+      actionGate.finish();
+    }
   }
 
   const availableCount = jokerAlreadyUsed ? 0 : 1;
@@ -2828,11 +2781,11 @@ function JokerControl({ player, stage, room = null, compact = false, locked = fa
         type="button"
         className={`${compact ? `joker-token ${showAsUsed ? "joker-token-used" : "joker-token-active"} compact-joker-token` : `joker-token ${showAsUsed ? "joker-token-used" : "joker-token-active"}`}${showAsUsed ? " joker-token-before-used" : ""}`}
         onClick={showAsUsed ? undefined : cancelJoker}
-        disabled={showAsUsed}
+        disabled={showAsUsed || pendingAction !== null}
       >
         <b className="joker-multiplier-badge">{activeLabel}</b>
         <div className="joker-icon">{"\u{1F0CF}"}</div>
-        <span>{showAsUsed ? "تم استخدامه" : "الجوكر"}</span>
+        <span>{pendingAction === "cancel" ? "جاري الإلغاء..." : showAsUsed ? "تم استخدامه" : "الجوكر"}</span>
         {!showAsUsed && <small>اضغط للإلغاء</small>}
       </button>
     );
@@ -2855,13 +2808,13 @@ function JokerControl({ player, stage, room = null, compact = false, locked = fa
         type="button"
         className={`${compact ? "joker-token joker-token-active compact-joker-token" : "joker-token joker-token-active"}${pendingLockedByQuestion ? " joker-token-before-used" : ""}`}
         onClick={pendingLockedByQuestion ? undefined : cancelJoker}
-        disabled={pendingLockedByQuestion}
+        disabled={pendingLockedByQuestion || pendingAction !== null}
         style={pendingLockedByQuestion ? undefined : { background: "#e8f8ea", borderColor: "#6cc276", color: "#18733a" }}
       >
         <b className="joker-multiplier-badge">x3</b>
         <div className="joker-count">{availableCount}</div>
         <div className="joker-icon">{"\u{1F0CF}"}</div>
-        <span>الجوكر مفعل</span>
+        <span>{pendingAction === "cancel" ? "جاري الإلغاء..." : "الجوكر مفعل"}</span>
         <small style={{ fontWeight: 900, opacity: 0.78 }}>{pendingLockedByQuestion ? "مفعل قبل السؤال" : "اضغط للإلغاء"}</small>
       </button>
     );
@@ -2872,12 +2825,15 @@ function JokerControl({ player, stage, room = null, compact = false, locked = fa
   }
 
   return (
-    <button type="button" className={compact ? "joker-token joker-token-available compact-joker-token" : "joker-token joker-token-available"} onClick={activateJoker} style={{ background: "#fff1d6", borderColor: "#f59e0b", color: "#9a5b00" }}>
+    <>
+    <button type="button" className={compact ? "joker-token joker-token-available compact-joker-token" : "joker-token joker-token-available"} onClick={activateJoker} disabled={pendingAction !== null} style={{ background: "#fff1d6", borderColor: "#f59e0b", color: "#9a5b00" }}>
       <b className="joker-multiplier-badge">{isDuringQuestion ? "x2" : "x3"}</b>
       <div className="joker-count">{availableCount}</div>
       <div className="joker-icon">{"\u{1F0CF}"}</div>
-      <span>الجوكر</span>
+      <span>{pendingAction === "activate" ? "جاري التفعيل..." : "الجوكر"}</span>
     </button>
+    {actionError && <small className="error" role="alert">{actionError}</small>}
+    </>
   );
 }
 
@@ -5743,16 +5699,15 @@ function AdminPanel({ initialView = "control", adminSession }) {
   const room = useRoom(listenersReady, reportFirestoreReadError);
   const players = usePlayers(listenersReady, reportFirestoreReadError);
   const canReadQuestionBank = listenersReady;
-  const storedQuestions = useQuestions(
-    room?.activePackageId || DEFAULT_PACKAGE_ID,
-    canReadQuestionBank,
-    reportFirestoreReadError,
-  );
   const storedAllQuestions = useAllQuestions(canReadQuestionBank, reportFirestoreReadError);
+  const storedQuestions = questionsForPackage(
+    storedAllQuestions,
+    room?.activePackageId || DEFAULT_PACKAGE_ID,
+  );
   const questions =
     canReadQuestionBank || !room?.currentQuestion ? storedQuestions : [room.currentQuestion];
   const allQuestions = canReadQuestionBank ? storedAllQuestions : questions;
-  const questionPackages = useQuestionPackages(listenersReady, reportFirestoreReadError);
+  const questionPackages = questionPackagesFromRoom(room);
   const messages = useMessages(listenersReady, reportFirestoreReadError);
   const answers = useAnswers(
     room?.currentQuestion?.questionId,
@@ -6377,29 +6332,30 @@ function PlayerWaiting({ room, player, players, setPlayerName, hasNextQuestion =
   );
 }
 
-function PlayerResultSummary({ player, lastAnswer, stage, hasNextQuestion = false, currentQuestion = null, currentQuestionIndex = 0, totalQuestions = null, room = null, rank = null, rankMovement = null }) {
-  const answerTimeLabel = lastAnswer ? formatAnswerTime(lastAnswer) : "";
+function PlayerResultSummary({ player, lastAnswer, localAnswerLock = null, officialResultState, stage, hasNextQuestion = false, currentQuestion = null, currentQuestionIndex = 0, totalQuestions = null, room = null, rank = null, rankMovement = null }) {
   const isResults = stage === "results";
   const currentQuestionId = currentQuestion?.questionId || currentQuestion?.id || null;
   const isResultsReady = isResults && isSameId(room?.processedQuestionId, currentQuestionId);
   const officialSnapshot = isSameId(room?.resultsDisplaySnapshot?.questionId, currentQuestionId)
     ? room.resultsDisplaySnapshot
     : null;
-  const officialAnswered = !!officialSnapshot?.answeredByPlayer?.[player?.id];
-  const hasAnswer = isResultsReady ? officialAnswered : !!lastAnswer;
-  const points = isResultsReady
-    ? Number(officialSnapshot?.bonusByPlayer?.[player?.id] || 0)
-    : 0;
-  const isCorrect = isResultsReady
-    ? !!officialSnapshot?.correctByPlayer?.[player?.id]
-    : !!lastAnswer?.isCorrect;
-  const jokerApplied = isResultsReady && !!room?.collectingBonusJokerByPlayer?.[player?.id];
-  const jokerMultiplier = Number(
-    isSameId(player?.jokerQuestionId, currentQuestionId) ? player?.jokerMultiplier : 1,
-  ) || 1;
-  const basePoints = jokerApplied && isCorrect && jokerMultiplier > 1
-    ? points / jokerMultiplier
-    : points;
+  const resolvedResult = resolvePlayerQuestionResult({
+    playerId: player?.id,
+    questionId: currentQuestionId,
+    officialResultState,
+    roomSnapshot: officialSnapshot,
+    confirmedAnswer: lastAnswer,
+    localAnswerLock,
+  });
+  const hasAnswer = resolvedResult.answered === true;
+  const points = Number(resolvedResult.points || 0);
+  const isCorrect = resolvedResult.isCorrect === true;
+  const jokerApplied = resolvedResult.jokerApplied === true;
+  const jokerMultiplier = Number(resolvedResult.jokerMultiplier || 1);
+  const basePoints = Number(resolvedResult.basePoints ?? points);
+  const answerTimeLabel = resolvedResult.responseTimeMs
+    ? `${(resolvedResult.responseTimeMs / 1000).toFixed(1)} ثانية`
+    : lastAnswer ? formatAnswerTime(lastAnswer) : "";
   const wasQuestionSkipped = isResultsReady && room?.calculationStatus === "skipped";
   const showBetweenQuestionJoker =
     stage === "results" &&
@@ -6411,7 +6367,7 @@ function PlayerResultSummary({ player, lastAnswer, stage, hasNextQuestion = fals
     lastQuestionId: currentQuestionId || player?.lastQuestionId,
   };
 
-  if (isResults && !isResultsReady) {
+  if (isResults && (!isResultsReady || resolvedResult.status === "loading")) {
     return (
       <PlayerPageShell player={player} rank={rank} rankMovement={rankMovement} questionNumber={currentQuestionIndex + 1} totalQuestions={totalQuestions}>
         <div className="player-status-card">
@@ -6652,7 +6608,9 @@ function writeLocalAnswerLock(playerId, questionId, selectedIndex, answeredAt) {
 function PlayerPanel() {
   const room = useRoom();
   const players = usePlayers();
-  const answers = useAnswers(room?.currentQuestion?.questionId);
+  const currentRoomQuestionId = room?.currentQuestion?.questionId || room?.currentQuestion?.id || null;
+  const answers = useAnswers(currentRoomQuestionId);
+  const officialResultState = useOfficialQuestionResult(currentRoomQuestionId);
 
   const [playerId, setPlayerId] = useState(() =>
     readStoredPlayerSession(localStorage).playerId || null
@@ -6665,7 +6623,9 @@ function PlayerPanel() {
   const [answeredQuestionId, setAnsweredQuestionId] = useState(null);
   const [selectedIndex, setSelectedIndex] = useState(null);
   const [answerMessage, setAnswerMessage] = useState("");
+  const [pendingAnswerIndex, setPendingAnswerIndex] = useState(null);
   const [frozenProgressPercent, setFrozenProgressPercent] = useState(null);
+  const answerSubmissionGate = useRef(createUiSingleFlightGate()).current;
 
   const player = players.find((item) => item.id === playerId);
   const currentQuestion = room?.currentQuestion;
@@ -6679,7 +6639,7 @@ function PlayerPanel() {
     currentQuestionId &&
     String(answer.questionId) === String(currentQuestionId)
   );
-  const localAnswerLock = readLocalAnswerLock(playerId, currentQuestion?.questionId);
+  const localAnswerLock = readLocalAnswerLock(playerId, currentQuestionId);
   const playerRank = players.findIndex((item) => item.id === playerId) + 1;
   const playerRankMovement = Number(
     room?.rankMovementByPlayer?.[playerId] ?? player?.lastRankMovement ?? 0
@@ -6815,30 +6775,32 @@ function PlayerPanel() {
   }, [isCurrentPrizeWinner, latestPrizeWinner?.spinId]);
 
   useEffect(() => {
-    const localLock = readLocalAnswerLock(playerId, currentQuestion?.questionId);
+    const localLock = readLocalAnswerLock(playerId, currentQuestionId);
     setSelectedIndex(null);
+    setPendingAnswerIndex(null);
     setAnswerMessage("");
     setFrozenProgressPercent(null);
-    if (localLock && currentQuestion?.questionId) {
+    if (localLock && currentQuestionId) {
       setSelectedIndex(localLock.selectedIndex);
       setAnswerMessage("تم إرسال إجابتك");
-      setAnsweredQuestionId(currentQuestion.questionId);
+      setAnsweredQuestionId(currentQuestionId);
     } else {
       setAnsweredQuestionId(null);
     }
-  }, [currentQuestion?.questionId, playerId]);
+  }, [currentQuestionId, playerId]);
 
 
   async function submitAnswer(index) {
     if (!playerId || !player?.name || !currentQuestion) return;
-    if (answeredQuestionId === currentQuestion.questionId) return;
-    if (readLocalAnswerLock(playerId, currentQuestion.questionId)) return;
+    if (!currentQuestionId || answeredQuestionId === currentQuestionId) return;
+    if (readLocalAnswerLock(playerId, currentQuestionId)) return;
     if (lastAnswer) return;
 
     const answeredAt = getNow();
     const revealCountdown = getRevealCountdown(currentQuestion, room, answeredAt);
 
     if (stage !== "question" || revealCountdown === null || revealCountdown > 0) return;
+    if (!answerSubmissionGate.tryStart()) return;
 
     const frozenPercent = getPointsProgressPercent(
       currentQuestion,
@@ -6847,31 +6809,35 @@ function PlayerPanel() {
     );
 
     try {
+      setPendingAnswerIndex(index);
       setAnswerMessage("جاري إرسال الإجابة...");
       const result = await submitAnswerSecurely({
         roomId: ROOM_ID,
-        questionId: currentQuestion.questionId,
+        questionId: currentQuestionId,
         playerId,
         selectedIndex: index,
       });
       setSelectedIndex(index);
       setFrozenProgressPercent(frozenPercent);
-      setAnsweredQuestionId(currentQuestion.questionId);
+      setAnsweredQuestionId(currentQuestionId);
       setAnswerMessage("تم إرسال إجابتك");
       writeLocalAnswerLock(
         playerId,
-        currentQuestion.questionId,
+        currentQuestionId,
         index,
         result.receivedAtMs || answeredAt,
       );
       vibrateDevice(65);
     } catch (error) {
       if (error?.code === "already-exists") {
-        setAnsweredQuestionId(currentQuestion.questionId);
+        setAnsweredQuestionId(currentQuestionId);
         setAnswerMessage("تم إرسال إجابتك مسبقًا");
       } else {
         setAnswerMessage(error?.message || "تعذر إرسال الإجابة.");
       }
+    } finally {
+      setPendingAnswerIndex(null);
+      answerSubmissionGate.finish();
     }
   }
 
@@ -7048,6 +7014,8 @@ function PlayerPanel() {
         <PlayerResultSummary
         player={player}
         lastAnswer={lastAnswer}
+        localAnswerLock={localAnswerLock}
+        officialResultState={officialResultState}
         stage={stage}
         hasNextQuestion={hasNextQuestion}
         currentQuestion={currentQuestion}
@@ -7093,6 +7061,8 @@ function PlayerPanel() {
           room={room}
           onAnswer={submitAnswer}
           selectedIndex={selectedIndex ?? lastAnswer?.selectedIndex ?? localAnswerLock?.selectedIndex ?? null}
+          pendingSelectedIndex={pendingAnswerIndex}
+          answerSubmitting={pendingAnswerIndex !== null}
           answerMessage={answerMessage || (lastAnswer || localAnswerLock ? "تم إرسال إجابتك" : "")}
           frozenProgressPercent={frozenProgressPercent ?? (lastAnswer ? getPointsProgressPercent(currentQuestion, room, lastAnswer.answeredAt) : localAnswerLock?.answeredAt ? getPointsProgressPercent(currentQuestion, room, localAnswerLock.answeredAt) : null)}
           currentPlayer={player}

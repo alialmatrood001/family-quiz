@@ -101,5 +101,5 @@ export async function runHandledUiAction(action, onError) {
 }
 
 export function publicPlayerDisplayName(player) {
-  return String(player?.displayName || player?.name || "").trim();
+  return String(player?.publicDisplayName || player?.displayName || player?.name || "").trim();
 }

@@ -30,7 +30,7 @@ export function buildDisplaySnapshotFromOfficialResult({
     players.map((player) => [String(player?.id || ""), player]),
   );
   const snapshotPlayer = (result, score, before = false) => {
-    const player = publicPlayers.get(String(result.playerId)) || {};
+    const player = publicPlayers.get(String(result.playerId)) || result;
     return {
       id: result.playerId,
       name: publicPlayerDisplayName(player),
@@ -40,7 +40,7 @@ export function buildDisplaySnapshotFromOfficialResult({
       jokerQuestionId: player.jokerQuestionId || (result.jokerApplied ? questionId : null),
       jokerMultiplier: player.jokerMultiplier || result.jokerMultiplier || null,
       lastQuestionId: before ? null : questionId,
-      lastQuestionPoints: before ? 0 : Number(result.points || 0),
+      lastQuestionPoints: before ? 0 : Number(result.awardedPoints ?? result.points ?? 0),
       lastQuestionCorrect: before ? null : result.isCorrect ?? null,
     };
   };
@@ -57,7 +57,7 @@ export function buildDisplaySnapshotFromOfficialResult({
     leaderboardBefore,
     leaderboardAfter,
     bonusByPlayer: Object.fromEntries(
-      officialResult.results.map((result) => [result.playerId, Number(result.points || 0)]),
+      officialResult.results.map((result) => [result.playerId, Number(result.awardedPoints ?? result.points ?? 0)]),
     ),
     correctByPlayer: Object.fromEntries(
       officialResult.results
@@ -79,9 +79,6 @@ export function buildDisplaySnapshotFromOfficialResult({
 
 export function resolveDisplayResult({ room, players, officialResultState } = {}) {
   const questionId = room?.currentQuestion?.questionId || room?.currentQuestion?.id || "";
-  if (isDisplayResultSnapshot(room?.resultsDisplaySnapshot, questionId)) {
-    return { status: "ready", snapshot: room.resultsDisplaySnapshot, source: "room" };
-  }
   const officialSnapshot = buildDisplaySnapshotFromOfficialResult({
     questionId,
     officialResult: officialResultState?.exists ? officialResultState.result : null,
@@ -89,6 +86,9 @@ export function resolveDisplayResult({ room, players, officialResultState } = {}
   });
   if (officialSnapshot) {
     return { status: "ready", snapshot: officialSnapshot, source: "official-result" };
+  }
+  if (isDisplayResultSnapshot(room?.resultsDisplaySnapshot, questionId)) {
+    return { status: "ready", snapshot: room.resultsDisplaySnapshot, source: "room" };
   }
   if (officialResultState?.fallbackComplete === true) {
     return { status: "missing", snapshot: null, source: null };
@@ -181,13 +181,20 @@ export function DisplayOfficialResultController({
 }) {
   const questionId = room?.currentQuestion?.questionId || room?.currentQuestion?.id || "";
   const roomHasDisplaySnapshot = isDisplayResultSnapshot(room?.resultsDisplaySnapshot, questionId);
-  const officialResultState = useDisplayOfficialResult({
+  const fallbackResultState = useDisplayOfficialResult({
     enabled: room?.stage === "results" && !roomHasDisplaySnapshot,
     questionId,
     listenerState,
     readResult,
     fallbackDelayMs,
   });
+  const listenerHasCanonicalResult =
+    listenerState?.exists === true &&
+    sameId(listenerState?.questionId, questionId) &&
+    sameId(listenerState?.result?.questionId, questionId);
+  const officialResultState = listenerHasCanonicalResult
+    ? { ...listenerState, fallbackComplete: false }
+    : fallbackResultState;
   return render({
     officialResultState,
     displayResult: resolveDisplayResult({ room, players, officialResultState }),

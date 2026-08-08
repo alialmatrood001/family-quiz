@@ -8,6 +8,7 @@ const {
   isVisitor,
   requireAdmin,
   resolveOfficialJoker,
+  publicPlayerDisplayName,
   selectOfficialAnswers,
   sortLeaderboard,
   validateInput,
@@ -477,19 +478,25 @@ function createFinalizeQuestionHandler({
         const results = computed
           .map((item) => ({
             playerId: item.player.id,
+            publicDisplayName: publicPlayerDisplayName(item.player),
             answered: Boolean(item.answer),
             selectedIndex: item.answer?.selectedIndex ?? null,
             isCorrect: item.isCorrect,
             basePoints: item.basePoints,
             points: item.points,
+            awardedPoints: item.points,
             scoreBefore: Number(item.player.score || 0),
             scoreAfter: item.score,
             rankBefore: previousRank.get(item.player.id),
             rankAfter: newRank.get(item.player.id),
+            rank: newRank.get(item.player.id),
             rankMovement:
               previousRank.get(item.player.id) - newRank.get(item.player.id),
             jokerApplied: item.joker.applied,
             jokerMultiplier: item.joker.multiplier,
+            responseTimeMs: item.answer
+              ? Math.max(0, item.answer.createdAtMs - question.answerStartAtMs)
+              : null,
           }))
           .sort((left, right) => left.playerId.localeCompare(right.playerId));
 
@@ -558,7 +565,7 @@ function createFinalizeQuestionHandler({
         };
         const snapshotPlayer = (player, score) => ({
           id: player.id,
-          name: player.name || "",
+          name: publicPlayerDisplayName(player),
           emoji: player.emoji || "",
           score,
           jokerUsed: player.jokerUsed || false,

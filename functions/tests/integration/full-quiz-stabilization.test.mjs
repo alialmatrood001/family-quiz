@@ -7,6 +7,7 @@ import {
   createEmulatorIdentity,
   deleteEmulatorIdentity,
   deleteRoom,
+  emitMetric,
   roomRef,
   signInEmulatorIdentity,
 } from "../helpers/emulator.mjs";
@@ -48,6 +49,12 @@ test("Admin Control, controlled Display, and three Players complete two question
     startQuestion: (data) => call("startQuestion", data, adminToken),
     controlQuestion: (data) => call("controlQuestion", data, adminToken),
   });
+  const measure = async (name, action) => {
+    const startedAt = performance.now();
+    const value = await action();
+    emitMetric(`runtime.3.${name}`, performance.now() - startedAt);
+    return value;
+  };
   t.after(async () => {
     await deleteRoom(roomId);
     await Promise.all(identities.map(({ uid }) => deleteEmulatorIdentity(uid)));
@@ -81,22 +88,23 @@ test("Admin Control, controlled Display, and three Players complete two question
   for (let questionIndex = 0; questionIndex < questionIds.length; questionIndex += 1) {
     const questionId = questionIds[questionIndex];
     if (questionIndex === 1) {
-      assert.equal((await call("activateJoker", {
+      assert.equal((await measure("activateJoker", () => call("activateJoker", {
         roomId,
         questionId: "next",
         playerId: registrations[0].playerId,
-      }, playerTokens[0])).status, "pending");
+      }, playerTokens[0]))).status, "pending");
     }
     await displayControls.prepareQuestion({ roomId, questionId, questionIndex });
-    await displayControls.startQuestion({ roomId, questionId });
-    await Promise.all(registrations.map((registration, playerIndex) => call("submitAnswer", {
+    await measure("startQuestion", () => displayControls.startQuestion({ roomId, questionId }));
+    const answeringPlayers = questionIndex === 0 ? registrations.slice(0, 2) : registrations;
+    await measure("submitAnswer.batch", () => Promise.all(answeringPlayers.map((registration, playerIndex) => call("submitAnswer", {
       roomId,
       questionId,
       playerId: registration.playerId,
       selectedIndex: playerIndex === 2 ? 2 : questionIndex,
-    }, playerTokens[playerIndex])));
-    await displayControls.revealQuestion({ roomId, questionId });
-    assert.equal((await call("finalizeQuestion", { roomId, questionId }, adminToken)).status, "finalized");
+    }, playerTokens[playerIndex]))));
+    await measure("endQuestion", () => displayControls.revealQuestion({ roomId, questionId }));
+    assert.equal((await measure("finalizeQuestion", () => call("finalizeQuestion", { roomId, questionId }, adminToken))).status, "finalized");
     assert.equal((await call("finalizeQuestion", { roomId, questionId }, adminToken)).status, "already-finalized");
 
     const [resultDocument, publicPlayers] = await Promise.all([
@@ -104,6 +112,14 @@ test("Admin Control, controlled Display, and three Players complete two question
       ref.collection("players").get(),
     ]);
     assert.equal(resultDocument.exists, true);
+    const canonicalRows = resultDocument.data().results;
+    assert.equal(canonicalRows.every((row) => typeof row.publicDisplayName === "string" && row.publicDisplayName.length > 0), true);
+    assert.equal(canonicalRows.every((row) => Object.hasOwn(row, "awardedPoints") && Object.hasOwn(row, "rank") && Object.hasOwn(row, "responseTimeMs")), true);
+    if (questionIndex === 0) {
+      assert.equal(canonicalRows.find((row) => row.playerId === registrations[0].playerId).answered, true);
+      assert.equal(canonicalRows.find((row) => row.playerId === registrations[1].playerId).answered, true);
+      assert.equal(canonicalRows.find((row) => row.playerId === registrations[2].playerId).answered, false);
+    }
     const publicPlayerRows = publicPlayers.docs.map((document) => ({ id: document.id, ...document.data() }));
     const display = buildDisplaySnapshotFromOfficialResult({
       questionId,
@@ -127,6 +143,8 @@ test("Admin Control, controlled Display, and three Players complete two question
   const firstPlayerAfter = await ref.collection("players").doc(registrations[0].playerId).get();
   assert.equal(firstPlayerAfter.data().jokerUsed, true);
   assert.equal(firstPlayerAfter.data().jokerQuestionId, questionIds[1]);
+  const secondResult = (await ref.collection("questionResults").doc(questionIds[1]).get()).data();
+  assert.equal(secondResult.results.find((row) => row.playerId === registrations[0].playerId).jokerApplied, true);
 
   await displayControls.beginFinalCountdown(roomId);
   assert.equal((await displayControls.finishQuiz(roomId)).status, "finished");

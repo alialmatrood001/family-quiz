@@ -2822,6 +2822,12 @@ button.danger,
   color: #fff !important;
 }
 
+.answer-button.pending {
+  opacity: 0.78;
+  transform: scale(0.98);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.22);
+}
+
 .answer-button:disabled {
   opacity: 0.72;
   pointer-events: none;

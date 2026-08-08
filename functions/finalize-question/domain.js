@@ -162,9 +162,14 @@ function sortLeaderboard(items) {
   );
 }
 
+function publicPlayerDisplayName(player) {
+  return String(player?.publicDisplayName || player?.displayName || player?.name || "").trim();
+}
+
 module.exports = {
   isVisitor,
   requireAdmin,
+  publicPlayerDisplayName,
   resolveOfficialJoker,
   selectOfficialAnswers,
   sortLeaderboard,

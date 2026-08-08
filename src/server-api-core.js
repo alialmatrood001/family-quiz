@@ -98,8 +98,14 @@ export function createServerApiClient({
   fetchImpl = globalThis.fetch,
   apiBase = "",
   defaultTimeoutMs = DEFAULT_TIMEOUT_MS,
+  onTiming,
+  now = () => globalThis.performance?.now?.() ?? Date.now(),
 } = {}) {
   const selectedTransport = resolveServerTransport(transport);
+  const emitTiming = (operation, phase, startedAt, extra = {}) => {
+    if (typeof onTiming !== "function") return;
+    onTiming({ operation, phase, durationMs: Math.max(0, now() - startedAt), ...extra });
+  };
 
   async function callCallable(operation, data, fallbackMessage) {
     if (typeof callableInvoker !== "function") {
@@ -112,9 +118,10 @@ export function createServerApiClient({
     }
   }
 
-  async function vercelAttempt(operation, data, token, signal) {
+  async function vercelAttempt(operation, data, token, signal, attempt) {
     const definition = SERVER_OPERATIONS[operation];
     let response;
+    const fetchStartedAt = now();
     try {
       response = await fetchImpl(`${apiBase}/api/${definition.endpoint}`, {
         method: "POST",
@@ -127,15 +134,18 @@ export function createServerApiClient({
         cache: "no-store",
       });
     } catch (error) {
+      emitTiming(operation, "http", fetchStartedAt, { attempt, outcome: "network-error" });
       if (error?.name === "AbortError") throw error;
       throw new ServerApiError("network-error", "Unable to reach the server", { cause: error });
     }
+    emitTiming(operation, "http", fetchStartedAt, { attempt, status: response.status });
     const body = await parseJson(response);
     if (!response.ok || body?.ok !== true) throw publicFailure(body, response.status);
     return body.data;
   }
 
   async function callVercel(operation, data, { signal, timeoutMs } = {}) {
+    const totalStartedAt = now();
     const user = auth?.currentUser;
     if (!user || typeof user.getIdToken !== "function") {
       throw new ServerApiError("unauthenticated", "Authentication is required", { status: 401 });
@@ -145,13 +155,17 @@ export function createServerApiClient({
       timeoutMs || SERVER_OPERATIONS[operation].timeoutMs || defaultTimeoutMs,
     );
     try {
+      const tokenStartedAt = now();
       const token = await user.getIdToken(false);
+      emitTiming(operation, "auth-token", tokenStartedAt, { attempt: 1, forceRefresh: false });
       try {
-        return await vercelAttempt(operation, data, token, requestAbort.signal);
+        return await vercelAttempt(operation, data, token, requestAbort.signal, 1);
       } catch (error) {
         if (!(error instanceof ServerApiError) || error.status !== 401) throw error;
+        const refreshStartedAt = now();
         const refreshedToken = await user.getIdToken(true);
-        return await vercelAttempt(operation, data, refreshedToken, requestAbort.signal);
+        emitTiming(operation, "auth-token", refreshStartedAt, { attempt: 2, forceRefresh: true });
+        return await vercelAttempt(operation, data, refreshedToken, requestAbort.signal, 2);
       }
     } catch (error) {
       if (error?.name === "AbortError") {
@@ -163,6 +177,7 @@ export function createServerApiClient({
       }
       throw normalizeServerError(error);
     } finally {
+      emitTiming(operation, "total", totalStartedAt);
       requestAbort.cleanup();
     }
   }

@@ -33,9 +33,9 @@ const officialResult = {
   }],
 };
 
-function DisplayHarness({ listenerState, readResult, fallbackDelayMs = 20 }) {
+function DisplayHarness({ listenerState, readResult, fallbackDelayMs = 20, roomValue = room }) {
   return React.createElement(DisplayOfficialResultController, {
-    room,
+    room: roomValue,
     players,
     listenerState,
     readResult,
@@ -185,4 +185,56 @@ test("legacy public displayName remains visible when name is absent", () => {
   });
   assert.equal(snapshot.leaderboardAfter[0].name, "Legacy Public Name");
   assert.equal(JSON.stringify(snapshot).includes("Hidden"), false);
+});
+
+test("canonical publicDisplayName avoids N+1 reads when the public player listener is late", () => {
+  const snapshot = buildDisplaySnapshotFromOfficialResult({
+    questionId: "q1",
+    officialResult: {
+      questionId: "q1",
+      results: [{ ...officialResult.results[0], publicDisplayName: "Canonical Public Name" }],
+    },
+    players: [],
+  });
+  assert.equal(snapshot.leaderboardAfter[0].name, "Canonical Public Name");
+  assert.equal(JSON.stringify(snapshot).includes("authUid"), false);
+});
+
+test("canonical result plus the existing public players map replaces a legacy blank room name", () => {
+  const resolved = resolveDisplayResult({
+    room: {
+      ...room,
+      resultsDisplaySnapshot: {
+        questionId: "q1",
+        leaderboardBefore: [{ id: "p1", name: "", score: 50 }],
+        leaderboardAfter: [{ id: "p1", name: "", score: 150 }],
+      },
+    },
+    players,
+    officialResultState: { exists: true, result: officialResult },
+  });
+  assert.equal(resolved.source, "official-result");
+  assert.equal(resolved.snapshot.leaderboardAfter[0].name, "Player One");
+});
+
+test("the real Display controller accepts canonical data even when a legacy room snapshot already exists", async () => {
+  const legacyRoom = {
+    ...room,
+    resultsDisplaySnapshot: {
+      questionId: "q1",
+      leaderboardBefore: [{ id: "p1", name: "", score: 50 }],
+      leaderboardAfter: [{ id: "p1", name: "", score: 150 }],
+    },
+  };
+  let renderer;
+  await act(async () => {
+    renderer = TestRenderer.create(React.createElement(DisplayHarness, {
+      roomValue: legacyRoom,
+      listenerState: { questionId: "q1", loading: false, exists: true, result: officialResult },
+      readResult: async () => { throw new Error("unexpected direct read"); },
+    }));
+  });
+  assert.equal(renderer.toJSON().props["data-source"], "official-result");
+  assert.equal(renderer.toJSON().children.join(""), "Player One");
+  await act(async () => renderer.unmount());
 });

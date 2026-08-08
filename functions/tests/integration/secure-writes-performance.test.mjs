@@ -96,6 +96,13 @@ test("official secure flow handles 50 players three times and 100 players once",
     });
 
     const flowStartedAt = performance.now();
+    const jokerStartedAt = performance.now();
+    await callCallable(
+      "activateJoker",
+      { roomId, questionId: "next", playerId: playerIds[runIndex] },
+      { token: tokens[runIndex] }
+    );
+    const jokerMs = performance.now() - jokerStartedAt;
     const startStartedAt = performance.now();
     await callCallable(
       "prepareQuestion",
@@ -123,18 +130,22 @@ test("official secure flow handles 50 players three times and 100 players once",
     const answersMs = performance.now() - answersStartedAt;
     assert.equal((await ref.collection("answers").where("questionId", "==", questionId).get()).size, playerCount);
 
+    const endStartedAt = performance.now();
     await callCallable(
       "controlQuestion",
       { roomId, questionId, action: "reveal" },
       { token: adminToken }
     );
+    const endMs = performance.now() - endStartedAt;
     const finalizeStartedAt = performance.now();
     await callFinalizeQuestion({ roomId, questionId }, { timeoutMs: 60_000 });
     const finalizeMs = performance.now() - finalizeStartedAt;
     const totalMs = performance.now() - flowStartedAt;
-    metrics.push({ playerCount, run: runIndex + 1, startMs, answersMs, finalizeMs, totalMs });
+    metrics.push({ playerCount, run: runIndex + 1, jokerMs, startMs, answersMs, endMs, finalizeMs, totalMs });
+    emitMetric(`operation6.joker.${playerCount}.run${runIndex + 1}`, jokerMs);
     emitMetric(`operation6.start.${playerCount}.run${runIndex + 1}`, startMs);
     emitMetric(`operation6.answers.${playerCount}.run${runIndex + 1}`, answersMs);
+    emitMetric(`operation6.end.${playerCount}.run${runIndex + 1}`, endMs);
     emitMetric(`operation6.finalize.${playerCount}.run${runIndex + 1}`, finalizeMs);
     emitMetric(`operation6.total.${playerCount}.run${runIndex + 1}`, totalMs);
   }
