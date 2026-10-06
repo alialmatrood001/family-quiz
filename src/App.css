@@ -9217,37 +9217,13 @@ button.danger,
   border-color: #8fd1a7 !important;
   color: #12592f !important;
 }
-
-.modern-answer-card.answer-wrong {
-  background: linear-gradient(180deg, #fffafb 0%, #fff0f2 100%) !important;
-  border-color: #e8aab2 !important;
-  color: #8d2f3a !important;
-}
-
 .modern-answer-card.answer-correct::before {
   background: #2f9e55 !important;
 }
-
-.modern-answer-card.answer-wrong::before {
-  background: #d45b68 !important;
-}
-
-.modern-answer-card.answer-wrong .result-top > span,
-.modern-answer-card.answer-wrong small,
-.modern-answer-card.answer-wrong b {
-  color: #9b3541 !important;
-}
-
 .modern-answer-card.answer-correct .answer-option-letter {
   background: #d9f3e3;
   color: #116333;
 }
-
-.modern-answer-card.answer-wrong .answer-option-letter {
-  background: #ffe2e6;
-  color: #9b3541;
-}
-
 .modern-answer-card .result-top {
   grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 10px;
@@ -9295,13 +9271,6 @@ button.danger,
   color: #126333;
   border-color: #95d7ad;
 }
-
-.modern-answer-card.answer-wrong .answer-percent-box {
-  background: #ffe8eb;
-  color: #9b3541;
-  border-color: #efb5bd;
-}
-
 .modern-answer-card .bar {
   height: 8px;
   background: #edf3f6;
@@ -9317,15 +9286,6 @@ button.danger,
   background: #a9bac2;
   transition: background 0.25s ease;
 }
-
-.modern-answer-card.answer-wrong .bar {
-  background: #f7d8dd;
-}
-
-.modern-answer-card.answer-wrong .bar-fill {
-  background: #d45b68;
-}
-
 .modern-answer-card .bar-fill.is-counting {
   animation: revealBarGlow 1.05s ease both;
 }
@@ -9340,12 +9300,6 @@ button.danger,
   opacity: 1;
   transition: opacity 0.2s ease, transform 0.25s ease;
 }
-
-.modern-answer-card.answer-wrong .result-count-boxes {
-  border-color: #e69ca6;
-  background: rgba(255, 244, 246, 0.86);
-}
-
 .modern-answer-card .result-count-boxes.is-reserved {
   opacity: 0;
   transform: translateY(2px);
@@ -9361,23 +9315,6 @@ button.danger,
   color: #146436;
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.72);
 }
-
-.modern-answer-card.answer-wrong .answer-count-box,
-.modern-answer-card.answer-wrong .joker-answer-count-box {
-  background: #fff0f2;
-  border-color: #efb5bd;
-  color: #9b3541;
-}
-
-.modern-answer-card.answer-wrong .answer-count-box small,
-.modern-answer-card.answer-wrong .answer-count-box b,
-.modern-answer-card.answer-wrong .joker-answer-count-box small,
-.modern-answer-card.answer-wrong .joker-answer-count-box b,
-.modern-answer-card.answer-wrong .answer-percent-box,
-.modern-answer-card.answer-wrong .answer-percent-box .reveal-count-number {
-  color: #9b3541 !important;
-}
-
 .modern-answer-card .joker-answer-count-box {
   color: #146436;
 }
@@ -9385,12 +9322,6 @@ button.danger,
 .modern-answer-card .joker-answer-count-box.is-empty {
   color: #6e7b84;
 }
-
-.modern-answer-card.answer-wrong .joker-answer-count-box,
-.modern-answer-card.answer-wrong .joker-answer-count-box.is-empty {
-  color: #9b3541 !important;
-}
-
 .reveal-count-number {
   display: inline-block;
   min-width: 1ch;
@@ -11572,66 +11503,6 @@ button.danger,
   border-color: #c98b61 !important;
 }
 
-/* Match wrong-answer reveal styling to the correct-answer treatment, only in red. */
-.modern-answer-card.answer-wrong,
-.result-item.answer-wrong,
-.result-item.wrong-answer-result {
-  background: linear-gradient(180deg, #fffdfd 0%, #fff1f3 100%) !important;
-  border-color: #ef9fa9 !important;
-  color: #9b3541 !important;
-}
-
-.modern-answer-card.answer-wrong::before {
-  background: #d95a68 !important;
-}
-
-.modern-answer-card.answer-wrong .result-top > span,
-.modern-answer-card.answer-wrong small,
-.modern-answer-card.answer-wrong b {
-  color: #9b3541 !important;
-}
-
-.modern-answer-card.answer-wrong .answer-option-letter,
-.result-item.answer-wrong .answer-option-letter,
-.result-item.wrong-answer-result .answer-option-letter {
-  background: #ffe0e5 !important;
-  border-color: #f0aab3 !important;
-  color: #9b3541 !important;
-}
-
-.modern-answer-card.answer-wrong .result-count-boxes,
-.result-item.answer-wrong .result-count-boxes,
-.result-item.wrong-answer-result .result-count-boxes {
-  border-color: #e6a0aa !important;
-  background: rgba(255, 246, 247, 0.78) !important;
-  color: #9b3541 !important;
-}
-
-.modern-answer-card.answer-wrong .answer-count-box,
-.modern-answer-card.answer-wrong .joker-answer-count-box,
-.modern-answer-card.answer-wrong .answer-percent-box,
-.result-item.answer-wrong .answer-count-box,
-.result-item.answer-wrong .joker-answer-count-box,
-.result-item.answer-wrong .answer-percent-box,
-.result-item.wrong-answer-result .answer-count-box,
-.result-item.wrong-answer-result .joker-answer-count-box,
-.result-item.wrong-answer-result .answer-percent-box {
-  background: #ffe7eb !important;
-  border-color: #efabb4 !important;
-  color: #9b3541 !important;
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.72) !important;
-}
-
-.modern-answer-card.answer-wrong .bar {
-  background: #f9dce1 !important;
-}
-
-.modern-answer-card.answer-wrong .bar-fill,
-.result-item.answer-wrong .bar-fill,
-.result-item.wrong-answer-result .bar-fill {
-  background: #d95a68 !important;
-}
-
 .display-frame .leaderboard-row.rank-1 {
   background:
     linear-gradient(90deg, rgba(255, 246, 216, 0.92), rgba(255, 252, 243, 0.96)) !important;
@@ -13574,21 +13445,33 @@ button.danger,
 .modern-answer-card .answer-count-box,
 .modern-answer-card .joker-answer-count-box {
   display: inline-flex;
+  grid-template-rows: none;
   align-items: center;
-  gap: 5px;
+  gap: 7px;
   min-width: 0;
   min-height: 0;
-  padding: 3px 9px;
+  padding: 4px 12px;
   border-radius: 999px;
-  font-size: clamp(11px, 0.85vw, 15px);
+}
+
+.modern-answer-card .answer-count-box small,
+.modern-answer-card .joker-answer-count-box small {
+  font-size: clamp(13px, 1vw, 19px);
+  opacity: 0.85;
+}
+
+.modern-answer-card .answer-count-box b,
+.modern-answer-card .joker-answer-count-box b {
+  width: auto;
+  font-size: clamp(17px, 1.35vw, 26px);
 }
 
 .modern-answer-card .answer-percent-box {
   min-width: 0;
   height: auto;
   margin-inline-start: auto;
-  padding: 3px 10px;
-  font-size: clamp(12px, 0.95vw, 17px);
+  padding: 4px 14px;
+  font-size: clamp(16px, 1.3vw, 25px);
 }
 
 .modern-answer-card .bar {
@@ -13616,40 +13499,24 @@ button.danger,
   background: #2f9e55;
 }
 
-/* Other answers: visible but secondary (neutral, not alarming red) */
+/* Other answers: visible but secondary. Neutral colors come from the
+   .result-item.answer-wrong rules; this only adds the dimming. */
 .display-frame .modern-answer-card.answer-wrong {
-  background: linear-gradient(180deg, #fbfcfd 0%, #f1f4f6 100%) !important;
-  border-color: #d6dde2 !important;
-  box-shadow: none;
   opacity: 0.62;
   filter: saturate(0.55);
+  box-shadow: none;
 }
 
 .modern-answer-card.answer-wrong::before {
-  background: #c3ccd3 !important;
+  background: #c3ccd3;
 }
 
-.modern-answer-card.answer-wrong .answer-card-text,
-.modern-answer-card.answer-wrong small,
-.modern-answer-card.answer-wrong b {
-  color: #5d6c76 !important;
-}
-
-.modern-answer-card.answer-wrong .answer-option-letter,
-.modern-answer-card.answer-wrong .answer-count-box,
-.modern-answer-card.answer-wrong .joker-answer-count-box,
-.modern-answer-card.answer-wrong .answer-percent-box {
-  background: #e9eef1 !important;
-  border-color: #d3dbe0 !important;
-  color: #5d6c76 !important;
+.modern-answer-card.answer-wrong .answer-card-text {
+  color: #5d6c76;
 }
 
 .modern-answer-card.answer-wrong .bar {
   background: #e4e9ec;
-}
-
-.modern-answer-card.answer-wrong .bar-fill {
-  background: #a7b4bd;
 }
 
 @media (max-width: 900px) {
