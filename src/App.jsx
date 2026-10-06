@@ -2547,25 +2547,27 @@ function LiveAnswerOption({ item, showCorrect }) {
 
   return (
     <div className={resultClass}>
-      <div className="result-top">
+      <div className="answer-card-head">
         <b className="answer-option-letter">{optionLetter}</b>
-        <span>{item.option}</span>
+        <span className="answer-card-text">{item.option}</span>
+      </div>
 
-        <div
-          className={showCorrect ? "result-count-boxes" : "result-count-boxes is-reserved"}
-          aria-label="إحصائيات الإجابة"
-          aria-hidden={!showCorrect}
-        >
+      <div
+        className={showCorrect ? "answer-card-foot" : "answer-card-foot is-reserved"}
+        aria-label="إحصائيات الإجابة"
+        aria-hidden={!showCorrect}
+      >
+        <div className="result-count-boxes">
           <span className="answer-count-box"><small>إجابات</small><b><RevealCountNumber value={item.count} active={showCorrect} /></b></span>
           <span className={item.jokerCount > 0 ? "joker-answer-count-box" : "joker-answer-count-box is-empty"}><small>{"\u{1F0CF}"}</small><b><RevealCountNumber value={item.jokerCount} active={showCorrect} /></b></span>
           <span className="answer-percent-box">
             <span className="reveal-count-number is-counting">{percent}</span>%
           </span>
         </div>
-      </div>
 
-      <div className={showCorrect ? "bar" : "bar is-reserved"} aria-hidden={!showCorrect}>
-        <div className={showCorrect ? "bar-fill is-counting" : "bar-fill"} style={{ width: `${percent}%` }} />
+        <div className="bar" aria-hidden="true">
+          <div className={showCorrect ? "bar-fill is-counting" : "bar-fill"} style={{ width: `${percent}%` }} />
+        </div>
       </div>
     </div>
   );
@@ -2685,8 +2687,10 @@ function AnsweredCountBadge({ answersCount, playersCount }) {
   const allAnswered = playersCount > 0 && answersCount >= playersCount;
 
   return (
-    <div className={`answered-count-badge ${allAnswered ? "all-answered" : ""}`}>
-      <span>الإجابات</span>
+    <div
+      className={`answered-count-badge ${allAnswered ? "all-answered" : ""}`}
+      aria-label={`${answersCount} من ${playersCount} أجابوا`}
+    >
       <strong><AnimatedNumber value={answersCount} duration={650} /></strong>
       <small>من {playersCount}</small>
     </div>
